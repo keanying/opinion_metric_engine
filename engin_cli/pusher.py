@@ -42,7 +42,10 @@ import logging
 import socket
 import threading
 import time
+import http.client
+import ipaddress
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
@@ -211,16 +214,164 @@ def _reason_text(reason: Any) -> str:
     return str(reason)
 
 
+# 发往本机的请求不走任何代理。
+# Python 的 urllib 在 Windows 上会读「系统代理」（Clash / 公司代理等），代理没把 localhost
+# 排除在外时，推到 localhost 的请求会绕到代理那里卡住 —— 而 curl / Postman 默认不走这个代理，
+# 于是出现「curl 能通、engin_cli 一直超时」。本机地址走代理没有任何意义，一律直连。
+_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _is_local_host(host: Optional[str]) -> bool:
+    if not host:
+        return False
+    if host.lower() in ("localhost", "localhost.localdomain"):
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
+def proxy_for(url: str) -> Optional[str]:
+    """engin_cli 发这个地址时实际会走的代理；None = 直连。"""
+    u = urllib.parse.urlsplit(url)
+    if _is_local_host(u.hostname):
+        return None
+    proxy = urllib.request.getproxies().get(u.scheme)
+    if not proxy or urllib.request.proxy_bypass(u.hostname or ""):
+        return None
+    return proxy
+
+
+def _encode(body: Dict[str, Any]) -> bytes:
+    return json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8")
+
+
 def _post(url: str, body: Dict[str, Any], headers: Dict[str, str],
           timeout: float) -> tuple:
     """发一个 POST，返回 (status, 响应文本)。只用标准库。"""
-    raw = json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8")
-    req = urllib.request.Request(url, data=raw, method="POST")
-    req.add_header("Content-Type", "application/json; charset=utf-8")
+    req = urllib.request.Request(url, data=_encode(body), method="POST")
+    # 与 curl 示例一致：application/json（JSON 本来就是 UTF-8，不带 charset 参数）
+    req.add_header("Content-Type", "application/json")
     for k, v in (headers or {}).items():
         req.add_header(k, str(v))
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    opener = _NO_PROXY_OPENER if _is_local_host(urllib.parse.urlsplit(url).hostname) else None
+    with (opener.open(req, timeout=timeout) if opener else
+          urllib.request.urlopen(req, timeout=timeout)) as resp:
         return resp.status, resp.read().decode("utf-8", "replace")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 推送诊断：push --diagnose
+# ══════════════════════════════════════════════════════════════════════
+def _try(fn, timeout: float) -> tuple:
+    """跑一次发送，返回 (是否成功, 用时, 说明)。"""
+    t0 = time.time()
+    try:
+        status, text = fn()
+        ok = 200 <= status < 300
+        try:
+            check_response(text)
+        except BusinessError as e:
+            return False, time.time() - t0, f"HTTP {status}，但业务失败：{e}"
+        return ok, time.time() - t0, f"HTTP {status}：{(text or '').strip()[:200]}"
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")[:200] if e.fp else ""
+        return False, time.time() - t0, f"HTTP {e.code}：{body}"
+    except urllib.error.URLError as e:
+        return False, time.time() - t0, f"网络错误：{_reason_text(e.reason)}"
+    except (socket.timeout, TimeoutError):
+        return False, time.time() - t0, f"{timeout:g}s 内没有响应"
+    except OSError as e:
+        return False, time.time() - t0, f"网络错误：{_reason_text(e)}"
+
+
+def _post_to_address(url: str, addr: str, body: Dict[str, Any], headers: Dict[str, str],
+                     timeout: float, content_type: str = "application/json") -> tuple:
+    """绕过域名解析和代理，直接把同一个请求发到某个 IP（Host 头仍是原来的）。只用于 http。"""
+    u = urllib.parse.urlsplit(url)
+    conn = http.client.HTTPConnection(addr, u.port or 80, timeout=timeout)
+    try:
+        path = u.path + (f"?{u.query}" if u.query else "")
+        hdr = {"Host": u.netloc, "Content-Type": content_type, **(headers or {})}
+        conn.request("POST", path or "/", body=_encode(body), headers=hdr)
+        resp = conn.getresponse()
+        return resp.status, resp.read().decode("utf-8", "replace")
+    finally:
+        conn.close()
+
+
+def diagnose(url: str, headers: Dict[str, str], body: Dict[str, Any],
+             timeout: float = 15.0, out=print) -> Dict[str, Any]:
+    """一步步排查「curl 能通、engin_cli 推送超时」：域名解析 / 代理 / 逐个地址直连 / 报文差异。
+
+    每一步都用**同一个报文**（一般是 core 表的第一行），超时 timeout 秒。返回各步结果，供测试断言。
+    """
+    u = urllib.parse.urlsplit(url)
+    host, port = u.hostname, u.port or (443 if u.scheme == "https" else 80)
+    result: Dict[str, Any] = {"addresses": {}, "actual": None, "variant": None}
+    out(f"推送地址：{url}")
+    out(f"测试报文：{body.get('tableName')} {len(body.get('data') or [])} 行，每步超时 {timeout:g}s\n")
+
+    # 1. 域名解析
+    try:
+        addrs = list(dict.fromkeys(
+            ai[4][0] for ai in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)))
+    except OSError as e:
+        out(f"1) 域名解析：{host} 解析失败（{e}）—— 地址写错了，或者 DNS 不通")
+        return result
+    out(f"1) 域名解析：{host} → {', '.join(addrs)}")
+
+    # 2. 代理
+    sys_proxy = urllib.request.getproxies().get(u.scheme)
+    used = proxy_for(url)
+    out(f"2) 系统代理：{sys_proxy or '无'}；engin_cli 实际：{'经代理 ' + used if used else '直连'}"
+        + ("（本机地址一律直连，不走代理）" if sys_proxy and _is_local_host(host) else ""))
+
+    # 3. 逐个地址直连（http 才做；https 需要证书校验，跳过）
+    if u.scheme == "http":
+        out("3) 逐个地址直连发送（不走代理）：")
+        for a in addrs:
+            ok, el, msg = _try(lambda a=a: _post_to_address(url, a, body, headers, timeout), timeout)
+            result["addresses"][a] = ok
+            out(f"     {a:<16} {'✓' if ok else '✗'} {el:5.1f}s  {msg}")
+    else:
+        out("3) 逐个地址直连：https 地址跳过")
+
+    # 4. engin_cli 实际的发送方式
+    ok, el, msg = _try(lambda: _post(url, body, headers, timeout), timeout)
+    result["actual"] = ok
+    out(f"4) engin_cli 实际发送：{'✓' if ok else '✗'} {el:.1f}s  {msg}")
+
+    # 5. 都不通时，换成 curl 示例的写法（travel_date 用字符串）再试一次，看是不是报文的问题
+    if not ok and not any(result["addresses"].values()):
+        variant = dict(body)
+        variant["data"] = [{k: (str(v) if k == "travel_date" and v is not None else v)
+                            for k, v in row.items()} for row in body.get("data") or []]
+        ok2, el2, msg2 = _try(lambda: _post(url, variant, headers, timeout), timeout)
+        result["variant"] = ok2
+        out(f"5) travel_date 改成字符串再发：{'✓' if ok2 else '✗'} {el2:.1f}s  {msg2}")
+
+    # 结论
+    out("")
+    good = [a for a, v in result["addresses"].items() if v]
+    bad = [a for a, v in result["addresses"].items() if not v]
+    if result["actual"]:
+        out("结论：engin_cli 的发送方式能通。之前卡住若是在推到本机地址时，原因是走了系统代理，"
+            "新版本已改为本机地址直连；否则可能是对方服务偶发卡顿，重试即可。")
+    elif good and bad:
+        out(f"结论：{host} 解析出多个地址，其中 {', '.join(bad)} 没有正常响应、{', '.join(good)} 正常。"
+            f"把 push_url 里的 {host} 改成 {good[0]} 即可。")
+    elif good:
+        out("结论：直连能通、engin_cli 发送不通 —— 是代理的问题。把这个地址加进系统代理的「不使用代理」清单，"
+            "或设环境变量 NO_PROXY=" + str(host))
+    elif result["variant"]:
+        out("结论：travel_date 用字符串能通、用整数不通 —— 对方服务处理整数 travel_date 时出错卡住了，"
+            "请对方修正（建表语句里 travel_date 是 int）。")
+    else:
+        out("结论：对方服务对这个请求一直没有正常响应。用 push --preview 打印报文，和能通的 curl 报文逐项对比，"
+            "并查看对方服务的日志。")
+    return result
 
 
 _FALSY = {"false", "0", "fail", "failed", "failure", "error", "no", "n", ""}

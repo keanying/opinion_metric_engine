@@ -587,3 +587,77 @@ def test_push_from_scenic_dir_does_not_repush_the_same_scenic_from_flat_dir(tmp_
                      "--no-progress"]) == 0
     sent = sorted(r["scenic_spot_code"] for q in rec.requests for r in q["body"]["data"])
     assert sent == ["S1", "S2"]                  # S1 来自子目录，S2 来自平铺目录，各一次
+
+
+# ══════════════════════════════════════════════════════════════════
+# curl 能通、engin_cli 超时：本机地址不走系统代理；push --diagnose 能指出原因
+# ══════════════════════════════════════════════════════════════════
+@pytest.fixture
+def blackhole_proxy(silent_server, monkeypatch):
+    """系统代理指向一个只收不回的地址（模拟 Windows 上配了 Clash/公司代理，但没排除 localhost）。"""
+    url, _ = silent_server
+    monkeypatch.setenv("http_proxy", url.rsplit("/", 1)[0])
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    return url
+
+
+def test_local_push_ignores_system_proxy(server, blackhole_proxy):
+    from engin_cli.pusher import proxy_for
+    srv, rec = server
+    url = f"http://localhost:{srv.server_address[1]}/data/sync"
+    assert proxy_for(url) is None
+    st = _settings(srv, push_url=url, push_timeout=3)
+    assert push_table(CORE, _core_df(1), settings=st).ok
+    assert len(rec.requests) == 1
+
+
+def test_remote_push_still_uses_system_proxy(blackhole_proxy):
+    from engin_cli.pusher import proxy_for
+    assert proxy_for("http://data.example.com/sync") == blackhole_proxy.rsplit("/", 1)[0]
+
+
+def test_content_type_matches_curl(server):
+    srv, rec = server
+    push_table(CORE, _core_df(1), settings=_settings(srv))
+    assert rec.requests[0]["headers"]["content-type"] == "application/json"
+
+
+def test_diagnose_points_at_integer_travel_date(silent_server):
+    """服务收到整数 travel_date 就卡住、字符串才正常 → 诊断结论指向报文。"""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from engin_cli.pusher import diagnose
+
+    class _Picky(BaseHTTPRequestHandler):
+        def do_POST(self):                                    # noqa: N802
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if any(isinstance(r.get("travel_date"), int) for r in body["data"]):
+                import time
+                time.sleep(3)
+                return
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"status": true}')
+
+        def log_message(self, *a):
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Picky)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    lines = []
+    body = build_payload(CORE, _core_df(1), DEFAULT_PUSH_PK[CORE])
+    res = diagnose(f"http://127.0.0.1:{srv.server_address[1]}/sync", {}, body,
+                   timeout=1, out=lines.append)
+    srv.shutdown()
+    assert res["actual"] is False and res["variant"] is True
+    assert "travel_date 用字符串能通" in lines[-1]
+
+
+def test_diagnose_ok_path(server):
+    from engin_cli.pusher import diagnose
+    srv, _ = server
+    lines = []
+    res = diagnose(f"http://localhost:{srv.server_address[1]}/sync", {},
+                   build_payload(CORE, _core_df(1), DEFAULT_PUSH_PK[CORE]),
+                   timeout=2, out=lines.append)
+    assert res["actual"] is True and "能通" in lines[-1]
