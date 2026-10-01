@@ -1,0 +1,6 @@
+settings_local.py
+output/
+sample/
+__pycache__/
+*.pyc
+.pytest_cache/
