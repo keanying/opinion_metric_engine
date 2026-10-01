@@ -5,7 +5,7 @@
 --
 --   select * from ads_trf_social_opinion_macro_gran_metric_di
 --    where scenic_id = 'PFTSCA01002434' and travel_date = 20260917
---      and time_granularity = '近7日' and channel = 'all';
+--      and time_granularity = 'latest_7d' and channel = 'all';
 --
 -- 口径（详见 README「大盘 KPI 表」与 engin_cli/metric_calc_domain.py §1.10 / 第 10 章）：
 --   · 占比 / 环比 / 同比全部是**百分数**（× 100，6 位小数），其余四张 ADS 表是 [0,1] 比率，别混用
@@ -24,7 +24,7 @@ create table if not exists ads_trf_social_opinion_macro_gran_metric_di
     scenic_name                 varchar(255)    default ''  null comment '景区名称',
     channel                     varchar(32)                 not null comment '社媒渠道标识 ctrip|douyin|kuaishou|tongcheng|weibo|xiaohongshu|all',
     channel_name                varchar(64)     default ''  null comment '社媒渠道名称 携程|抖音|快手|同程|微博|小红书|整体',
-    time_granularity            varchar(32)                 not null comment '周期粒度 今日/近一日/近7日/本周/近30日/本月/近60日/近90日/本季度（可配置）',
+    time_granularity            varchar(32)                 not null comment '周期粒度 today今日/latest_1d近一日/latest_7d近7日/this_week本周/latest_30d近30日/this_month本月/latest_60d近60日/latest_90d近90日/this_quarter本季度（可配置）',
 
     overall_sentiment_score     decimal(10, 6)  default 0   null comment '本期游客综合情感得分 S=5×(好评率×w好+中评率×w中+差评率×w差)，权重可配，默认 1.0/0.9/0.5',
     pre_overall_sentiment_score decimal(10, 6)  default 0   null comment '上期游客综合情感得分（同一公式）',

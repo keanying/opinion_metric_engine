@@ -490,7 +490,7 @@ python -m engin_cli.cli push --tables core                         # 从 CSV 补
 ```sql
 select * from ads_trf_social_opinion_macro_gran_metric_di
  where scenic_id = 'PFTSCA01002434' and travel_date = 20260917
-   and time_granularity = '近7日' and channel = 'all';
+   and time_granularity = 'latest_7d' and channel = 'all';
 ```
 
 > ⚠ 这张表的**占比 / 环比 / 同比是百分数**（× 100，6 位小数，需求原文写法），
@@ -498,32 +498,32 @@ select * from ads_trf_social_opinion_macro_gran_metric_di
 
 #### 周期粒度（可配置，`settings.macro_granularities`，domain §1.10）
 
-| 周期 | 类型 | 本期 | 上期（环比分母） |
-|---|---|---|---|
-| 今日 | rolling 1 | travel_date 当天 | 前一天 |
-| 近一日 | rolling 1，offset 1 | travel_date 前一天（最近一个完整日） | 再前一天 |
-| 近7日 / 近30日 / 近60日 / 近90日 | rolling N | [T-N+1, T] | [T-2N+1, T-N] |
-| 本周 | week | 周一 ~ T | 上周一起的**同样几天** |
-| 本月 | month | 1 号 ~ T | 上月同样几天（上月短就截到月底） |
-| 本季度 | quarter | 季初 ~ T | 上季度同样几天 |
+| `time_granularity` | 中文名 | 类型 | 本期 | 上期（环比分母） |
+|---|---|---|---|---|
+| `today` | 今日 | rolling 1 | travel_date 当天 | 前一天 |
+| `latest_1d` | 近一日 | rolling 1，offset 1 | travel_date 前一天（最近一个完整日） | 再前一天 |
+| `latest_7d` / `latest_30d` / `latest_60d` / `latest_90d` | 近7日 / 近30日 / 近60日 / 近90日 | rolling N | [T-N+1, T] | [T-2N+1, T-N] |
+| `this_week` | 本周 | week | 周一 ~ T | 上周一起的**同样几天** |
+| `this_month` | 本月 | month | 1 号 ~ T | 上月同样几天（上月短就截到月底） |
+| `this_quarter` | 本季度 | quarter | 季初 ~ T | 上季度同样几天 |
 
 - **同比**的对比期 = 本期日期整体减一年（2026-09-01~09-17 → 2025-09-01~09-17）。
   引擎会额外按 `publish_time` 取「去年同期」那一段，不会把一年半的数据全读进来；
-  上期早于 `lookback_days` 时（如本季度的上期）也会补取。
-- 加周期：在配置里加一项，如 `{"name": "近14日", "type": "rolling", "days": 14}`，
-  还支持 `year`（本年）。`name` 原样写进 `time_granularity`。
+  上期早于 `lookback_days` 时（如 `this_quarter` 的上期）也会补取。
+- 加周期：在配置里加一项，如 `{"name": "latest_14d", "label": "近14日", "type": "rolling", "days": 14}`，
+  还支持 `year`（本年）。`name` 原样写进 `time_granularity`，`label` 只是中文名，不落表。
 
 #### 缺数回补
 
-- **近 N 日 / 今日 / 近一日**：在渠道粒度上整窗前移，规则与上限同 §9，
+- **`latest_Nd` / `today` / `latest_1d`**：在渠道粒度上整窗前移，规则与上限同 §9，
   挪几天直接复用 `windows.rolling_windows`（与 core/platform 同一个网格、日历、上限）。所以：
   ```
-  macro「近7日」某渠道 comment_total == platform.comment_cnt_7d
-  macro「今日」all 行 comment_total  == core.comment_count
+  macro latest_7d 某渠道 comment_total == platform.comment_cnt_7d
+  macro today 的 all 行 comment_total   == core.comment_count
   ```
   `tests/test_macro.py` 在触发了回补的日子上逐行对账。窗口挪了，上期跟着挪，
   该行的词云 / 维度 / 热力也取挪后的窗口 —— 同一行的数字来自同一段日期。
-- **本周 / 本月 / 本季度、以及同比**：不回补，取真实计数。
+- **`this_week` / `this_month` / `this_quarter`、以及同比**：不回补，取真实计数。
 - 回补上限按窗口天数查 §9 的表；自定义了表里没有的天数（如 15 天）就不回补。
 
 #### 字段口径

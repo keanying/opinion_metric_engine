@@ -8,7 +8,7 @@
 
 为什么不用 rolling_windows 直接滚
 --------------------------------
-这张表的周期不全是「近 N 日」：本周/本月/本季度是日历周期，上期是「上周期的同样几天」，
+这张表的周期不全是「近 N 日」：this_week / this_month / this_quarter 是日历周期，上期是「上周期的同样几天」，
 同比要去年同期 —— 都不是固定宽度的滑窗。所以这里把每个周期翻译成**日期区间**，
 再对日粒度事实做区间求和（按日期排好序，searchsorted 切片 + bincount）。
 
@@ -18,8 +18,8 @@ rolling 周期在渠道粒度上整窗前移。挪几天**不在这里另算**�
 （全引擎唯一的回补实现），在与 core/platform 相同的网格、日历、上限上拿 `shift_<N>d`，
 再把本期/上期区间一起往前挪那么多天。于是：
 
-    macro「近7日」某渠道 comment_total == platform.comment_cnt_7d
-    macro「今日」all 行 comment_total  == core.comment_count
+    macro latest_7d 某渠道 comment_total == platform.comment_cnt_7d
+    macro today 的 all 行 comment_total   == core.comment_count
 
 挪了窗口时，词云 / 维度 / 热力也取挪后的那个窗口 —— 同一行的数字来自同一段日期。
 all 行 = 各渠道（各自挪过的）区间结果相加。日历周期与同比不回补。
@@ -51,7 +51,7 @@ _CNT_KEYS = ["pos", "neu", "neg"]
 def macro_data_ranges(ctx: RunContext) -> List[Tuple[str, str]]:
     """本表需要的源数据日期段（yyyyMMdd 闭区间，已合并），含 [load_start, load_end]。
 
-    上期可能早于 load_start（如本季度的上期），同比要去年同期 —— 这两段都要额外取。
+    上期可能早于 load_start（如 this_quarter 的上期），同比要去年同期 —— 这两段都要额外取。
     rolling 周期按最大前移天数放宽，挪到上限也不会取到没抽的日期。
     """
     spans = [(pd.to_datetime(ctx.load_start, format=D.DATE_FMT),
