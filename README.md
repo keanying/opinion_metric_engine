@@ -15,7 +15,7 @@
                     ▼  builders（日粒度事实 → 多窗口滚动 → 环比/得分）
    core · platform · dimension_score · content · macro ← 列名 = 目标表 DDL
                     │
-                    ▼  validate → load（upsert / 先删后插）
+                    ▼  validate → load（按 景区 + publish_time 先删后插）
    MySQL ADS 表（+ CSV 备份）
 ```
 
@@ -577,22 +577,24 @@ macro today 的 all 行 comment_total   == core.comment_count
 
 ---
 
-## 幂等与写入策略
+## 幂等与写入策略：按「景区 + publish_time」先删除、再写入
 
-脚本查 `INFORMATION_SCHEMA` 自动判断，不写死：
+每次运行，六张表一律**先删除本次范围内的旧行，再写入新算出来的行**，不再依赖唯一索引、也不再用 upsert：
 
-| 表 | 唯一索引 | 策略 |
-|---|---|---|
-| `core_di` | ✓ (景区,日期,publish_time) | upsert |
-| `platform_di` | ✓ (景区,平台,日期,publish_time) | upsert |
-| `content_di` | ✓ (日期,景区,词) | upsert |
-| `dimension_score_di` | **✗ 只有 PRIMARY KEY(id)** | 先按 (景区,日期区间) DELETE 再 INSERT |
-| `drill_analysis_di` | ✓ `detail_uk` | upsert |
-| `macro_gran_metric_di` | ✓ (景区,日期,周期,渠道) | upsert |
+| 表 | 删除条件 |
+|---|---|
+| `core_di` / `platform_di` / `dimension_score_di` / `content_di` | `scenic_spot_code IN (本次景区) AND publish_time IN (本次日期)` |
+| `macro_gran_metric_di` | `scenic_id IN (本次景区) AND publish_time IN (本次日期)` |
+| `drill_analysis_di` | `scenic_id IN (本次景区) AND publish_time` 落在本次日期那几天内（`>= 当天 0 点 且 < 次日 0 点`） |
 
-维度表没有唯一索引，直接 upsert 等同纯 INSERT，**同一天重跑一次就多一份重复行**。
-执行 `sql/alter_dimension_uniquekey.sql` 补上唯一索引后，把
-`settings_local.ETL["dimension_upsert"] = True` 打开即可切回 upsert（更快、锁更小）。
+- **删除范围 = 本次跑的景区 × 本次跑的日期**，不是「新数据里出现过的 publish_time」。
+  重算后某天某张表没有行了（比如某个词不再出现），旧行照样删掉，不会残留；这次某张表一行都没算出来也会执行删除。
+- 下钻表的 `publish_time` 是**评论自己的发布时间**（datetime），按值相等删只能删到时间一模一样的行，
+  所以按「落在那一天内」删。其余五张表的 `publish_time` 是 `yyyyMMdd` 字符串，与日期一一对应。
+- **删除和写入在同一个事务里**（`db.replace_rows`）：写入失败整体回滚，不会出现「旧数据删了、新数据没写进去」的空窗。
+- 景区 = 命令行 `--scenic` 指定的；不指定时 `run` 本来就是逐个景区跑，每次只删当前景区。
+- `settings.dimension_upsert` 与 `sql/alter_dimension_uniquekey.sql` 已不再需要（执行过也没有影响）。
+- 只影响写库；推送仍按 pkId 由下游 upsert，不受影响。
 
 `publish_time` 默认写 `yyyyMMdd`，与现有数据保持一致 —— 它进了三张表的唯一索引，
 格式一变就会跟历史数据产生重复行。要按 DDL 注释改成 `YYYY-MM-DD HH:mm:ss`，
