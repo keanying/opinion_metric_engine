@@ -1,0 +1,38 @@
+[
+  {
+    "dimension1": "游玩体验",
+    "dimension1Score": 4.884342,
+    "preDimension1": "游玩体验",
+    "preDimension1Score": 4.890873
+  },
+  {
+    "dimension1": "服务质量",
+    "dimension1Score": 5.0,
+    "preDimension1": "服务质量",
+    "preDimension1Score": 4.444444
+  },
+  {
+    "dimension1": "餐饮购物",
+    "dimension1Score": 4.772727,
+    "preDimension1": "餐饮购物",
+    "preDimension1Score": 5.0
+  },
+  {
+    "dimension1": "设施环境",
+    "dimension1Score": 4.744898,
+    "preDimension1": "设施环境",
+    "preDimension1Score": 4.648649
+  },
+  {
+    "dimension1": "安全秩序",
+    "dimension1Score": 4.166667,
+    "preDimension1": "安全秩序",
+    "preDimension1Score": 4.166667
+  },
+  {
+    "dimension1": "交通接驳",
+    "dimension1Score": 3.869048,
+    "preDimension1": "交通接驳",
+    "preDimension1Score": 4.274194
+  }
+]
