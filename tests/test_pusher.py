@@ -72,9 +72,10 @@ def _settings(srv, **kw):
 
 
 def _core_df(n=3):
+    # 每行一天：core 表的 pkId（景区 + 日期 + publish_time）必须唯一，否则推送前校验会拒发
     return pd.DataFrame([{
         "scenic_spot_code": "S1", "scenic_spot_name": "景区1",
-        "travel_date": 20260911, "publish_time": "20260911",
+        "travel_date": 20260901 + i, "publish_time": str(20260901 + i),
         "comment_count": 10 + i, "positive_count": 5,
         "emotional_score": 4.5,
     } for i in range(n)])
@@ -661,3 +662,50 @@ def test_diagnose_ok_path(server):
                    build_payload(CORE, _core_df(1), DEFAULT_PUSH_PK[CORE]),
                    timeout=2, out=lines.append)
     assert res["actual"] is True and "能通" in lines[-1]
+
+
+# ══════════════════════════════════════════════════════════════════
+# 发送前校验 pkId：下游按 pkId 先查再更新，重复的行会互相覆盖，所以一行都不发
+# ══════════════════════════════════════════════════════════════════
+PLATFORM = "ads_trf_social_opinion_comment_platform_di"
+
+
+def _platform_df():
+    return pd.DataFrame([{"scenic_spot_code": "S1", "travel_date": 20260909,
+                          "publish_time": "20260909", "platform_code": ch, "comment_cnt": i}
+                         for i, ch in enumerate(["douyin", "weibo", "ctrip"])])
+
+
+def test_duplicate_pk_is_refused_before_sending(server):
+    srv, rec = server
+    st = _settings(srv, push_pk={PLATFORM: ["scenic_spot_code", "publish_time", "travel_date"]})
+    res = push_table(PLATFORM, _platform_df(), settings=st)
+    assert not res.ok and rec.requests == []
+    assert "不能唯一定位一行" in res.error and "丢掉 2 行" in res.error
+    assert "platform_code" in res.error                     # 给出默认 pkId 作为建议
+
+
+def test_default_pk_passes(server):
+    srv, rec = server
+    assert push_table(PLATFORM, _platform_df(), settings=_settings(srv)).ok
+    assert len(rec.requests) == 1
+
+
+def test_null_pk_is_refused_but_empty_string_is_fine(server):
+    srv, rec = server
+    dim = "ads_trf_social_opinion_comment_dimension_score_di"
+    df = pd.DataFrame([{"scenic_spot_code": "S1", "travel_date": 20260909,
+                        "dimension_level1": "游玩体验", "dimension_level2": "排队时长",
+                        "dimension_level3": ""}])
+    assert push_table(dim, df, settings=_settings(srv)).ok      # 空串是合法取值
+    df.loc[0, "dimension_level3"] = None
+    res = push_table(dim, df, settings=_settings(srv))
+    assert not res.ok and "为空" in res.error
+
+
+def test_one_bad_table_does_not_block_the_others(server):
+    srv, rec = server
+    st = _settings(srv, push_pk={PLATFORM: ["scenic_spot_code", "publish_time", "travel_date"]})
+    rep = push_all({PLATFORM: _platform_df(), CORE: _core_df(1)}, settings=st)
+    bad, good = rep.results
+    assert not bad.ok and good.ok and len(rec.requests) == 1
