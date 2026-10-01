@@ -1,4 +1,4 @@
-settings_local.py
+#settings_local.py
 output/
 sample/
 __pycache__/
