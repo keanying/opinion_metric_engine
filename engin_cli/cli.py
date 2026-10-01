@@ -129,8 +129,10 @@ def cmd_run(args) -> int:
         st.lookback_days = int(args.lookback_days)
     if args.output_dir:
         st.output_dir = args.output_dir
-    st.write_db = not args.skip_db
-    st.write_csv = not args.skip_csv
+    # 命令行只能「关掉」写库/写 CSV，不能把配置里关掉的重新打开：
+    # settings_local.py 里写了 "write_db": False（只算 + 推送、不写表），就一直不写表。
+    st.write_db = bool(st.write_db) and not args.skip_db
+    st.write_csv = bool(st.write_csv) and not args.skip_csv
     st.dry_run = bool(args.dry_run)
     if args.no_backfill:
         st.backfill_mode = "off"
@@ -237,8 +239,8 @@ def _run_one_scenic(st, scenic: str, dates: List[str], db, comments_df, works_df
         if any(r.unreachable for r in res.push.results):
             # 地址连不上，后面的景区推也是白等：只算、只落库，事后用 push 补推
             st.push_enabled = False
-            push_note = "推送 ✗（地址连不上，后面的景区不再推送，修好地址后用 push 补推）"
-            print(f"  ✗ 推送地址连不上：{st.push_url}，后面的景区只计算、落库，不再推送")
+            push_note = "推送 ✗（地址连不上或没有响应，后面的景区不再推送，修好后用 push 补推）"
+            print(f"  ✗ 推送地址连不上或没有响应：{st.push_url}，后面的景区只计算、落库，不再推送")
     if res.errors:
         for e in res.errors:
             print(f"  ✗ {e}")
@@ -466,6 +468,10 @@ def _push_sources(base: str, scenics: Optional[List[str]]) -> List[tuple]:
 
     新布局：<output_dir>/<景区>/<表>.csv（run 按景区写）。
     兼容老布局：<output_dir>/<表>.csv（老版本 run 平铺写），按景区列过滤。
+
+    **同一个景区只推一份**：景区自己的子目录优先；平铺目录只用来补「没有子目录的景区」，
+    否则新老两份 CSV 都在时，同一个景区会被推两遍（还可能是新旧两版数据）。
+    返回 [(景区或 None, 目录, 平铺目录里要排除的景区集合)]
     """
     known = set(TABLE_ALIAS.values())
 
@@ -477,9 +483,11 @@ def _push_sources(base: str, scenics: Optional[List[str]]) -> List[tuple]:
         subs = sorted(d for d in os.listdir(base) if _has_tables(os.path.join(base, d)))
         for sc in subs:
             if scenics is None or sc in scenics:
-                out.append((sc, os.path.join(base, sc)))
+                out.append((sc, os.path.join(base, sc), set()))
         if _has_tables(base):
-            out.append((None, base))
+            # 指定的景区都已经有子目录了，就不再看平铺目录
+            if scenics is None or not set(scenics) <= set(subs):
+                out.append((None, base, set(subs)))
     return out
 
 
@@ -518,7 +526,7 @@ def cmd_push(args) -> int:
 
     sources = _push_sources(base, scenics)
     batches = []                         # [(景区, {表: df})]
-    for sc, d in sources:
+    for sc, d, skip in sources:
         tables = {}
         for name in names:
             path = os.path.join(d, f"{name}.csv")
@@ -528,6 +536,8 @@ def cmd_push(args) -> int:
             key = scenic_key(name)
             if scenics is not None and key in df.columns:
                 df = df[df[key].isin(scenics)]
+            if skip and key in df.columns:
+                df = df[~df[key].isin(skip)]          # 已经从景区子目录推过的，平铺目录里不再推
             if date_set is not None and "travel_date" in df.columns:
                 df = df[df["travel_date"].isin(date_set)]
             if not df.empty:
@@ -579,9 +589,12 @@ def cmd_push(args) -> int:
                       + ("" if r.ok else f"  ✗ {r.error}"))
         failed += [f"{sc} · {e}" for e in rep.errors]
         if any(r.unreachable for r in rep.results):
-            print(f"\n✗ 推送地址连不上：{st.push_url}\n"
-                  "  请确认地址是否正确（settings_local.py 的 push_url / 环境变量 OPINION_PUSH_URL），"
-                  "以及对方服务是否已启动。后面的景区不再推送。")
+            print(f"\n✗ 推送地址连不上或没有响应：{st.push_url}\n"
+                  "  · 连不上：确认地址是否正确（settings_local.py 的 push_url / 环境变量 OPINION_PUSH_URL），"
+                  "以及对方服务是否已启动\n"
+                  f"  · 没有响应（超时）：对方服务连得上但卡住了，请查看对方服务的日志；"
+                  f"也可以调小 push_timeout（当前 {st.push_timeout:g}s）让它更快放弃\n"
+                  "  后面的景区不再推送。")
             return 1
     if failed:
         print("\n推送未全部成功：")
@@ -603,7 +616,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--scenic", help="景区编码，逗号分隔；不填或 all = 全部景区，逐个跑、逐个推")
     r.add_argument("--lookback-days", type=int, help="取数回溯天数，默认 180（近半年）")
     r.add_argument("--output-dir", help="CSV 输出目录")
-    r.add_argument("--skip-db", action="store_true", help="不写库")
+    r.add_argument("--skip-db", action="store_true",
+                   help="不写 ADS 表（照常从源表读数、计算、推送）；配置里 write_db=False 效果相同")
     r.add_argument("--skip-csv", action="store_true", help="不出 CSV")
     r.add_argument("--dry-run", action="store_true", help="连库但不真正写入")
     r.add_argument("--no-backfill", action="store_true",

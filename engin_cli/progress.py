@@ -46,6 +46,8 @@ class PushProgress:
         self._last_draw = 0.0
         self._last_decile = 0
         self._last_len = 0      # 上一次画的行宽，用空格覆盖掉旧内容（不用 ANSI 控制符，旧版 Windows 控制台不认）
+        self._wait_note = ""    # 正在等对方响应时的读秒，显示在进度条末尾
+        self._last_wait_line = 0.0
 
     # ---- pusher 回调 ----
     def start(self) -> None:
@@ -54,7 +56,22 @@ class PushProgress:
         else:
             self._line(f"  推送 {self.label}：{self.total_rows:,} 行，{self.total} 批 …")
 
+    def waiting(self, batch_no: int, attempt: int, secs: float, timeout: float) -> None:
+        """请求已发出、还在等对方响应（每秒回调一次）。
+
+        终端里在进度条末尾读秒；日志文件里每 30 秒打一行，证明程序还活着、是在等对方。
+        """
+        tag = f"（第 {attempt} 次）" if attempt > 1 else ""
+        self._wait_note = f"  第 {batch_no} 批等待响应 {secs:.0f}s/{timeout:g}s{tag}"
+        if self.tty:
+            self._draw(force=True)
+        elif secs - self._last_wait_line >= 30 or secs < self._last_wait_line:
+            self._last_wait_line = secs
+            self._line(f"    第 {batch_no} 批已等待 {secs:.0f}s，对方还没有响应（超时 {timeout:g}s）{tag}")
+
     def batch_done(self, rows: int, ok: bool) -> None:
+        self._wait_note = ""
+        self._last_wait_line = 0.0
         self.done += 1
         if ok:
             self.rows += int(rows)
@@ -70,9 +87,12 @@ class PushProgress:
 
     def retry(self, batch_no: int, attempt: int, retries: int, reason: str,
               wait: float) -> None:
+        self._wait_note = ""
+        self._last_wait_line = 0.0
         self._event(f"    第 {batch_no} 批失败：{reason}；{wait:g}s 后第 {attempt}/{retries} 次重试")
 
     def batch_failed(self, batch_no: int, reason: str) -> None:
+        self._wait_note = ""
         self._event(f"    ✗ 第 {batch_no} 批放弃：{reason}")
 
     def finish(self, note: str = "") -> None:
@@ -95,7 +115,7 @@ class PushProgress:
             s += f" 剩余约 {el / self.done * (self.total - self.done):.0f}s"
         if self.failed:
             s += f"  失败 {self.failed} 批"
-        return s
+        return s + self._wait_note
 
     def _draw(self, force: bool = False) -> None:
         now = time.time()
