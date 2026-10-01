@@ -12,17 +12,20 @@
 同比要去年同期 —— 都不是固定宽度的滑窗。所以这里把每个周期翻译成**日期区间**，
 再对日粒度事实做区间求和（按日期排好序，searchsorted 切片 + bincount）。
 
-缺数回补（domain §1.10，与 core/platform 一致）
----------------------------------------------
-rolling 周期在渠道粒度上整窗前移。挪几天**不在这里另算**：直接调 windows.rolling_windows
-（全引擎唯一的回补实现），在与 core/platform 相同的网格、日历、上限上拿 `shift_<N>d`，
-再把本期/上期区间一起往前挪那么多天。于是：
+缺数回补（domain §1.10：所有指标都在补齐数据之后再算）
+------------------------------------------------------
+每个渠道的本期、上期、去年同期三个窗口**各自**检查：窗口里没数据就整体往前挪，
+挪到有数据为止，挪满上限仍没有才取 0。
+
+rolling 周期本期挪几天**不在这里另算**：直接调 windows.rolling_windows（全引擎唯一的
+回补实现），在与 core/platform 相同的网格、日历、上限上拿 `shift_<N>d`。于是：
 
     macro latest_7d 某渠道 comment_total == platform.comment_cnt_7d
     macro today 的 all 行 comment_total   == core.comment_count
 
-挪了窗口时，词云 / 维度 / 热力也取挪后的那个窗口 —— 同一行的数字来自同一段日期。
-all 行 = 各渠道（各自挪过的）区间结果相加。日历周期与同比不回补。
+日历周期（本周/本月/本季度）的本期、以及所有周期的上期 / 去年同期，在这里按同样的规则
+一天一天往前试（_first_with_data）。挪了窗口时，词云 / 维度 / 热力也取挪后的那个窗口 ——
+同一行的数字来自同一段日期。all 行 = 各渠道（各自补齐后的）区间结果相加。
 """
 
 from __future__ import annotations
@@ -57,12 +60,11 @@ def macro_data_ranges(ctx: RunContext) -> List[Tuple[str, str]]:
     spans = [(pd.to_datetime(ctx.load_start, format=D.DATE_FMT),
               pd.to_datetime(ctx.load_end, format=D.DATE_FMT))]
     for spec in ctx.macro_granularities:
-        lb = 0
-        if spec["type"] == D.MACRO_PERIOD_ROLLING:
-            lb = ctx.backfill_lookback([spec["days"]]).get(spec["days"], 0)
+        lb = _lookback(ctx, spec)
         for t in ctx.output_dates:
-            near = D.macro_period_ranges(spec, t, shift=0)
-            far = D.macro_period_ranges(spec, t, shift=lb)
+            near = D.macro_period_ranges(spec, t)
+            # 本期挪满上限、上期 / 去年同期再各自挪满上限 —— 能用到的最早日期
+            far = D.macro_period_ranges(spec, t, shift=lb, prev_shift=lb, yoy_shift=lb)
             spans.append((min(far["prev"][0], far["cur"][0]), near["cur"][1]))
             spans.append((far["yoy"][0], near["yoy"][1]))
     spans.sort()
@@ -73,6 +75,12 @@ def macro_data_ranges(ctx: RunContext) -> List[Tuple[str, str]]:
         else:
             merged.append([lo, hi])
     return [(lo.strftime(D.DATE_FMT), hi.strftime(D.DATE_FMT)) for lo, hi in merged]
+
+
+def _lookback(ctx: RunContext, spec: dict) -> int:
+    """这个周期的最大前移天数（domain §1.10：按 macro_backfill_window 查 §1.8 的上限表）。"""
+    w = D.macro_backfill_window(spec)
+    return int(ctx.backfill_lookback([w]).get(w, 0))
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -88,6 +96,7 @@ class _RangeSum:
     def __init__(self, df: pd.DataFrame, cat_col: str, ncat: int):
         self.ncat = int(ncat)
         self.groups: Dict[tuple, tuple] = {}
+        self.cum: Dict[tuple, np.ndarray] = {}
         if df.empty:
             return
         df = df.sort_values(["scenic_spot_code", "platform_code", "_day"])
@@ -95,6 +104,17 @@ class _RangeSum:
             self.groups[key] = (g["_day"].to_numpy(dtype="int64"),
                                 g[cat_col].to_numpy(dtype="int64"),
                                 g["_n"].to_numpy(dtype="float64"))
+            self.cum[key] = np.concatenate([[0.0], np.cumsum(self.groups[key][2])])
+
+    def total(self, scenic: str, ch: str, lo: int, hi: int) -> float:
+        """某渠道 [lo, hi] 里的计数合计（不分类别）。判断「窗口有没有数据」用，前缀和 O(log n)。"""
+        g = self.groups.get((scenic, ch))
+        if g is None:
+            return 0.0
+        a = np.searchsorted(g[0], lo, side="left")
+        b = np.searchsorted(g[0], hi, side="right")
+        c = self.cum[(scenic, ch)]
+        return float(c[b] - c[a])
 
     def sum(self, scenic: str, parts: Sequence[tuple]) -> np.ndarray:
         out = np.zeros(self.ncat, dtype="float64")
@@ -253,12 +273,32 @@ def build_macro(comment_facts: pd.DataFrame, dim_facts: pd.DataFrame,
 
     range_cache: Dict[tuple, dict] = {}
 
-    def _ranges(spec_i: int, t: str, s: int) -> dict:
-        key = (spec_i, t, s)
+    def _ranges(spec_i: int, t: str, s: int = 0, p: int = 0, y: int = 0) -> dict:
+        key = (spec_i, t, s, p, y)
         if key not in range_cache:
-            r = D.macro_period_ranges(specs[spec_i], t, shift=s)
+            r = D.macro_period_ranges(specs[spec_i], t, shift=s, prev_shift=p, yoy_shift=y)
             range_cache[key] = {k: (_day(lo), _day(hi)) for k, (lo, hi) in r.items()}
         return range_cache[key]
+
+    def _first_with_data(sc: str, ch: str, lookback: int, window) -> int:
+        """整窗前移（domain §1.8）：k = 0, 1, … lookback 逐个试，返回第一个有数据的 k；
+        挪满上限还没有 → 0（留在原位，值为 0）。window(k) → (起, 止) 日序号。"""
+        for k in range(lookback + 1):
+            lo, hi = window(k)
+            if comments.total(sc, ch, lo, hi) > 0:
+                return k
+        return 0
+
+    lookbacks = [_lookback(ctx, spec) for spec in specs]
+    # 回补可见化：{(周期, 窗口): [挪了几行, 总行数, 最多挪几天]}
+    moved: Dict[tuple, list] = {}
+
+    def _note(spec_name: str, which: str, k: int) -> None:
+        m = moved.setdefault((spec_name, which), [0, 0, 0])
+        m[1] += 1
+        if k:
+            m[0] += 1
+            m[2] = max(m[2], k)
 
     rows: List[dict] = []
     for sc, dates in emit.items():
@@ -268,10 +308,21 @@ def build_macro(comment_facts: pd.DataFrame, dim_facts: pd.DataFrame,
                 if spec["type"] == D.MACRO_PERIOD_ROLLING:
                     anchor = (pd.to_datetime(t, format=D.DATE_FMT)
                               - pd.Timedelta(days=spec["offset"])).strftime(D.DATE_FMT)
+                lb = lookbacks[si]
                 per_ch = {}
                 for ch in codes:
-                    s = shifts.get((sc, ch, anchor, spec["days"]), 0) if anchor else 0
-                    r = _ranges(si, t, s)
+                    # 本期：rolling 用 rolling_windows 算好的（与 core/platform 同源），日历周期自己找
+                    if anchor:
+                        s = shifts.get((sc, ch, anchor, spec["days"]), 0)
+                    else:
+                        s = _first_with_data(sc, ch, lb, lambda k: _ranges(si, t, k)["cur"])
+                    # 上期 / 去年同期：各自没数据就再往前挪
+                    p = _first_with_data(sc, ch, lb, lambda k: _ranges(si, t, s, p=k)["prev"])
+                    y = _first_with_data(sc, ch, lb, lambda k: _ranges(si, t, s, y=k)["yoy"])
+                    _note(spec["name"], "本期", s)
+                    _note(spec["name"], "上期", p)
+                    _note(spec["name"], "去年同期", y)
+                    r = _ranges(si, t, s, p, y)
                     part = {k: [(ch, lo, hi)] for k, (lo, hi) in r.items()}
                     per_ch[ch] = {
                         "cur": comments.sum(sc, part["cur"]),
@@ -302,6 +353,11 @@ def build_macro(comment_facts: pd.DataFrame, dim_facts: pd.DataFrame,
                         w_words, w_sents, agg["words"], top_n=top_n)
                     row["period_comment_heatmap"] = D.macro_heatmap(regions, agg["regions"])
                     rows.append(row)
+
+    hit = [f"{name} {which} {n:,}/{tot:,} 行(最多前移 {mx} 天)"
+           for (name, which), (n, tot, mx) in moved.items() if n]
+    if hit:
+        ctx.warn("macro 各周期回补（本期/上期/去年同期）：" + "，".join(hit))
 
     df = pd.DataFrame(rows)
     out = D.macro_metrics(df, formula=formula, weights=weights)

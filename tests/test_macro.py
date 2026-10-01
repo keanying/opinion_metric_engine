@@ -178,8 +178,9 @@ def test_fetch_ranges_cover_previous_periods_and_last_year():
     # 去年同期：近90日最多前移 60 天 → 最早到 2025-04-21
     assert ranges[0][0] <= "20250421"
     assert any(lo <= "20250917" <= hi for lo, hi in ranges)
-    # 去年同期与今年之间那段（2025-10 ~ 2026-02）不需要，不该整段多取
-    assert not any(lo <= "20251201" <= hi for lo, hi in ranges)
+    # 去年同期（到 2025-09-17）与今年上期最早可能用到的日期（本季度上期挪满上限，约 2025-12）
+    # 之间那段不需要，不该整段多取
+    assert not any(lo <= "20251101" <= hi for lo, hi in ranges)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -420,3 +421,83 @@ def test_drill_has_region_and_entity_tags(result):
     parsed = drill.entity_tags.map(json.loads)
     assert parsed.map(lambda v: isinstance(v, list)).all()
     assert parsed.map(len).gt(0).any()
+
+
+# ══════════════════════════════════════════════════════════════════
+# 所有指标都在补齐数据之后再算（业务确认）：日历周期、上期、去年同期都要整窗前移
+# ══════════════════════════════════════════════════════════════════
+GAP_SCENIC = "PFTSCA01002434"
+
+
+@pytest.fixture(scope="module")
+def gap_comments(sample):
+    """造缺数：同程 2026-09-14 起一条都没有；抖音 2025-09-14~09-17（去年同期）一条都没有。"""
+    c = sample[0].copy()
+    d = pd.to_datetime(c.publish_time, errors="coerce").dt.strftime("%Y%m%d")
+    drop = ((c.scenic_id == GAP_SCENIC) & (c.channel == "tongcheng") & (d >= "20260914"))
+    drop |= ((c.scenic_id == GAP_SCENIC) & (c.channel == "douyin")
+             & d.between("20250914", "20250917"))
+    return c[~drop]
+
+
+@pytest.fixture(scope="module")
+def gap_macro(gap_comments, sample):
+    res = run(_settings(enable_drill_analysis=False), [END], comments_df=gap_comments,
+              works_df=sample[1])
+    assert res.ok, res.errors
+    return res.tables[MACRO], build_comment_facts(gap_comments)
+
+
+def test_calendar_period_is_backfilled_not_zero(gap_macro):
+    """本周（9/14 周一 ~ 9/17）同程一条都没有 → 4 天的窗口整体往前挪到有数据为止。
+
+    挪 1 天是 9/13~9/16，里面 9/13 有数据，就停在这里（挪到有数据为止，不是挪到整窗都有数据）。
+    """
+    macro, cf = gap_macro
+    r = _row(macro, GAP_SCENIC, END, "this_week", "tongcheng")
+    assert r.comment_total > 0
+    want = _count(cf, GAP_SCENIC, "20260913", "20260916", "tongcheng")
+    assert (r.positive_comment_cnt, r.neutral_comment_cnt, r.negative_comment_cnt) == want
+    # 上期跟着挪 1 天：9/6~9/9
+    prev = _count(cf, GAP_SCENIC, "20260906", "20260909", "tongcheng")
+    assert r.comment_total_mom == pytest.approx(float(D.pct_growth(sum(want), sum(prev))), abs=1e-6)
+
+
+def test_year_ago_window_is_backfilled_independently(gap_macro):
+    """抖音去年 9/14~9/17 没数据 → 去年同期独立往前挪，同比不再是 0 / -100。"""
+    macro, cf = gap_macro
+    r = _row(macro, GAP_SCENIC, END, "this_week", "douyin")
+    cur = _count(cf, GAP_SCENIC, "20260914", END, "douyin")
+    yoy = _count(cf, GAP_SCENIC, "20250913", "20250916", "douyin")    # 挪 1 天就碰到 9/13 的数据
+    assert sum(yoy) > 0
+    assert r.comment_total_yoy == pytest.approx(float(D.pct_growth(sum(cur), sum(yoy))), abs=1e-6)
+
+
+def test_previous_window_is_backfilled_independently(gap_comments, sample):
+    """本期有数据、上期没数据 → 上期独立往前挪，环比不因上期缺数而变成 0。"""
+    c = gap_comments
+    d = pd.to_datetime(c.publish_time, errors="coerce").dt.strftime("%Y%m%d")
+    # 抖音去掉 8/1~8/17（本月的上期）
+    c = c[~((c.scenic_id == GAP_SCENIC) & (c.channel == "douyin") & d.between("20260801", "20260817"))]
+    res = run(_settings(enable_drill_analysis=False), [END], comments_df=c, works_df=sample[1])
+    assert res.ok, res.errors
+    r = _row(res.tables[MACRO], GAP_SCENIC, END, "this_month", "douyin")
+    cf = build_comment_facts(c)
+    cur = _count(cf, GAP_SCENIC, "20260901", END, "douyin")
+    prev = _count(cf, GAP_SCENIC, "20260731", "20260816", "douyin")    # 上期挪 1 天
+    assert sum(prev) > 0
+    assert r.comment_total_mom == pytest.approx(float(D.pct_growth(sum(cur), sum(prev))), abs=1e-6)
+
+
+def test_backfill_off_keeps_raw_counts(gap_comments, sample):
+    res = run(_settings(enable_drill_analysis=False, backfill_mode="off"), [END],
+              comments_df=gap_comments, works_df=sample[1])
+    r = _row(res.tables[MACRO], GAP_SCENIC, END, "this_week", "tongcheng")
+    assert r.comment_total == 0
+
+
+def test_backfill_report_mentions_calendar_periods(gap_comments, sample):
+    res = run(_settings(enable_drill_analysis=False), [END], comments_df=gap_comments,
+              works_df=sample[1])
+    note = next(n for n in res.notes if n.startswith("macro 各周期回补"))
+    assert "this_week 本期" in note and "去年同期" in note

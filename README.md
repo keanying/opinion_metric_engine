@@ -513,18 +513,40 @@ select * from ads_trf_social_opinion_macro_gran_metric_di
 - 加周期：在配置里加一项，如 `{"name": "latest_14d", "label": "近14日", "type": "rolling", "days": 14}`，
   还支持 `year`（本年）。`name` 原样写进 `time_granularity`，`label` 只是中文名，不落表。
 
-#### 缺数回补
+#### 缺数回补：所有指标都在补齐数据之后再算
 
-- **`latest_Nd` / `today` / `latest_1d`**：在渠道粒度上整窗前移，规则与上限同 §9，
-  挪几天直接复用 `windows.rolling_windows`（与 core/platform 同一个网格、日历、上限）。所以：
-  ```
-  macro latest_7d 某渠道 comment_total == platform.comment_cnt_7d
-  macro today 的 all 行 comment_total   == core.comment_count
-  ```
-  `tests/test_macro.py` 在触发了回补的日子上逐行对账。窗口挪了，上期跟着挪，
-  该行的词云 / 维度 / 热力也取挪后的窗口 —— 同一行的数字来自同一段日期。
-- **`this_week` / `this_month` / `this_quarter`、以及同比**：不回补，取真实计数。
-- 回补上限按窗口天数查 §9 的表；自定义了表里没有的天数（如 15 天）就不回补。
+业务口径：**不能有指标因为当期没数据而没有值**。规则同 §9（整窗前移，挪到有数据为止，
+用那一个窗口的值，不是累计；挪满上限仍没有才取 0），在**渠道粒度**上做，all 行 = 各渠道补齐后相加。
+每个渠道的三个窗口**各自**检查、各自补：
+
+| 窗口 | 怎么补 |
+|---|---|
+| 本期 | 没数据 → 整体往前挪 s 天。近 N 日的 s 直接复用 `windows.rolling_windows`（与 core/platform 同一个网格、日历、上限）；本周/本月/本季度同样前移，窗口长度 = 本期已过的天数（周三的 `this_week` 是 3 天的窗口） |
+| 上期 | 先跟着本期挪 s 天；挪完还没数据 → 再独立往前挪 |
+| 去年同期 | = 实际使用的本期窗口减一年；没数据 → 再独立往前挪 |
+
+最大前移天数按窗口档位查 §9 的表（`backfill_lookback` 改了也跟着生效）：
+
+| 周期 | 借用的档位 | 默认最多前移 |
+|---|---|---|
+| `today` / `latest_1d` | 1 日 | 5 天 |
+| `latest_7d` / `this_week` | 7 日 | 10 天 |
+| `latest_30d` / `this_month` | 30 日 | 20 天 |
+| `latest_60d` | 60 日 | 30 天 |
+| `latest_90d` / `this_quarter` | 90 日 | 60 天 |
+
+所以近 N 日的本期计数与 core/platform 逐行对得上（`tests/test_macro.py` 在触发了回补的日子上对账）：
+```
+macro latest_7d 某渠道 comment_total == platform.comment_cnt_7d
+macro today 的 all 行 comment_total   == core.comment_count
+```
+环比不一定和 core/platform 的环比字段相同 —— 那两张表的上期只跟着本期挪，不独立回补。
+
+窗口挪了，该行的词云 / 维度 / 热力也取挪后的窗口 —— 同一行的数字来自同一段日期。
+跑批报告会列出每个周期本期 / 上期 / 去年同期各挪了多少行、最多挪了几天。
+
+> 源表如果只保留了半年，去年同期根本没有数据，挪到上限也补不出来，同比仍是 0。
+> 自定义的近 N 日如果 N 不在 §9 的表里（如 `latest_15d`），又没在 `backfill_lookback` 里配上限，就不回补。
 
 #### 字段口径
 
