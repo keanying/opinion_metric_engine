@@ -504,3 +504,86 @@ def test_progress_bar_in_a_terminal_redraws_in_place(server):
     assert text.count("\n") == 1                            # 只在结束时换一次行
     assert "\r" in text and "4/4 批 100.0%" in text
     assert "\033" not in text                               # 不用 ANSI 控制符，旧版 Windows 控制台不认
+
+
+# ══════════════════════════════════════════════════════════════════
+# 对方连得上但一直不响应：超时只重试 1 次，然后停止整次推送；等待期间进度条读秒
+# ══════════════════════════════════════════════════════════════════
+@pytest.fixture
+def silent_server():
+    """接受连接但永远不回的服务（模拟卡住的下游）。"""
+    import socket
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(50)
+    conns = []
+    stop = threading.Event()
+
+    def _accept():
+        srv.settimeout(0.2)
+        while not stop.is_set():
+            try:
+                conns.append(srv.accept()[0])
+            except OSError:
+                pass
+
+    threading.Thread(target=_accept, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.getsockname()[1]}/sync", conns
+    stop.set()
+    for c in conns:
+        c.close()
+    srv.close()
+
+
+def test_unresponsive_server_stops_after_one_timeout_retry(silent_server):
+    import time
+    url, conns = silent_server
+    st = EtlSettings()
+    st.push_enabled, st.push_url = True, url
+    st.push_timeout, st.push_retries, st.push_retry_backoff = 1, 3, 0.01
+    st.push_batch_size = 1
+    t0 = time.time()
+    rep = push_all({CORE: _core_df(20), "ads_trf_social_opinion_comment_platform_di": _core_df(2)},
+                   settings=st)
+    assert time.time() - t0 < 6, "超时只重试 1 次，不能按 push_retries 重试到底、更不能 20 批挨个等"
+    first, second = rep.results
+    assert first.unreachable and "没有响应" in first.error
+    assert len(conns) == 2                       # 第 1 次 + 重试 1 次
+    assert second.skipped and "未推送" in second.error
+
+
+def test_progress_bar_counts_seconds_while_waiting(silent_server):
+    import io
+    from engin_cli.progress import PushProgress
+
+    class _Tty(io.StringIO):
+        def isatty(self):
+            return True
+
+    url, _ = silent_server
+    st = EtlSettings()
+    st.push_enabled, st.push_url = True, url
+    st.push_timeout, st.push_retries, st.push_retry_backoff = 2.5, 0, 0.01
+    out = _Tty()
+    push_table(CORE, _core_df(1), settings=st, progress=PushProgress(CORE, 1, 1, stream=out))
+    text = out.getvalue()
+    assert "第 1 批等待响应 1s/2.5s" in text and "第 1 批等待响应 2s/2.5s" in text
+
+
+def test_push_from_scenic_dir_does_not_repush_the_same_scenic_from_flat_dir(tmp_path, server):
+    """新老两份 CSV 都在时（output/<景区>/ 和老的平铺 output/），同一个景区只推一次。"""
+    from engin_cli import cli
+    srv, rec = server
+    df = _core_df(1).assign(scenic_spot_code="S1", travel_date=20260911)
+    (tmp_path / "S1").mkdir()
+    df.to_csv(tmp_path / "S1" / f"{CORE}.csv", index=False)
+    pd.concat([df, df.assign(scenic_spot_code="S2")]).to_csv(tmp_path / f"{CORE}.csv", index=False)
+    url = f"http://127.0.0.1:{srv.server_address[1]}/data/sync"
+    assert cli.main(["push", "--output-dir", str(tmp_path), "--push-url", url,
+                     "--scenic", "S1", "--no-progress"]) == 0
+    assert len(rec.requests) == 1                # 只从景区目录推了一次
+    rec.requests.clear()
+    assert cli.main(["push", "--output-dir", str(tmp_path), "--push-url", url,
+                     "--no-progress"]) == 0
+    sent = sorted(r["scenic_spot_code"] for q in rec.requests for r in q["body"]["data"])
+    assert sent == ["S1", "S2"]                  # S1 来自子目录，S2 来自平铺目录，各一次

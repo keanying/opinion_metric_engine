@@ -87,6 +87,7 @@ class EtlSettings:
     # ---- 输出 ----
     output_dir: str = "output"
     write_csv: bool = True
+    # False = 只计算 + 推送，不写 ADS 表（源表照常读）。等同于每次都加 --skip-db。
     write_db: bool = True
 
     # ---- 数据推送（跑批算完后以 HTTP API 推给下游；实现见 pusher.py）----

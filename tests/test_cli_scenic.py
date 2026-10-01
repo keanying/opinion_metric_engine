@@ -259,3 +259,33 @@ def test_push_without_url_stops_early(sample, tmp_path, monkeypatch):
     rc = _run(sample, tmp_path, "--push", "--date", "20260911")
     assert rc == 2
     assert not tmp_path.joinpath("PFT_S_00001").exists()     # 一个景区都没跑
+
+
+def test_compute_and_push_without_writing_tables(sample, tmp_path, gateway):
+    """一条命令：先计算、再推送、不写表（--skip-db）。推送照常，六张表都推。"""
+    rc = _run(sample, tmp_path, "--push", "all", "--scenic", "PFT_S_00001", "--date", "20260911")
+    assert rc == 0
+    assert set(gateway.store) == {CORE, PLATFORM, DIMENSION, CONTENT, DRILL, MACRO}
+
+
+def test_write_db_false_in_settings_is_not_overridden_by_the_cli(monkeypatch):
+    """settings_local.py 里 write_db=False（不写表）时，命令行不加 --skip-db 也不能偷偷写库。"""
+    captured = {}
+    monkeypatch.setattr(cli, "load_settings", lambda: _settings_no_db())
+    monkeypatch.setattr(cli, "MySQL", lambda cfg: _NoDB())
+    monkeypatch.setattr(cli, "_run_one_scenic",
+                        lambda st, sc, *a, **k: (captured.update(write_db=st.write_db) or (True, "")))
+    monkeypatch.setattr("engin_cli.source.list_scenic_codes", lambda db, lo, hi: ["S1"])
+    assert cli.main(["run", "--date", "20260911"]) == 0
+    assert captured["write_db"] is False
+
+
+def _settings_no_db():
+    st = EtlSettings()
+    st.write_db = False
+    return st
+
+
+class _NoDB:
+    def close(self):
+        pass
