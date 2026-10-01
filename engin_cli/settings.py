@@ -80,8 +80,8 @@ class EtlSettings:
     # ---- 写入 ----
     batch_size: int = 2000
     dry_run: bool = False
-    # 维度表默认没有唯一索引 → 先按 (景区, 日期区间) DELETE 再 INSERT；
-    # 执行过 sql/alter_dimension_uniquekey.sql 之后可以打开 upsert。
+    # 写库策略：六张表一律「按 景区 + publish_time 先删除、再写入」（同一事务，见 loader.py）。
+    # dimension_upsert 已不再生效，保留字段只是为了兼容老的 settings_local.py。
     dimension_upsert: bool = False
 
     # ---- 输出 ----

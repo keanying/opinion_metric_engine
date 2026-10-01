@@ -135,6 +135,43 @@ class MySQL:
         log.info("写入 %s：%d 行（upsert）", table, written)
         return written
 
+    def replace_rows(self, table: str, df: pd.DataFrame, where_sql: str,
+                     params: Sequence[Any], batch_size: int = 2000,
+                     database: Optional[str] = None) -> tuple:
+        """先删后插，**在同一个事务里**：DELETE ... WHERE <where_sql>，再写入 df。
+
+        任何一步失败都回滚 —— 不会出现「旧数据删了、新数据没写进去」的空窗。
+        df 为空时只删不插（这次重算后某天确实没有行了，旧行也要清掉）。
+
+        入参：where_sql 删除条件（不含 WHERE 关键字，参数用 %s 占位）；params 对应参数
+        出参：(删除行数, 写入行数)
+        """
+        full = f"`{database or self.cfg.ads_db()}`.`{table}`" if (database or self.cfg.ads_db()) \
+            else f"`{table}`"
+        conn = self.connect()
+        written = 0
+        try:
+            with conn.cursor() as cur:
+                deleted = cur.execute(f"DELETE FROM {full} WHERE {where_sql}", list(params))
+                if not df.empty:
+                    cols = list(df.columns)
+                    col_sql = ",".join(f"`{c}`" for c in cols)
+                    placeholders = ",".join(["%s"] * len(cols))
+                    # 删完再插，正常不会撞唯一键；ON DUPLICATE 只是兜底同一批里的重复行
+                    upd_sql = ",".join(f"`{c}`=VALUES(`{c}`)" for c in cols)
+                    sql = (f"INSERT INTO {full} ({col_sql}) VALUES ({placeholders}) "
+                           f"ON DUPLICATE KEY UPDATE {upd_sql}")
+                    data = _to_rows(df)
+                    for i in range(0, len(data), batch_size):
+                        cur.executemany(sql, data[i:i + batch_size])
+                        written += len(data[i:i + batch_size])
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        log.info("写入 %s：删除 %d 行，写入 %d 行（先删后插）", table, deleted, written)
+        return deleted, written
+
     def delete_range(self, table: str, date_col: str, start: int, end: int,
                      key_col: Optional[str] = None,
                      keys: Optional[Iterable[str]] = None,

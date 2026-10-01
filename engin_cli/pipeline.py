@@ -226,7 +226,11 @@ def run(settings: EtlSettings,
 
     # ---- 6. 落库 ----
     if settings.write_csv or settings.write_db:
-        res.load_results = load_all(db, res.tables, settings=settings)
+        # 写库前按「本次景区 × 本次日期」先删再插（见 loader 模块说明）。
+        # 景区取命令行指定的；没指定就取这次数据里出现的全部景区。
+        scenics = scenic_codes or sorted(cf["scenic_spot_code"].astype(str).unique())
+        res.load_results = load_all(db, res.tables, settings=settings,
+                                    scenics=scenics, dates=ctx.output_dates)
 
     # ---- 7. 推送下游（默认关闭；失败不改变跑批成败，除非 push_strict）----
     # 放在落库**之后**：先保证数据落定，再推。推失败了数据还在库里，
