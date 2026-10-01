@@ -38,6 +38,9 @@ create table if not exists ads_trf_social_opinion_drill_analysis_di
     dimension_level2 varchar(128)    default ''               null comment '该评论首个维度标签-二级',
     dimension_level3 varchar(128)    default ''               null comment '该评论首个维度标签-三级',
 
+    region           varchar(64)     default ''               null comment '评论地域（src.location 归一到省级简称，如 广东/北京；境外保留原文）',
+    entity_tags      text                                     null comment '评论实体标签，JSON 数组（src.entity_tags 原样）',
+
     publish_time     datetime                                 null comment '评论发布时间',
     travel_date      int                                      not null comment '分区/评论时间（yyyyMMdd）',
     etl_time         datetime        default CURRENT_TIMESTAMP null comment 'ETL写入时间',

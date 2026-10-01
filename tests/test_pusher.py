@@ -24,6 +24,7 @@ class _Recorder(BaseHTTPRequestHandler):
 
     requests = []
     status_plan = []
+    body_plan = []          # 每次返回的响应体；空了就回 {"ok":true}
 
     def do_POST(self):                                   # noqa: N802
         n = int(self.headers.get("Content-Length", 0))
@@ -38,7 +39,8 @@ class _Recorder(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(b'{"ok":true}')
+        body = _Recorder.body_plan.pop(0) if _Recorder.body_plan else '{"ok":true}'
+        self.wfile.write(body.encode("utf-8"))
 
     def log_message(self, *a):                           # 别把测试输出刷满
         pass
@@ -48,6 +50,7 @@ class _Recorder(BaseHTTPRequestHandler):
 def server():
     _Recorder.requests = []
     _Recorder.status_plan = []
+    _Recorder.body_plan = []
     srv = HTTPServer(("127.0.0.1", 0), _Recorder)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
@@ -363,3 +366,76 @@ def test_no_push_still_wins_over_push():
     st = EtlSettings()
     _apply_push_args(st, a)
     assert st.push_enabled is False
+
+
+# ══════════════════════════════════════════════════════════════════
+# HTTP 200 + 响应体 status=false —— 网关的业务失败
+# ══════════════════════════════════════════════════════════════════
+def test_http_200_with_status_false_is_a_failure(server):
+    """网关 HTTP 恒为 200，失败写在响应体里。以前这种情况会被当成推送成功。"""
+    srv, rec = server
+    rec.body_plan = ['{"status": false, "code": 5011, "msg": "主键字段 x 不在允许字段内",'
+                     ' "trace_id": "abc123"}']
+    res = push_table(CORE, _core_df(2), settings=_settings(srv, push_retries=3))
+    assert not res.ok
+    assert res.failed_batches == 1 and res.rows == 0
+    assert "code=5011" in res.error and "trace_id=abc123" in res.error
+    assert "主键字段 x 不在允许字段内" in res.error
+    assert len(rec.requests) == 1, "业务失败是报文/配置问题，重试没有意义"
+
+
+def test_http_200_with_status_true_is_a_success(server):
+    srv, rec = server
+    rec.body_plan = ['{"status": true, "code": 200, "msg": "ok"}']
+    res = push_table(CORE, _core_df(2), settings=_settings(srv))
+    assert res.ok and res.rows == 2
+
+
+@pytest.mark.parametrize("body", ['{"ok":true}', "OK", "", '[1,2]', '{"status": "success"}'])
+def test_responses_without_a_false_status_are_successes(server, body):
+    """不是 JSON、或没有 status 字段 → 只看 HTTP 状态码，保持原来的行为。"""
+    srv, rec = server
+    rec.body_plan = [body]
+    assert push_table(CORE, _core_df(1), settings=_settings(srv)).ok
+
+
+@pytest.mark.parametrize("value", ["false", 0, "0", "FAIL"])
+def test_falsy_status_spellings(server, value):
+    srv, rec = server
+    rec.body_plan = [json.dumps({"status": value, "msg": "x"})]
+    assert not push_table(CORE, _core_df(1), settings=_settings(srv)).ok
+
+
+def test_success_field_names_are_configurable(server):
+    srv, rec = server
+    rec.body_plan = ['{"success": false, "errCode": "E1", "errMsg": "bad", "rid": "r9"}']
+    st = _settings(srv, push_success_field="success", push_code_field="errCode",
+                   push_message_field="errMsg", push_trace_field="rid")
+    res = push_table(CORE, _core_df(1), settings=st)
+    assert not res.ok and "code=E1" in res.error and "trace_id=r9" in res.error
+
+
+def test_success_check_can_be_turned_off(server):
+    srv, rec = server
+    rec.body_plan = ['{"status": false}']
+    assert push_table(CORE, _core_df(1), settings=_settings(srv, push_success_field="")).ok
+
+
+def test_business_failure_in_one_batch_does_not_stop_the_rest(server):
+    srv, rec = server
+    rec.body_plan = ['{"status": true}', '{"status": false, "msg": "boom"}', '{"status": true}']
+    res = push_table(CORE, _core_df(3), settings=_settings(srv, push_batch_size=1))
+    assert res.batches == 2 and res.failed_batches == 1 and res.rows == 2
+
+
+def test_macro_table_default_pk_matches_its_unique_key():
+    from engin_cli.loader import TABLE_MACRO
+    assert DEFAULT_PUSH_PK[TABLE_MACRO] == ["scenic_id", "travel_date",
+                                            "time_granularity", "channel"]
+
+
+def test_macro_alias_resolves():
+    from engin_cli.cli import _resolve_tables
+    from engin_cli.loader import TABLE_MACRO
+    assert _resolve_tables("macro") == [TABLE_MACRO]
+    assert _resolve_tables("core,kpi") == [CORE, TABLE_MACRO]

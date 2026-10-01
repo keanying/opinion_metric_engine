@@ -16,6 +16,7 @@ import pytest
 from engin_cli.metric_calc_domain import (CONTENT_COLUMNS as CONTENT_COLS,
                                           CORE_COLUMNS as CORE_COLS,
                                           DIMENSION_COLUMNS as DIM_COLS,
+                                          MACRO_COLUMNS as MACRO_COLS,
                                           PLATFORM_COLUMNS as PLAT_COLS)
 from engin_cli.drill_analysis import COLUMNS as DRILL_COLS
 
@@ -24,6 +25,8 @@ DDL_PATH = SQL_DIR / "ads_ddl_reference.sql"
 # 下钻表的建表语句单独一个文件 —— 之前没被这个测试覆盖，
 # 结果改字段名（scenic_spot_code → scenic_id）时它是唯一没有护栏的一张表。
 DRILL_DDL_PATH = SQL_DIR / "ads_drill_analysis_ddl.sql"
+# 需求 2.0 大盘表
+MACRO_DDL_PATH = SQL_DIR / "ads_macro_gran_metric_ddl.sql"
 
 _COL_RE = re.compile(
     r"^([a-z_0-9]+)\s+(bigint|varchar|int|decimal|datetime|text|longtext|timestamp|char)")
@@ -46,7 +49,7 @@ def _ddl_columns(path: Path = None):
 
 @pytest.fixture(scope="module")
 def ddl():
-    return {**_ddl_columns(), **_ddl_columns(DRILL_DDL_PATH)}
+    return {**_ddl_columns(), **_ddl_columns(DRILL_DDL_PATH), **_ddl_columns(MACRO_DDL_PATH)}
 
 
 @pytest.mark.parametrize("table,builder_cols", [
@@ -55,6 +58,7 @@ def ddl():
     ("ads_trf_social_opinion_comment_dimension_score_di", DIM_COLS),
     ("ads_trf_social_opinion_comment_content_di", CONTENT_COLS),
     ("ads_trf_social_opinion_drill_analysis_di", DRILL_COLS),
+    ("ads_trf_social_opinion_macro_gran_metric_di", MACRO_COLS),
 ])
 def test_builder_columns_match_ddl(ddl, table, builder_cols):
     expected = ddl[table]
@@ -66,7 +70,7 @@ def test_builder_columns_match_ddl(ddl, table, builder_cols):
 
 
 def test_no_duplicate_columns():
-    for cols in (CORE_COLS, PLAT_COLS, DIM_COLS, CONTENT_COLS):
+    for cols in (CORE_COLS, PLAT_COLS, DIM_COLS, CONTENT_COLS, MACRO_COLS, DRILL_COLS):
         assert len(cols) == len(set(cols))
 
 
@@ -77,6 +81,8 @@ def test_builders_reuse_domain_columns():
     assert platform.COLUMNS is PLAT_COLS
     assert dimension.COLUMNS is DIM_COLS
     assert content.COLUMNS is CONTENT_COLS
+    from engin_cli.builders import macro
+    assert macro.COLUMNS is MACRO_COLS
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -101,5 +107,19 @@ def test_loader_knows_each_table_s_scenic_column():
     """delete+insert 的 WHERE 用的列名要按表取，写死一个名字会报 Unknown column。"""
     from engin_cli import loader as L
     assert L.scenic_key(L.TABLE_DRILL_ANALYSIS) == "scenic_id"
+    assert L.scenic_key(L.TABLE_MACRO) == "scenic_id"
     for t in (L.TABLE_CORE, L.TABLE_PLATFORM, L.TABLE_DIMENSION, L.TABLE_CONTENT):
         assert L.scenic_key(t) == "scenic_spot_code"
+
+
+def test_macro_uses_scenic_id_like_the_requirement():
+    """需求 2.0 写的是 scenic_id / scenic_name，跟下钻表一样，不是 scenic_spot_*。"""
+    assert MACRO_COLS[0] == "scenic_id" and "scenic_name" in MACRO_COLS
+    assert not [c for c in MACRO_COLS if c.startswith("scenic_spot_")]
+
+
+def test_macro_unique_key_in_ddl_matches_push_pk():
+    from engin_cli.metric_calc_domain import MACRO_KEYS
+    sql = MACRO_DDL_PATH.read_text(encoding="utf-8")
+    m = re.search(r"unique\s*\(([^)]*)\)", sql)
+    assert [c.strip() for c in m.group(1).split(",")] == MACRO_KEYS

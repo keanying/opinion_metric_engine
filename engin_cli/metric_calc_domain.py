@@ -25,6 +25,7 @@
   第 7 章  指标计算：dimension_score 表
   第 8 章  指标计算：content 表
   第 9 章  下钻明细表的评论原文掩码（需求 5.2 展示口径）
+  第 10 章 指标计算：macro 大盘表（需求 2.0，周期粒度 × 渠道）
 
 第 5~8 章每个函数的 docstring 都写清了 **公式 / 入参 / 出参**，
 入参列名是 builder 与本文件之间的契约，改动要两边同步。
@@ -32,6 +33,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Sequence, Union
 
 import numpy as np
@@ -75,6 +77,14 @@ SCORE_MAX = 5.0            # 上限：全部好评 = 5×1.0 = 5，超过一律�
 # 没有评论不等于评价很差，返回 0 会让空数据景区在榜单垫底。
 SCORE_EMPTY = round(SCORE_SCALE * W_NEUTRAL, 4)
 
+# 权重可配置（需求 2.0「正面分值/中性分值/负面分值 支持配置化」）：
+# settings.score_weights = {"positive": 1.0, "neutral": 0.9, "negative": 0.5}，
+# 只写要改的那一档，其余仍用上面的默认值。**全引擎一套权重**，
+# core / dimension / macro 三张表的得分同时生效，repair 重刷历史也用同一套。
+# 权重限制在 [0, 1]：S 才能落在 [0, 5]，看板刻度不用跟着改。
+DEFAULT_SCORE_WEIGHTS: Dict[str, float] = {
+    "positive": W_POSITIVE, "neutral": W_NEUTRAL, "negative": W_NEGATIVE}
+
 # v1 常量（仅 confidence_v1 口径使用）
 V1_SCORE_NEUTRAL = 5.0     # 中性基准分
 V1_SCORE_SPAN = 5.0        # 情感净值 ±1 对应的分数幅度
@@ -92,6 +102,11 @@ DEFAULT_SCORE_FORMULA = SCORE_FORMULA_V2
 SCORE_DECIMALS = 4
 RATE_DECIMALS = 4          # 占比/环比，对齐 decimal(10,4)
 CONTENT_RATE_DECIMALS = 6  # 内容表热度占比，对齐 decimal(18,6)
+# macro 大盘表：占比/环比/同比是**百分数**（× 100），需求写的是 100.000000 → 6 位；
+# 得分也给 6 位（需求样例 4.780324）。刻度跟其余四张表的 [0,1] 不一样，别混用。
+PCT_SCALE = 100.0
+PCT_DECIMALS = 6
+MACRO_SCORE_DECIMALS = 6
 
 # ---- 1.3 窗口档位（严格对齐各表 DDL 的字段后缀，多一个少一个都写不进去）----
 CORE_WINDOWS = (1, 7, 30, 60, 90, 365)
@@ -222,6 +237,81 @@ DEFAULT_BACKFILL_MODE = BACKFILL_MODE_SHIFT
 # 维度表与内容表各自在**自己的粒度**上回补（维度路径 / 词），不跟随渠道，
 # 因为一条评论会命中多个维度和多个词，按渠道拆没有意义。
 
+
+# ---- 1.10 macro 大盘表的周期粒度（需求 2.0，表 ads_trf_social_opinion_macro_gran_metric_di）----
+#
+# 一行 = 景区 × 日期 × 周期粒度 × 渠道（6 个渠道 + all）。看板「总览」页的
+# 周期页签 + 平台下拉，选中的就是这一行。周期粒度可配置（settings.macro_granularities），
+# 每一项是 {"name": 写进 time_granularity 的值, "type": 周期类型, ...}：
+#
+#   type       本期                                     上期（环比的分母）
+#   ─────────  ───────────────────────────────────────  ─────────────────────────────
+#   rolling    近 N 日 [锚点-N+1, 锚点]                   再往前 N 日 [锚点-2N+1, 锚点-N]
+#              锚点 = travel_date - offset（offset 默认 0）
+#   week       本周到今天 [周一, travel_date]              上周的**同样几天** [上周一, 上周一+已过天数]
+#   month      本月到今天 [1 号, travel_date]              上月的同样几天（上月更短时截到月底）
+#   quarter    本季度到今天                               上季度的同样几天（截到季末）
+#   year       本年到今天                                 上年的同样几天
+#
+#   同比（yoy）的对比期 = **本期日期整体减一年**（2026-09-01~09-17 → 2025-09-01~09-17）。
+#
+# 「今日 / 近一日」的区分（业务确认）：
+#   今日   = travel_date 当天（定时任务按当天跑时是不完整的一天）
+#   近一日 = travel_date 的前一天（最近一个完整日）
+#
+# 缺数回补（业务确认，与 core/platform 一致）：
+#   · rolling 周期在**渠道粒度**上整窗前移（同 §1.8/§1.9 的规则与上限），
+#     所以「近 7 日」某渠道的 comment_total == platform 表该渠道的 comment_cnt_7d，
+#     all 行 == 各渠道相加；挪了窗口时，上期跟着挪，词云/维度/热力也取挪后的那个窗口。
+#     上限按窗口天数查 §1.8 的表（1/7/14/30/60/90/365），表里没有的天数不回补。
+#   · week / month / quarter / year 是日历周期，**不回补**，取真实计数。
+#   · 同比的去年同期**不回补**，取真实计数（对比期 = 实际使用的本期窗口减一年）。
+MACRO_PERIOD_ROLLING = "rolling"
+MACRO_PERIOD_WEEK = "week"
+MACRO_PERIOD_MONTH = "month"
+MACRO_PERIOD_QUARTER = "quarter"
+MACRO_PERIOD_YEAR = "year"
+MACRO_PERIOD_TYPES = (MACRO_PERIOD_ROLLING, MACRO_PERIOD_WEEK, MACRO_PERIOD_MONTH,
+                      MACRO_PERIOD_QUARTER, MACRO_PERIOD_YEAR)
+
+MACRO_GRANULARITIES: List[Dict[str, Any]] = [
+    {"name": "今日", "type": MACRO_PERIOD_ROLLING, "days": 1},
+    {"name": "近一日", "type": MACRO_PERIOD_ROLLING, "days": 1, "offset": 1},
+    {"name": "近7日", "type": MACRO_PERIOD_ROLLING, "days": 7},
+    {"name": "本周", "type": MACRO_PERIOD_WEEK},
+    {"name": "近30日", "type": MACRO_PERIOD_ROLLING, "days": 30},
+    {"name": "本月", "type": MACRO_PERIOD_MONTH},
+    {"name": "近60日", "type": MACRO_PERIOD_ROLLING, "days": 60},
+    {"name": "近90日", "type": MACRO_PERIOD_ROLLING, "days": 90},
+    {"name": "本季度", "type": MACRO_PERIOD_QUARTER},
+]
+
+# 渠道 = 配置的渠道全集（同 platform 表，见 §1.7）+ 一条「整体」
+MACRO_CHANNEL_ALL = "all"
+MACRO_CHANNEL_ALL_NAME = "整体"
+
+# 词云：好/中/差各取 Top N（需求「各30个」）
+MACRO_WORDCLOUD_TOP_N = 30
+MACRO_WORD_GROUP_KEY = {POSITIVE: "positiveWord", NEUTRAL: "neutralWord",
+                        NEGATIVE: "negativeWord"}
+
+
+# ---- 1.11 地域（评论热力地图 / 下钻表 region）----
+#
+# 来源是评论表的 `location`（发布地址）。各平台写法不统一：
+#   「IP属地：广东」「广东」「广东省」「四川成都」「北京市」「美国」「」
+# 统一归一到**省级简称**（与需求样例 {"region":"北京"} 一致）；
+# 认不出省份的（境外、只写了城市名）保留清洗后的原文；空值不进热力图。
+PROVINCE_SHORT_NAMES = [
+    "北京", "天津", "上海", "重庆", "河北", "山西", "辽宁", "吉林", "黑龙江",
+    "江苏", "浙江", "安徽", "福建", "江西", "山东", "河南", "湖北", "湖南",
+    "广东", "海南", "四川", "贵州", "云南", "陕西", "甘肃", "青海", "台湾",
+    "内蒙古", "广西", "西藏", "宁夏", "新疆", "香港", "澳门",
+]
+REGION_PREFIXES = ("IP属地", "ip属地", "IP 属地", "发布于", "来自")
+REGION_EMPTY_VALUES = {"", "未知", "unknown", "null", "none", "nan", "-"}
+REGION_MAX_LEN = 64
+
 DATE_FMT = "%Y%m%d"
 
 
@@ -257,7 +347,33 @@ def confidence(total, T: int = CONFIDENCE_T):
     return np.clip(np.nan_to_num(total, nan=0.0) / float(T), 0.0, 1.0)
 
 
-def weighted_score_from_counts(pos, neu, neg, total, decimals: int = SCORE_DECIMALS):
+def resolve_score_weights(weights=None) -> tuple:
+    """得分权重 → (好评权重, 中评权重, 差评权重)。
+
+    入参：weights None（用默认）/ dict（{"positive":..,"neutral":..,"negative":..}，
+          可只写部分）/ 三元组
+    出参：三元 float 元组，每项都在 [0, 1]，否则抛 ValueError ——
+          配错权重在数据上是「悄悄错」，宁可跑批当场失败。
+    """
+    if weights is None:
+        w = dict(DEFAULT_SCORE_WEIGHTS)
+    elif isinstance(weights, dict):
+        bad = set(weights) - set(DEFAULT_SCORE_WEIGHTS)
+        if bad:
+            raise ValueError(f"score_weights 里有不认识的键 {sorted(bad)}，"
+                             f"可用 {list(DEFAULT_SCORE_WEIGHTS)}")
+        w = {**DEFAULT_SCORE_WEIGHTS, **weights}
+    else:
+        w = dict(zip(("positive", "neutral", "negative"), weights))
+    out = tuple(float(w[k]) for k in ("positive", "neutral", "negative"))
+    for k, v in zip(("positive", "neutral", "negative"), out):
+        if not (0.0 <= v <= 1.0):
+            raise ValueError(f"score_weights.{k}={v} 超出 [0, 1]")
+    return out
+
+
+def weighted_score_from_counts(pos, neu, neg, total, decimals: int = SCORE_DECIMALS,
+                               weights=None):
     """情感得分 v2（加权占比法）—— **现行口径，全引擎唯一的得分入口**。
 
     公式
@@ -276,6 +392,7 @@ def weighted_score_from_counts(pos, neu, neg, total, decimals: int = SCORE_DECIM
       total 总数。传 pos+neu+neg 即可；显式传是为了在有回补/脏数据时
             让「分母是谁」这件事留在调用方，公式本身不猜。
       decimals 精度，默认 4（对齐 decimal(10,4)）
+      weights  (好, 中, 差) 权重，见 resolve_score_weights；None = 1.0/0.9/0.5
 
     出参
     ----
@@ -283,7 +400,7 @@ def weighted_score_from_counts(pos, neu, neg, total, decimals: int = SCORE_DECIM
 
     边界
     ----
-      · total = 0 → 返回 SCORE_EMPTY(4.5)，等价于「全部按中评计」。
+      · total = 0 → 返回 5 × 中评权重（默认 4.5 = SCORE_EMPTY），等价于「全部按中评计」。
         没有评论不等于评价很差，返回 0 会让空数据景区在榜单垫底。
       · 维度得分用**同一个函数**，只把分子分母换成该维度的正/中/负/总提及数。
       · 与 v1 不同：**没有置信度权重**，小样本不再被拉向中性，
@@ -294,13 +411,14 @@ def weighted_score_from_counts(pos, neu, neg, total, decimals: int = SCORE_DECIM
     neg = np.asarray(neg, dtype="float64")
     total = np.asarray(total, dtype="float64")
 
-    weighted = pos * W_POSITIVE + neu * W_NEUTRAL + neg * W_NEGATIVE
+    w_pos, w_neu, w_neg = resolve_score_weights(weights)
+    weighted = pos * w_pos + neu * w_neu + neg * w_neg
     shape = np.broadcast(weighted, total).shape
     score = np.zeros(shape, dtype="float64")
     mask = np.isfinite(total) & (total > 0)
     np.divide(weighted, total, out=score, where=mask)
     score = np.clip(score * SCORE_SCALE, SCORE_MIN, SCORE_MAX)
-    return np.round(np.where(mask, score, SCORE_EMPTY), decimals)
+    return np.round(np.where(mask, score, SCORE_SCALE * w_neu), decimals)
 
 
 def official_score(net, total, T: int = CONFIDENCE_T, decimals: int = SCORE_DECIMALS):
@@ -340,11 +458,13 @@ def official_score_from_counts(pos, neg, total, T: int = CONFIDENCE_T,
 
 def sentiment_score_from_counts(pos, neu, neg, total,
                                 formula: str = DEFAULT_SCORE_FORMULA,
-                                decimals: int = SCORE_DECIMALS):
+                                decimals: int = SCORE_DECIMALS,
+                                weights=None):
     """得分口径分发器 —— 引擎里所有算分的地方都走这里。
 
     入参：pos/neu/neg/total 计数；formula 口径开关
-          （"weighted_v2" 现行 / "confidence_v1" 历史，来自 settings.score_formula）
+          （"weighted_v2" 现行 / "confidence_v1" 历史，来自 settings.score_formula）；
+          weights v2 的 (好, 中, 差) 权重，来自 settings.score_weights（v1 不用）
     出参：得分。v2 值域 [0,5]，v1 值域 [0,10] —— 切换口径要同步改看板刻度。
     """
     if formula == SCORE_FORMULA_V1:
@@ -352,7 +472,8 @@ def sentiment_score_from_counts(pos, neu, neg, total,
     if formula != SCORE_FORMULA_V2:
         raise ValueError(f"未知的得分口径 score_formula={formula!r}，"
                          f"可选 {SCORE_FORMULA_V2!r} / {SCORE_FORMULA_V1!r}")
-    return weighted_score_from_counts(pos, neu, neg, total, decimals=decimals)
+    return weighted_score_from_counts(pos, neu, neg, total, decimals=decimals,
+                                      weights=weights)
 
 
 def growth_rate(cur, prev, default=0.0, decimals: int = RATE_DECIMALS):
@@ -382,6 +503,33 @@ def ratio(num, den, decimals: int = RATE_DECIMALS, default=0.0):
     出参：[0,1] 的占比（分子分母同源时）
     """
     return np.round(safe_div(num, den, default=default), decimals)
+
+
+def pct_ratio(num, den, decimals: int = PCT_DECIMALS, default=0.0):
+    """百分制占比（macro 表专用，需求 2.0 的写法）。
+
+    公式：分子 × 100 / 分母
+    入参：num 分子；den 分母；decimals 精度（默认 6，对齐需求里的 100.000000）；
+          default 分母为 0 时的取值
+    出参：[0,100] 的占比。**注意刻度**：其余四张表的占比是 [0,1]，这张表是 [0,100]。
+    """
+    return np.round(safe_div(np.asarray(num, dtype="float64") * PCT_SCALE, den,
+                             default=default), decimals)
+
+
+def pct_growth(cur, prev, default=0.0, decimals: int = PCT_DECIMALS):
+    """百分制环比 / 同比（macro 表专用）。
+
+    公式：(本期 - 上期) × 100 / 上期      （同比时「上期」= 去年同期）
+    入参：cur 本期值；prev 对比期值；default 对比期为 0 时的取值；decimals=6
+    出参：百分数（20.0 表示 +20%）
+
+    边界：对比期为 0 时返回 **default(0)**，与 growth_rate 同一个约定 ——
+          「从 0 涨到 100」是「新增」，由展示层根据「上期=0 且 本期>0」标注。
+    """
+    cur = np.asarray(cur, dtype="float64")
+    prev = np.asarray(prev, dtype="float64")
+    return np.round(safe_div((cur - prev) * PCT_SCALE, prev, default=default), decimals)
 
 
 def star_rating(pos, neu, neg, total, decimals: int = SCORE_DECIMALS):
@@ -440,10 +588,10 @@ def judge_sentiment(score: Any, label: Any = None) -> int:
 
 # ---- Series 便捷包装：builder 里直接对列用，返回值带回原 index ----
 def s_score(pos: pd.Series, neu: pd.Series, neg: pd.Series, total: pd.Series,
-            formula: str = DEFAULT_SCORE_FORMULA) -> pd.Series:
+            formula: str = DEFAULT_SCORE_FORMULA, weights=None) -> pd.Series:
     return pd.Series(
         sentiment_score_from_counts(pos.to_numpy(), neu.to_numpy(), neg.to_numpy(),
-                                    total.to_numpy(), formula=formula),
+                                    total.to_numpy(), formula=formula, weights=weights),
         index=pos.index)
 
 
@@ -754,13 +902,31 @@ CONTENT_COLUMNS: List[str] = (
     + [CONTENT_RATE[w] for w in CONTENT_WINDOWS]
     + ["publish_time", "etl_time", "travel_date"])
 
+# ---- macro 大盘表（ads_trf_social_opinion_macro_gran_metric_di）----
+# ⚠ 景区列跟下钻表一样叫 scenic_id / scenic_name（需求 2.0 原文），不是 scenic_spot_*。
+# 周期不在字段名里（在 time_granularity 列里），所以这张表没有窗口后缀注册表。
+MACRO_SENTIMENT_PREFIX = {POSITIVE: "positive", NEUTRAL: "neutral", NEGATIVE: "negative"}
+MACRO_COLUMNS: List[str] = (
+    ["scenic_id", "scenic_name", "channel", "channel_name", "time_granularity",
+     "overall_sentiment_score", "pre_overall_sentiment_score",
+     "comment_total", "comment_rate", "comment_total_yoy", "comment_total_mom"]
+    + [f"{p}_comment_cnt" for p in MACRO_SENTIMENT_PREFIX.values()]
+    + [f"{p}_comment_rate" for p in MACRO_SENTIMENT_PREFIX.values()]
+    + [f"{p}_comment_mom" for p in MACRO_SENTIMENT_PREFIX.values()]
+    + [f"{p}_comment_yoy" for p in MACRO_SENTIMENT_PREFIX.values()]
+    + ["dimension_breakdown", "wordcloud_map", "period_comment_heatmap",
+       "publish_time", "travel_date", "etl_time"])
+# 唯一键：每个 景区 × 日期 × 周期 × 渠道 只有一行
+MACRO_KEYS = ["scenic_id", "travel_date", "time_granularity", "channel"]
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # 第 5 章  指标计算：core 表（规则文档 §2 核心数值卡 / §3 趋势图 / §4 总体评分）
 # ══════════════════════════════════════════════════════════════════════════
 
 def core_metrics(w: pd.DataFrame,
-                 formula: str = DEFAULT_SCORE_FORMULA) -> pd.DataFrame:
+                 formula: str = DEFAULT_SCORE_FORMULA,
+                 weights=None) -> pd.DataFrame:
     """算出 core 表的全部指标列。
 
     公式
@@ -777,6 +943,7 @@ def core_metrics(w: pd.DataFrame,
       {metric}_{N}d        近 N 日累计，metric ∈ CORE_COUNT_FIELDS，N ∈ CORE_WINDOWS
       {metric}_prev_{N}d   上一个 N 日累计（用于环比）
       formula              得分口径，默认 weighted_v2，来自 settings.score_formula
+      weights              得分权重，来自 settings.score_weights（None = 默认 1.0/0.9/0.5）
 
       **入参已经是回补后的值**（整窗前移，domain §1.8）：`comment_count_1d` 不是
       「当天真实收到多少条」，而是「最近一个有数据的 1 日窗口的条数」。
@@ -806,7 +973,7 @@ def core_metrics(w: pd.DataFrame,
         out[f"positive_rate{sfx}"] = s_ratio(pos, tot)
         out[f"neutral_rate{sfx}"] = s_ratio(neu, tot)
         out[f"negative_rate{sfx}"] = s_ratio(neg, tot)
-        out[f"emotional_score{sfx}"] = s_score(pos, neu, neg, tot, formula)
+        out[f"emotional_score{sfx}"] = s_score(pos, neu, neg, tot, formula, weights)
 
         out[f"positive_growth_rate{sfx}"] = s_growth(w[f"positive_count_{n}d"],
                                                      w[f"positive_count_prev_{n}d"])
@@ -885,7 +1052,8 @@ def platform_metrics(w: pd.DataFrame) -> pd.DataFrame:
 # ══════════════════════════════════════════════════════════════════════════
 
 def dimension_metrics(w: pd.DataFrame,
-                      formula: str = DEFAULT_SCORE_FORMULA) -> pd.DataFrame:
+                      formula: str = DEFAULT_SCORE_FORMULA,
+                      weights=None) -> pd.DataFrame:
     """算出维度表的 21 个得分列（3 层 × 7 个窗口档）。
 
     公式
@@ -905,6 +1073,7 @@ def dimension_metrics(w: pd.DataFrame,
       L{lvl}_mention_neu_{N}d / L{lvl}_mention_neg_{N}d
       lvl ∈ {1,2,3}，N ∈ DIMENSION_WINDOWS
       formula 得分口径，默认 weighted_v2
+      weights 得分权重，来自 settings.score_weights
 
       入参已是回补后的值（整窗前移，domain §1.8），每条维度路径各自平移。
 
@@ -929,7 +1098,7 @@ def dimension_metrics(w: pd.DataFrame,
             neg = w[f"L{lvl}_mention_neg_{n}d"]
             tot = w[f"L{lvl}_mention_cnt_{n}d"]
             out[f"dimension_{lvl}_score{DIM_SUFFIX[n]}"] = s_score(
-                pos, neu, neg, tot, formula)
+                pos, neu, neg, tot, formula, weights)
     return out
 
 
@@ -1099,3 +1268,262 @@ def mask_content(text: str, words: Sequence[str], *,
     if pos < len(text):                        # 最后一个关键词之后还有尾巴
         out.append(token if mode == DRILL_MASK_MODE_RUN else fill * (len(text) - pos))
     return "".join(out), len(merged)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 第 10 章  指标计算：macro 大盘表（需求 2.0，ads_trf_social_opinion_macro_gran_metric_di）
+# ══════════════════════════════════════════════════════════════════════════
+#
+# 一行 = 景区 × 日期 × 周期粒度 × 渠道。周期怎么取见 §1.10，本章只管：
+#   · 周期 → 日期区间（本期 / 上期 / 去年同期）
+#   · 计数 → 得分 / 占比 / 环比 / 同比（百分制，× 100，6 位小数）
+#   · 维度明细 / 词云 / 热力地图三个 JSON 列的结构与排序
+#
+# 渠道 = all 的行：所有计数都是**各渠道（回补后）相加**，与 core/platform 同一条规则（§1.9）。
+
+_MACRO_CNT_KEY = {POSITIVE: "pos", NEUTRAL: "neu", NEGATIVE: "neg"}
+_ONE_YEAR = pd.DateOffset(years=1)
+_PROVINCES_LONGEST_FIRST = sorted(PROVINCE_SHORT_NAMES, key=len, reverse=True)
+
+
+def macro_granularities(cfg=None) -> List[Dict[str, Any]]:
+    """校验并补全周期粒度配置（settings.macro_granularities）。
+
+    入参：cfg None（用 §1.10 的默认 9 个周期）/ list[dict]，每项
+          {"name": "近7日", "type": "rolling", "days": 7, "offset": 0}
+    出参：list[dict]，每项都带齐 name/type/days/offset
+    口径要点：name 写进 time_granularity 并进唯一键，不能重名；
+              配错直接抛错 —— 少一个周期看板就空一块，不能悄悄跳过。
+    """
+    specs = MACRO_GRANULARITIES if cfg is None else cfg
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for raw in specs:
+        if not isinstance(raw, dict):
+            raise ValueError(f"macro_granularities 的每一项应是 dict，收到 {raw!r}")
+        name = str(raw.get("name") or "").strip()
+        typ = str(raw.get("type") or "").strip().lower()
+        if not name:
+            raise ValueError(f"macro_granularities 缺少 name：{raw!r}")
+        if name in seen:
+            raise ValueError(f"macro_granularities 里 name={name!r} 重复")
+        if typ not in MACRO_PERIOD_TYPES:
+            raise ValueError(f"周期 {name!r} 的 type={typ!r} 不认识，可选 {MACRO_PERIOD_TYPES}")
+        offset = int(raw.get("offset") or 0)
+        days = int(raw.get("days") or 0)
+        if offset < 0:
+            raise ValueError(f"周期 {name!r} 的 offset 不能为负")
+        if typ == MACRO_PERIOD_ROLLING and days < 1:
+            raise ValueError(f"周期 {name!r} 是 rolling，必须写 days（≥1）")
+        seen.add(name)
+        out.append({"name": name, "type": typ,
+                     "days": days if typ == MACRO_PERIOD_ROLLING else 0,
+                     "offset": offset})
+    if not out:
+        raise ValueError("macro_granularities 为空，至少要配一个周期")
+    return out
+
+
+def _period_start(typ: str, d: pd.Timestamp) -> pd.Timestamp:
+    if typ == MACRO_PERIOD_WEEK:
+        return d - pd.Timedelta(days=d.weekday())            # 周一为一周的第一天
+    if typ == MACRO_PERIOD_MONTH:
+        return d.replace(day=1)
+    if typ == MACRO_PERIOD_QUARTER:
+        return d.replace(month=3 * ((d.month - 1) // 3) + 1, day=1)
+    return d.replace(month=1, day=1)                          # year
+
+
+def _prev_period_start(typ: str, start: pd.Timestamp) -> pd.Timestamp:
+    if typ == MACRO_PERIOD_WEEK:
+        return start - pd.Timedelta(days=7)
+    if typ == MACRO_PERIOD_MONTH:
+        return (start - pd.Timedelta(days=1)).replace(day=1)
+    if typ == MACRO_PERIOD_QUARTER:
+        return start - pd.DateOffset(months=3)
+    return start - _ONE_YEAR
+
+
+def macro_period_ranges(spec: Dict[str, Any], travel_date, shift: int = 0) -> Dict[str, tuple]:
+    """周期 → 本期 / 上期 / 去年同期 三段日期区间（闭区间）。
+
+    公式（规则见 §1.10）
+    ----
+      rolling  锚点 A = travel_date - offset - shift
+               本期 [A-N+1, A]，上期 [A-2N+1, A-N]
+      日历周期 本期 [周期首日, travel_date]，
+               上期 [上周期首日, min(上周期首日 + 已过天数, 上周期末日)]
+      同比     去年同期 = 本期两端各减一年（2 月 29 日落到 2 月 28 日）
+
+    入参：spec macro_granularities() 的一项；travel_date yyyyMMdd 或 Timestamp；
+          shift 整窗前移天数（只对 rolling 有意义，来自 windows.rolling_windows 的 shift_<N>d）
+    出参：{"cur": (lo, hi), "prev": (lo, hi), "yoy": (lo, hi)}，值为 Timestamp
+    """
+    t = (pd.to_datetime(str(travel_date), format=DATE_FMT)
+         if not isinstance(travel_date, pd.Timestamp) else travel_date.normalize())
+    t = t - pd.Timedelta(days=int(spec.get("offset") or 0))
+    if spec["type"] == MACRO_PERIOD_ROLLING:
+        n = int(spec["days"])
+        a = t - pd.Timedelta(days=int(shift))
+        cur = (a - pd.Timedelta(days=n - 1), a)
+        prev = (a - pd.Timedelta(days=2 * n - 1), a - pd.Timedelta(days=n))
+    else:
+        start = _period_start(spec["type"], t)
+        prev_start = _prev_period_start(spec["type"], start)
+        prev_end = start - pd.Timedelta(days=1)
+        cur = (start, t)
+        prev = (prev_start, min(prev_start + (t - start), prev_end))
+    yoy = (cur[0] - _ONE_YEAR, cur[1] - _ONE_YEAR)
+    return {"cur": cur, "prev": prev, "yoy": yoy}
+
+
+def normalize_region(raw: Any) -> str:
+    """评论 location → 地域（规则见 §1.11）。
+
+    入参：源表 location 原文
+    出参：省级简称（「IP属地：广东」→「广东」、「四川成都」→「四川」）；
+          认不出省份的保留清洗后的原文（「美国」）；空值 → ""
+    """
+    if raw is None or (isinstance(raw, float) and np.isnan(raw)):
+        return ""
+    s = str(raw).strip()
+    for p in REGION_PREFIXES:
+        if s.startswith(p):
+            s = s[len(p):]
+            break
+    s = s.strip().lstrip("：:").strip()
+    if s.startswith("中国") and len(s) > 2:
+        s = s[2:].strip()
+    if s.lower() in REGION_EMPTY_VALUES:
+        return ""
+    for name in _PROVINCES_LONGEST_FIRST:
+        if s.startswith(name):
+            return name
+    return s[:REGION_MAX_LEN]
+
+
+def macro_metrics(w: pd.DataFrame, formula: str = DEFAULT_SCORE_FORMULA,
+                  weights=None) -> pd.DataFrame:
+    """macro 表的计数 / 得分 / 占比 / 环比 / 同比列。
+
+    公式（需求 2.0 原文，全部百分制）
+    ----
+      overall_sentiment_score     = 本期 S（§1.1，权重可配）
+      pre_overall_sentiment_score = 上期 S
+      comment_total               = 本期好 + 中 + 差
+      comment_rate                = all 行 0；渠道行 = 渠道总评数 × 100 / 全渠道总评数
+      comment_total_mom / _yoy    = (本期 - 上期|去年同期) × 100 / 上期|去年同期
+      {好,中,差}_comment_cnt      = 本期该类计数
+      {好,中,差}_comment_rate     = 该类计数 × 100 / 本期总评数
+      {好,中,差}_comment_mom/_yoy = 该类计数的环比 / 同比
+      分母为 0 一律取 0（同 growth_rate 的约定）
+
+    入参（builder 汇总好的宽表，一行 = 景区 × 日期 × 周期 × 渠道）
+    ----
+      cur_pos / cur_neu / cur_neg      本期各类计数（rolling 周期已回补）
+      prev_pos / prev_neu / prev_neg   上期各类计数
+      yoy_pos / yoy_neu / yoy_neg      去年同期各类计数（不回补）
+      all_total                        同景区同日期同周期 all 行的本期总评数
+      is_all                           是否 all 行
+
+    出参：DataFrame，列 = MACRO_COLUMNS 里除键、JSON 列、时间列以外的全部指标列
+    """
+    out = pd.DataFrame(index=w.index)
+
+    def _tot(period):
+        return w[f"{period}_pos"] + w[f"{period}_neu"] + w[f"{period}_neg"]
+
+    def _score(period, total):
+        return sentiment_score_from_counts(
+            w[f"{period}_pos"].to_numpy(), w[f"{period}_neu"].to_numpy(),
+            w[f"{period}_neg"].to_numpy(), total.to_numpy(), formula=formula,
+            decimals=MACRO_SCORE_DECIMALS, weights=weights)
+
+    cur, prev, yoy = _tot("cur"), _tot("prev"), _tot("yoy")
+    out["overall_sentiment_score"] = _score("cur", cur)
+    out["pre_overall_sentiment_score"] = _score("prev", prev)
+    out["comment_total"] = cur.round().astype("int64")
+    out["comment_rate"] = np.where(w["is_all"].astype(bool), 0.0,
+                                   pct_ratio(cur, w["all_total"]))
+    out["comment_total_yoy"] = pct_growth(cur, yoy)
+    out["comment_total_mom"] = pct_growth(cur, prev)
+    for s, p in MACRO_SENTIMENT_PREFIX.items():
+        k = _MACRO_CNT_KEY[s]
+        out[f"{p}_comment_cnt"] = w[f"cur_{k}"].round().astype("int64")
+        out[f"{p}_comment_rate"] = pct_ratio(w[f"cur_{k}"], cur)
+        out[f"{p}_comment_mom"] = pct_growth(w[f"cur_{k}"], w[f"prev_{k}"])
+        out[f"{p}_comment_yoy"] = pct_growth(w[f"cur_{k}"], w[f"yoy_{k}"])
+    return out
+
+
+def _dumps(obj) -> str:
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+
+def macro_dimension_breakdown(dims: Sequence[str], cur, prev,
+                              formula: str = DEFAULT_SCORE_FORMULA, weights=None) -> str:
+    """dimension_breakdown 列：一级维度的本期 / 上期得分。
+
+    公式：每个一级维度 S = 5 × (该维度提及的好评率×w好 + 中评率×w中 + 差评率×w差)，
+          与游客综合情感得分同一个函数（§2），只是样本换成该维度的提及。
+    入参：dims 一级维度名（顺序即输出顺序，默认 L1_DIMENSIONS 的 6 个）；
+          cur / prev 形状 (len(dims), 3) 的计数，列序 [好, 中, 差]
+    出参：JSON 数组字符串
+          [{"dimension1":"交通接驳","dimension1Score":4.780324,
+            "preDimension1":"交通接驳","preDimension1Score":4.71}, ...]
+    口径要点：6 个维度**全部输出**，顺序固定，看板雷达图不会因为某维度没提及而少一个角；
+              没有提及的维度按 §2 的约定取 5 × 中评权重（默认 4.5），与综合得分一致。
+    """
+    cur = np.asarray(cur, dtype="float64").reshape(-1, 3)
+    prev = np.asarray(prev, dtype="float64").reshape(-1, 3)
+    cs = sentiment_score_from_counts(cur[:, 0], cur[:, 1], cur[:, 2], cur.sum(axis=1),
+                                     formula=formula, decimals=MACRO_SCORE_DECIMALS,
+                                     weights=weights)
+    ps = sentiment_score_from_counts(prev[:, 0], prev[:, 1], prev[:, 2], prev.sum(axis=1),
+                                     formula=formula, decimals=MACRO_SCORE_DECIMALS,
+                                     weights=weights)
+    return _dumps([{"dimension1": d, "dimension1Score": float(cs[i]),
+                    "preDimension1": d, "preDimension1Score": float(ps[i])}
+                   for i, d in enumerate(dims)])
+
+
+def macro_wordcloud(words, sentiments, counts, top_n: int = MACRO_WORDCLOUD_TOP_N) -> str:
+    """wordcloud_map 列：好/中/差三组关键词各 Top N 及占比。
+
+    公式：rate = 周期内该词在该组的出现次数 × 100 / 周期内**全部**关键词出现次数（三组合计）
+    入参：words / sentiments / counts 等长数组，一个 (词, 情感) 一项；
+          情感取所属评论的 sentiment（同 content 表口径），同一条评论里同词只算一次
+    出参：JSON 对象字符串
+          {"positiveWord":[{"word":"很好","rate":32.121213},...],
+           "neutralWord":[...], "negativeWord":[...]}
+    口径要点：同一个词可能同时出现在好评和差评里，会分别进两组；
+              组内按次数降序，次数相同按词排序，结果可复现。
+    """
+    words = np.asarray(words, dtype=object).astype(str)
+    sentiments = np.asarray(sentiments, dtype="int64")
+    counts = np.asarray(counts, dtype="float64")
+    total = float(counts.sum())
+    out: Dict[str, list] = {}
+    for s, key in MACRO_WORD_GROUP_KEY.items():
+        m = (sentiments == s) & (counts > 0)
+        ws, cs = words[m], counts[m]
+        order = np.lexsort((ws, -cs))[:max(int(top_n), 0)]
+        rates = pct_ratio(cs[order], total)
+        out[key] = [{"word": ws[i], "rate": float(r)} for i, r in zip(order, rates)]
+    return _dumps(out)
+
+
+def macro_heatmap(regions, counts) -> str:
+    """period_comment_heatmap 列：本期评论的地域分布。
+
+    公式：heat = 本期来自该地域的评论数（地域归一见 normalize_region / §1.11）
+    入参：regions / counts 等长数组
+    出参：JSON 数组字符串 [{"region":"北京","heat":12}, ...]，按 heat 降序、地域名升序；
+          空地域与 0 计数不输出
+    """
+    regions = np.asarray(regions, dtype=object).astype(str)
+    counts = np.asarray(counts, dtype="float64")
+    m = (counts > 0) & (regions != "")
+    rs, cs = regions[m], counts[m]
+    order = np.lexsort((rs, -cs))
+    return _dumps([{"region": rs[i], "heat": int(round(cs[i]))} for i in order])

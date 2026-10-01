@@ -28,6 +28,10 @@
 · **重试只针对可重试的错误**（网络异常、5xx、429），4xx 不重试 ——
   报文格式错了重试一百次也还是错。
 · **日志不打请求头**：Authorization 里是密钥，落到日志文件就等于泄露。
+· **HTTP 200 不等于成功**：网关把业务失败放在响应体里
+  （`{"status": false, "code": 5011, "msg": "...", "trace_id": "..."}`）。
+  响应体是 JSON 且带 push_success_field（默认 status）时，它为假就算失败，
+  报告里带上 code / msg / trace_id；这类失败不重试（跟 4xx 一样是报文/配置问题）。
 """
 
 from __future__ import annotations
@@ -44,7 +48,8 @@ import numpy as np
 import pandas as pd
 
 from .loader import (TABLE_CONTENT, TABLE_CORE, TABLE_DIMENSION,
-                     TABLE_DRILL_ANALYSIS, TABLE_PLATFORM)
+                     TABLE_DRILL_ANALYSIS, TABLE_MACRO, TABLE_PLATFORM)
+from .metric_calc_domain import MACRO_KEYS
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +65,8 @@ DEFAULT_PUSH_PK: Dict[str, List[str]] = {
     # 下钻表的景区列叫 scenic_id（跟另外四张不一样），但它的幂等键是 detail_uk，
     # 所以这里不受改名影响
     TABLE_DRILL_ANALYSIS: ["detail_uk"],
+    # 大盘表：景区 × 日期 × 周期粒度 × 渠道，对齐 uk_macro_gran_metric
+    TABLE_MACRO: list(MACRO_KEYS),
 }
 
 # 报文字段名的默认值。下游叫 table/keys/rows 的话，在 settings 里改这三个。
@@ -158,6 +165,10 @@ def build_payload(table: str, rows: pd.DataFrame, pk: Sequence[str],
 # ══════════════════════════════════════════════════════════════════════
 # 发送
 # ══════════════════════════════════════════════════════════════════════
+class BusinessError(RuntimeError):
+    """HTTP 2xx，但响应体说失败了（status=false）。不重试。"""
+
+
 def _post(url: str, body: Dict[str, Any], headers: Dict[str, str],
           timeout: float) -> tuple:
     """发一个 POST，返回 (status, 响应文本)。只用标准库。"""
@@ -167,18 +178,53 @@ def _post(url: str, body: Dict[str, Any], headers: Dict[str, str],
     for k, v in (headers or {}).items():
         req.add_header(k, str(v))
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.status, resp.read().decode("utf-8", "replace")[:500]
+        return resp.status, resp.read().decode("utf-8", "replace")
+
+
+_FALSY = {"false", "0", "fail", "failed", "failure", "error", "no", "n", ""}
+
+
+def check_response(text: str, fields: Optional[Dict[str, str]] = None) -> None:
+    """2xx 响应的业务成败判定。失败抛 BusinessError（带 code / msg / trace_id）。
+
+    入参：text 响应体；fields {"success","code","message","trace"} → 响应体里的字段名，
+          success 为空串时不检查
+    规则：响应体不是 JSON 对象、或没有 success 字段 → 视为成功（只看 HTTP 状态码）；
+          有这个字段且为假（false / 0 / "false" / "fail" …）→ 失败。
+    """
+    f = {"success": "status", "code": "code", "message": "msg", "trace": "trace_id",
+         **(fields or {})}
+    if not f["success"]:
+        return
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return
+    if not isinstance(data, dict) or f["success"] not in data:
+        return
+    v = data[f["success"]]
+    ok = bool(v) if not isinstance(v, str) else v.strip().lower() not in _FALSY
+    if ok:
+        return
+    parts = [f"{k}={data[name]}" for k, name in (("code", f["code"]), ("msg", f["message"]),
+                                                  ("trace_id", f["trace"]))
+             if name and name in data]
+    raise BusinessError("业务失败（HTTP 200）：" + (" ".join(parts) or text[:500]))
 
 
 def _post_with_retry(url: str, body: Dict[str, Any], headers: Dict[str, str],
-                     timeout: float, retries: int, backoff: float) -> None:
+                     timeout: float, retries: int, backoff: float,
+                     response_fields: Optional[Dict[str, str]] = None) -> None:
     """失败重试。不可重试的错误直接抛，不浪费时间。"""
     last = None
     for attempt in range(max(int(retries), 0) + 1):
         try:
             status, text = _post(url, body, headers, timeout)
+            text = text or ""
             if 200 <= status < 300:
+                check_response(text, response_fields)   # 业务失败直接抛，不重试
                 return
+            text = text[:500]
             last = f"HTTP {status}: {text}"
             if status not in RETRYABLE_STATUS:
                 raise RuntimeError(last)           # 4xx：报文/鉴权问题，重试无意义
@@ -230,7 +276,8 @@ def push_table(table: str, df: pd.DataFrame, *, settings) -> PushResult:
                 log.info("[push dry-run] %s 第 %d 批 %d 行，不发送",
                          table, res.batches + 1, len(chunk))
             else:
-                _post_with_retry(url, body, headers, timeout, retries, backoff)
+                _post_with_retry(url, body, headers, timeout, retries, backoff,
+                                 response_fields=_response_fields(settings))
             res.batches += 1
             res.rows += len(chunk)
         except Exception as e:                      # noqa: BLE001 —— 推送失败不能拖垮跑批
@@ -240,6 +287,14 @@ def push_table(table: str, df: pd.DataFrame, *, settings) -> PushResult:
             log.warning("推送 %s 第 %d 批失败：%s", table, i // size + 1, e)
     res.elapsed = time.time() - t0
     return res
+
+
+def _response_fields(settings) -> Dict[str, str]:
+    """响应体里成败 / 错误码 / 错误信息 / 追踪号 的字段名（settings 可改）。"""
+    return {"success": getattr(settings, "push_success_field", "status"),
+            "code": getattr(settings, "push_code_field", "code"),
+            "message": getattr(settings, "push_message_field", "msg"),
+            "trace": getattr(settings, "push_trace_field", "trace_id")}
 
 
 def _table_config(table: str, settings) -> Dict[str, Any]:

@@ -2,7 +2,7 @@
 
 > 景区社媒舆情指标计算引擎。命令行包名 `engin_cli`，跑批入口 `python -m engin_cli.cli`。
 
-从两张采集源表**直接用 Python 算出四张 ADS 指标表 + 一张下钻明细表**，
+从两张采集源表**直接用 Python 算出四张 ADS 指标表 + 一张大盘 KPI 表 + 一张下钻明细表**，
 全程在内存里做，不落任何中间表（没有 ODS/DWD/DWS 分层）。
 
 ```
@@ -13,7 +13,7 @@
    comment_facts · dimension_facts · keyword_facts     ← DataFrame，进程内存
                     │
                     ▼  builders（日粒度事实 → 多窗口滚动 → 环比/得分）
-   core · platform · dimension_score · content         ← 列名 = 目标表 DDL
+   core · platform · dimension_score · content · macro ← 列名 = 目标表 DDL
                     │
                     ▼  validate → load（upsert / 先删后插）
    MySQL ADS 表（+ CSV 备份）
@@ -68,7 +68,8 @@ python -m pytest -q
 | `scenic_id / scenic_name` | 景区 | 所有表 |
 | `work_id` + 作品表 `work_url/title` | 下钻跳转 | 下钻明细表 |
 | `content / likes / commenter_name` | 明细展示 | 下钻明细表 |
-| `entity_tags` | 暂未参与指标计算 | — |
+| `location` | 地域，归一到省级简称（§12） | 大盘表 `period_comment_heatmap`、下钻表 `region` |
+| `entity_tags` | 不参与指标计算，原样带到明细 | 下钻表 `entity_tags` |
 
 `sentiment_score` 与 `keyword_tags` 是三张表核心内容的交汇点：
 **评论的情感决定了它贡献给哪一类计数，也决定了它带的每个关键词进哪一组词云。**
@@ -81,7 +82,7 @@ python -m pytest -q
 
 **所有指标的计算口径都落在这一个文件里**，其余模块只引用、不重算。改口径改一处即可。
 
-文件内分 8 章，第 5~8 章每个函数的 docstring 都写清了 **公式 / 入参 / 出参 / 口径要点**：
+文件内分 10 章，第 5~8、10 章每个函数的 docstring 都写清了 **公式 / 入参 / 出参 / 口径要点**：
 
 | 章节 | 内容 | 典型入口 |
 |---|---|---|
@@ -93,6 +94,8 @@ python -m pytest -q
 | 6 platform 指标 | 平台与全平台两套占比、好评率、好评环比 | `platform_metrics(w)` |
 | 7 dimension 指标 | 三层维度 × 7 个窗口 = 21 个得分 | `dimension_metrics(w)` |
 | 8 content 指标 | 词频、热度占比、排名、突增量 | `content_metrics(w)` `word_surge()` |
+| 9 下钻掩码 | `content_snippet` 只保留关键词 | `mask_content()` |
+| 10 macro 指标 | 周期 → 日期区间、百分制占比/环比/同比、维度/词云/热力 JSON | `macro_period_ranges()` `macro_metrics(w)` |
 
 各模块的分工（它们只做搬运，不做口径判断）：
 
@@ -455,6 +458,7 @@ python -m engin_cli.cli push --tables core                         # 从 CSV 补
 | `dimension`（或 `dim`） | `ads_trf_social_opinion_comment_dimension_score_di` |
 | `content`（或 `word`） | `ads_trf_social_opinion_comment_content_di` |
 | `drill` | `ads_trf_social_opinion_drill_analysis_di` |
+| `macro`（或 `kpi`） | `ads_trf_social_opinion_macro_gran_metric_di` |
 
 打错表名会**立刻报错并列出可选值**，不会静默推 0 张表。
 
@@ -469,8 +473,85 @@ python -m engin_cli.cli push --tables core                         # 从 CSV 补
   网络错误 / 5xx / 429 才重试，指数退避。
 - **一批失败不影响其余批次**，失败批次数会如实报出来。
 - **日志不打请求头** —— `Authorization` 里是密钥，落进日志文件就等于泄露。
+- **HTTP 200 不等于成功**：网关把业务失败写在响应体里（`{"status": false, "code", "msg", "trace_id"}`）。
+  响应体是 JSON 且带 `push_success_field`（默认 `status`）时，它为假就算该批失败、不重试，
+  报告带上 code / msg / trace_id。字段名可配（`push_code_field` / `push_message_field` /
+  `push_trace_field`），`push_success_field = ""` 关闭检查。
 - `np.int64` / `NaN` / `Timestamp` 在发出去之前统一转成原生类型，
   `NaN` 转 `null`：裸 `NaN` 是非法 JSON，下游解析必挂。
+
+### 12. 大盘 KPI 表（需求 2.0，`builders/macro.py`）
+
+新表 `ads_trf_social_opinion_macro_gran_metric_di`，建表语句见 `sql/ads_macro_gran_metric_ddl.sql`。
+
+**一行 = 景区 × 日期 × 周期粒度 × 渠道**（6 个渠道 + `all`），每个组合恰好一行，没数据也出全 0 行。
+看板「总览」页的周期页签 + 平台下拉选中的就是这一行：
+
+```sql
+select * from ads_trf_social_opinion_macro_gran_metric_di
+ where scenic_id = 'PFTSCA01002434' and travel_date = 20260917
+   and time_granularity = '近7日' and channel = 'all';
+```
+
+> ⚠ 这张表的**占比 / 环比 / 同比是百分数**（× 100，6 位小数，需求原文写法），
+> 其余四张表是 [0,1] 的比率。景区列叫 `scenic_id / scenic_name`（同下钻表）。
+
+#### 周期粒度（可配置，`settings.macro_granularities`，domain §1.10）
+
+| 周期 | 类型 | 本期 | 上期（环比分母） |
+|---|---|---|---|
+| 今日 | rolling 1 | travel_date 当天 | 前一天 |
+| 近一日 | rolling 1，offset 1 | travel_date 前一天（最近一个完整日） | 再前一天 |
+| 近7日 / 近30日 / 近60日 / 近90日 | rolling N | [T-N+1, T] | [T-2N+1, T-N] |
+| 本周 | week | 周一 ~ T | 上周一起的**同样几天** |
+| 本月 | month | 1 号 ~ T | 上月同样几天（上月短就截到月底） |
+| 本季度 | quarter | 季初 ~ T | 上季度同样几天 |
+
+- **同比**的对比期 = 本期日期整体减一年（2026-09-01~09-17 → 2025-09-01~09-17）。
+  引擎会额外按 `publish_time` 取「去年同期」那一段，不会把一年半的数据全读进来；
+  上期早于 `lookback_days` 时（如本季度的上期）也会补取。
+- 加周期：在配置里加一项，如 `{"name": "近14日", "type": "rolling", "days": 14}`，
+  还支持 `year`（本年）。`name` 原样写进 `time_granularity`。
+
+#### 缺数回补
+
+- **近 N 日 / 今日 / 近一日**：在渠道粒度上整窗前移，规则与上限同 §9，
+  挪几天直接复用 `windows.rolling_windows`（与 core/platform 同一个网格、日历、上限）。所以：
+  ```
+  macro「近7日」某渠道 comment_total == platform.comment_cnt_7d
+  macro「今日」all 行 comment_total  == core.comment_count
+  ```
+  `tests/test_macro.py` 在触发了回补的日子上逐行对账。窗口挪了，上期跟着挪，
+  该行的词云 / 维度 / 热力也取挪后的窗口 —— 同一行的数字来自同一段日期。
+- **本周 / 本月 / 本季度、以及同比**：不回补，取真实计数。
+- 回补上限按窗口天数查 §9 的表；自定义了表里没有的天数（如 15 天）就不回补。
+
+#### 字段口径
+
+| 字段 | 口径 |
+|---|---|
+| `overall_sentiment_score` / `pre_` | §1 的得分公式，权重可配（`score_weights`）；本期 / 上期 |
+| `comment_total` | all = 各渠道相加；渠道行 = 该渠道 |
+| `comment_rate` | all = 0；渠道行 = 渠道总评数 × 100 / 全渠道总评数（各渠道合计 = 100） |
+| `*_mom` / `*_yoy` | (本期 - 上期或去年同期) × 100 / 上期或去年同期，**分母为 0 取 0** |
+| `*_comment_rate` | 该类计数 × 100 / 本期总评数 |
+| `dimension_breakdown` | 6 个一级维度**全量、固定顺序**，本期与上期得分；没有提及的维度取 5 × 中评权重（默认 4.5，同综合得分的约定） |
+| `wordcloud_map` | 好/中/差各 Top 30（`macro_wordcloud_top_n`），rate = 该词次数 × 100 / **周期内全部关键词次数**（三组合计）；同一个词可同时出现在两组；同一条评论里同词只算一次 |
+| `period_comment_heatmap` | 本期评论按地域计数，按 heat 降序 |
+
+**地域**来自评论表 `location`，归一到省级简称（`IP属地：广东` → `广东`、`四川成都` → `四川`、
+`北京市` → `北京`），认不出省份的保留原文（`美国`），空值不进热力图（domain §1.11）。
+
+#### 得分权重可配置
+
+`settings.score_weights = {"positive": 1.0, "neutral": 0.9, "negative": 0.5}`，只写要改的档，
+每档须在 [0, 1]。**全引擎一套**：core / dimension / macro 三张表同时生效，改完用 `repair` 重刷历史。
+
+#### 下钻表新增 `region` / `entity_tags`
+
+`region` 同上面的地域归一；`entity_tags` 原样存 JSON 数组（没有就是 `[]`）。
+**已有的库先执行 `sql/alter_drill_analysis_region_entity.sql` 再上线**，否则写库报 Unknown column；
+下游推送目标表也要同步加这两列。
 
 ---
 
@@ -485,6 +566,7 @@ python -m engin_cli.cli push --tables core                         # 从 CSV 补
 | `content_di` | ✓ (日期,景区,词) | upsert |
 | `dimension_score_di` | **✗ 只有 PRIMARY KEY(id)** | 先按 (景区,日期区间) DELETE 再 INSERT |
 | `drill_analysis_di` | ✓ `detail_uk` | upsert |
+| `macro_gran_metric_di` | ✓ (景区,日期,周期,渠道) | upsert |
 
 维度表没有唯一索引，直接 upsert 等同纯 INSERT，**同一天重跑一次就多一份重复行**。
 执行 `sql/alter_dimension_uniquekey.sql` 补上唯一索引后，把
@@ -621,6 +703,8 @@ python -m engin_cli.cli repair --tables core --start-date 20260101 --end-date 20
 - dimension：得分在 [0,10] / 同一级维度当日得分唯一（层级自洽）/ 维度路径不重复
 - content：(景区,日期,词) 不重复（撞唯一索引）/ emotion_type 合法 /
   词频不超过当日评论数 / 每组都有 rank=1
+- macro：(景区,日期,周期,渠道) 不重复 / 好+中+差 = 总数 / all 行 = 各渠道之和 /
+  各渠道 comment_rate 合计 = 100 / 每个周期都有 all + 全部渠道 / 三个 JSON 列可解析
 
 任一项不通过说明**计算逻辑**有问题，不是数据问题。退出码 1，可直接接 CI。
 
@@ -649,6 +733,7 @@ opinion_metric_engine/          项目根
 | `engin_cli/source.py` | 源表抽取（MySQL / CSV 两种源，同构） |
 | `engin_cli/builders/*.py` | 四张 ADS 表各自的计算，列名严格等于 DDL |
 | `engin_cli/drill_analysis.py` | 需求 5.2 下钻分析表 |
+| `engin_cli/builders/macro.py` | 需求 2.0 大盘 KPI 表（周期粒度 × 渠道） |
 | `engin_cli/repair.py` | 历史数据修正：按新口径重刷得分字段（只 UPDATE 得分列） |
 | `engin_cli/validate.py` | 口径自检 |
 | `engin_cli/pusher.py` | 数据推送：算完后以 HTTP API 推给下游（可配置，默认关闭） |
@@ -657,7 +742,9 @@ opinion_metric_engine/          项目根
 | `engin_cli/pipeline.py` | 编排 |
 | `engin_cli/cli.py` | 命令行 |
 | `sql/ads_ddl_reference.sql` | 四张目标表的建表语句（原样保留，测试据此断言） |
-| `sql/ads_drill_analysis_ddl.sql` | 5.2 下钻分析表建表语句 |
+| `sql/ads_drill_analysis_ddl.sql` | 5.2 下钻分析表建表语句（含 2.0 新增的 region / entity_tags） |
+| `sql/alter_drill_analysis_region_entity.sql` | 已有下钻表补 region / entity_tags 两列 |
+| `sql/ads_macro_gran_metric_ddl.sql` | 2.0 大盘 KPI 表建表语句 |
 | `sql/alter_dimension_uniquekey.sql` | 给维度表补唯一索引（可选） |
 | `sql/queries.sql` | 看板各组件的取数 SQL |
 
@@ -683,3 +770,10 @@ opinion_metric_engine/          项目根
 7. 超大数据量（单景区日均 10 万条以上）时，`normalize` 的逐行 Python 循环会成为瓶颈，
    届时把 `build_dimension_facts` / `build_keyword_facts` 换成
    `pd.json_normalize` + `explode` 的向量化写法即可，接口不变。
+8. **大盘表（需求 2.0）的几处口径是本实现的理解，需要业务方确认**：
+   - 需求第 4 条「每个景区/周期/渠道 我预想的是只有一条数据，因为我设计的是」原文没写完，
+     本实现按「景区 × 日期 × 周期 × 渠道 唯一」落表。
+   - 词云 rate 的分母取「周期内全部关键词次数（好中差三组合计）」，不是各组自己的合计。
+   - 没有提及的维度、没有评论的渠道，得分取 5 × 中评权重（默认 4.5），沿用 §1 的约定；
+     看板如果要显示「暂无数据」，以 `comment_total = 0` 判断。
+   - 同比的去年同期 = 本期日期整体减一年（不是「去年第 N 周」）。
