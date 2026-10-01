@@ -28,6 +28,7 @@ PLATFORM = "ads_trf_social_opinion_comment_platform_di"
 CONTENT = "ads_trf_social_opinion_comment_content_di"
 DIMENSION = "ads_trf_social_opinion_comment_dimension_score_di"
 DRILL = "ads_trf_social_opinion_drill_analysis_di"
+MACRO = "ads_trf_social_opinion_macro_gran_metric_di"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -40,8 +41,10 @@ class _Gateway(BaseHTTPRequestHandler):
     def do_POST(self):                                           # noqa: N802
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         t, pk = body["tableName"], body["pkId"]
+        # 下钻表与大盘表的景区列叫 scenic_id，其余四张叫 scenic_spot_code
         _Gateway.calls.append((t, len(body["data"]),
-                               sorted({r.get("scenic_spot_code") for r in body["data"]})))
+                               sorted({r.get("scenic_spot_code") or r.get("scenic_id")
+                                       for r in body["data"]})))
         s = _Gateway.store.setdefault(t, {})
         for row in body["data"]:
             s[tuple(row[k] for k in pk)] = row
@@ -129,8 +132,8 @@ def test_run_one_scenic_and_push_all(sample, tmp_path, gateway):
     rc = _run(sample, tmp_path, "--push", "all", "--scenic", "PFTSCA01002434",
               "--start-date", "20260901", "--end-date", "20260911")
     assert rc == 0
-    # 只算、只推这一个景区；五张表都推了
-    assert set(gateway.store) == {CORE, PLATFORM, DIMENSION, CONTENT, DRILL}
+    # 只算、只推这一个景区；六张表都推了
+    assert set(gateway.store) == {CORE, PLATFORM, DIMENSION, CONTENT, DRILL, MACRO}
     assert {s for _, _, ss in gateway.calls for s in ss} == {"PFTSCA01002434"}
     assert len(gateway.store[CORE]) == 11
     # 产物写在景区子目录
@@ -153,7 +156,7 @@ def test_single_day_pushes_only_that_day(sample, tmp_path, gateway):
     rc = _run(sample, tmp_path, "--push", "all",
               "--start-date", "20260911", "--end-date", "20260911")
     assert rc == 0
-    for t in (CORE, PLATFORM, DIMENSION, CONTENT, DRILL):
+    for t in (CORE, PLATFORM, DIMENSION, CONTENT, DRILL, MACRO):
         assert {k[[i for i, _ in enumerate(k)][0]] for k in gateway.store[t]}  # 非空
         days = {row["travel_date"] for row in gateway.store[t].values()}
         assert days == {20260911}, t
