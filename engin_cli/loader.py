@@ -29,11 +29,13 @@ TABLE_PLATFORM = "ads_trf_social_opinion_comment_platform_di"
 TABLE_DIMENSION = "ads_trf_social_opinion_comment_dimension_score_di"
 TABLE_CONTENT = "ads_trf_social_opinion_comment_content_di"
 TABLE_DRILL_ANALYSIS = "ads_trf_social_opinion_drill_analysis_di"
+TABLE_MACRO = "ads_trf_social_opinion_macro_gran_metric_di"
 
 # 各表的景区列名。**下钻表跟另外四张不一样**：它用 scenic_id（与源表同名），
 # 其余四张用 scenic_spot_code。delete+insert 的 WHERE 条件要按表取，
 # 写死一个名字的话，一旦某张表退化到 delete+insert 就会报 Unknown column。
-SCENIC_KEY = {TABLE_DRILL_ANALYSIS: "scenic_id"}
+# macro 大盘表同样用 scenic_id（需求 2.0 原文）。
+SCENIC_KEY = {TABLE_DRILL_ANALYSIS: "scenic_id", TABLE_MACRO: "scenic_id"}
 DEFAULT_SCENIC_KEY = "scenic_spot_code"
 
 

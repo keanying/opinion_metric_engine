@@ -123,6 +123,11 @@ def _lookback(settings: Optional[EtlSettings], windows) -> dict:
     return {int(w): int(table[int(w)]) for w in windows if int(w) in table}
 
 
+def _weights(settings: Optional[EtlSettings]):
+    """修正用的得分权重，与跑批同一套（settings.score_weights，domain §1.1）。"""
+    return getattr(settings, "score_weights", None) if settings else None
+
+
 def recompute_core_scores(core_rows: pd.DataFrame,
                           output_dates: Optional[Sequence[str]] = None,
                           formula: str = D.DEFAULT_SCORE_FORMULA,
@@ -191,7 +196,8 @@ def recompute_core_scores(core_rows: pd.DataFrame,
     for w in D.CORE_WINDOWS:
         out[f"emotional_score{D.CORE_SUFFIX[w]}"] = D.sentiment_score_from_counts(
             df[f"positive_count_{w}d"], df[f"neutral_count_{w}d"],
-            df[f"negative_count_{w}d"], df[f"comment_count_{w}d"], formula=formula)
+            df[f"negative_count_{w}d"], df[f"comment_count_{w}d"], formula=formula,
+            weights=_weights(settings))
     return out
 
 
@@ -241,7 +247,7 @@ def recompute_dimension_scores(dim_facts: pd.DataFrame,
             out[f"dimension_{lvl}_score{D.DIM_SUFFIX[w]}"] = D.sentiment_score_from_counts(
                 df[f"L{lvl}_mention_pos_{w}d"], df[f"L{lvl}_mention_neu_{w}d"],
                 df[f"L{lvl}_mention_neg_{w}d"], df[f"L{lvl}_mention_cnt_{w}d"],
-                formula=formula)
+                formula=formula, weights=_weights(settings))
     return out
 
 

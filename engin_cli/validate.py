@@ -9,15 +9,17 @@
 
 from __future__ import annotations
 
+import json
 from typing import List
 
 import numpy as np
 import pandas as pd
 
 from .metric_calc_domain import (BACKFILL_MODE_SHIFT, CORE_SUFFIX, CORE_WINDOWS,
-                                 DEFAULT_SCORE_FORMULA, PLATFORM_WINDOWS, PLAT_POS,
-                                 PLAT_TOT_POS, SCORE_MAX, SCORE_MIN,
-                                 sentiment_score_from_counts)
+                                 DEFAULT_SCORE_FORMULA, MACRO_CHANNEL_ALL, MACRO_KEYS,
+                                 MACRO_SENTIMENT_PREFIX, PLATFORM_WINDOWS, PLAT_POS,
+                                 PLAT_TOT_POS, SCORE_FORMULA_V1, SCORE_MAX, SCORE_MIN,
+                                 V1_SCORE_MAX, sentiment_score_from_counts)
 
 
 def _fail(errs: List[str], cond: bool, msg: str):
@@ -25,7 +27,8 @@ def _fail(errs: List[str], cond: bool, msg: str):
         errs.append(msg)
 
 
-def validate_core(core: pd.DataFrame) -> List[str]:
+def validate_core(core: pd.DataFrame, formula: str = DEFAULT_SCORE_FORMULA,
+                  weights=None) -> List[str]:
     errs: List[str] = []
     if core.empty:
         return ["core 表为空"]
@@ -55,7 +58,7 @@ def validate_core(core: pd.DataFrame) -> List[str]:
     # 不再需要宽松容差 —— 对不上就是公式接错或字段错位。
     calc = sentiment_score_from_counts(core.positive_count, core.neutral_count,
                                        core.negative_count, core.comment_count,
-                                       formula=DEFAULT_SCORE_FORMULA)
+                                       formula=formula, weights=weights)
     diff = np.abs(core["emotional_score"].to_numpy() - calc)
     _fail(errs, bool(np.nanmax(diff) <= 0.001),
           f"core: emotional_score != 由表内计数算出的值（最大偏差 {np.nanmax(diff):.4f}）")
@@ -196,11 +199,91 @@ def validate_content(content: pd.DataFrame, core: pd.DataFrame) -> List[str]:
 def validate_all(tables: dict) -> List[str]:
     """tables 额外可带 "platform_codes"：本次跑批配置的渠道全集，用于行完整性断言。"""
     core = tables.get("core", pd.DataFrame())
+    formula = tables.get("score_formula") or DEFAULT_SCORE_FORMULA
     errs: List[str] = []
-    errs += validate_core(core)
+    errs += validate_core(core, formula, tables.get("score_weights"))
     errs += validate_platform(tables.get("platform", pd.DataFrame()), core,
                               tables.get("platform_codes"),
                               tables.get("backfill_mode", BACKFILL_MODE_SHIFT))
     errs += validate_dimension(tables.get("dimension", pd.DataFrame()))
     errs += validate_content(tables.get("content", pd.DataFrame()), core)
+    if "macro" in tables:
+        errs += validate_macro(tables["macro"], core, tables.get("platform_codes"),
+                               tables.get("macro_granularities"), formula)
+    return errs
+
+
+def validate_macro(macro: pd.DataFrame, core: pd.DataFrame,
+                   codes: List[str] | None = None,
+                   granularities: List[str] | None = None,
+                   formula: str = DEFAULT_SCORE_FORMULA) -> List[str]:
+    """macro 大盘表（需求 2.0）的恒等关系。
+
+    · 景区 × 日期 × 周期 × 渠道 唯一（撞唯一索引就写不进去）
+    · 好 + 中 + 差 = 总评数；占比在 [0,100]；得分在值域内
+    · all 行的各项计数 == 各渠道相加（与 core/platform 同一条规则，domain §1.9）
+    · 各渠道 comment_rate 合计 = 100（all 行有评论时）
+    · 行完整性：core 出了行的每个 (景区, 日期)，每个周期都要有 all + 配置的全部渠道
+    · 三个 JSON 列都能解析
+    """
+    errs: List[str] = []
+    if macro.empty:
+        return ["macro 表为空"] if not core.empty else []
+
+    dup = int(macro.duplicated(subset=MACRO_KEYS).sum())
+    _fail(errs, dup == 0, f"macro: (景区,日期,周期,渠道) 重复 {dup} 行")
+
+    cnt = [f"{p}_comment_cnt" for p in MACRO_SENTIMENT_PREFIX.values()]
+    bad = macro[macro[cnt].sum(axis=1) != macro["comment_total"]]
+    _fail(errs, bad.empty, f"macro: 好+中+差 != comment_total，{len(bad)} 行")
+
+    rate_cols = ["comment_rate"] + [f"{p}_comment_rate" for p in MACRO_SENTIMENT_PREFIX.values()]
+    for c in rate_cols:
+        v = macro[c]
+        _fail(errs, bool(((v >= 0) & (v <= 100 + 1e-6)).all()), f"macro: {c} 越界 [0,100]")
+    hi = V1_SCORE_MAX if formula == SCORE_FORMULA_V1 else SCORE_MAX
+    for c in ("overall_sentiment_score", "pre_overall_sentiment_score"):
+        v = macro[c]
+        _fail(errs, bool(((v >= SCORE_MIN) & (v <= hi)).all()),
+              f"macro: {c} 越界 [{SCORE_MIN:g},{hi:g}]")
+
+    grp = ["scenic_id", "travel_date", "time_granularity"]
+    is_all = macro["channel"] == MACRO_CHANNEL_ALL
+    sums = macro[~is_all].groupby(grp)[["comment_total"] + cnt].sum()
+    alls = macro[is_all].set_index(grp)[["comment_total"] + cnt]
+    j = alls.join(sums, rsuffix="_sum", how="left").fillna(0)
+    off = pd.Series(False, index=j.index)
+    for c in ["comment_total"] + cnt:
+        off |= (j[c] - j[f"{c}_sum"]).abs() > 0
+    _fail(errs, not bool(off.any()),
+          f"macro: all 行计数 != 各渠道之和，{int(off.sum())} 组")
+
+    rs = macro[~is_all].groupby(grp)["comment_rate"].sum()
+    has = alls["comment_total"] > 0
+    rs = rs.reindex(alls.index).fillna(0)[has]
+    near = (rs - 100.0).abs() <= 0.001 * max(len(codes or []), 1) + 1e-6
+    _fail(errs, bool(near.all()),
+          f"macro: 各渠道 comment_rate 合计 != 100，{int((~near).sum())} 组")
+
+    if not core.empty:
+        want = core[["scenic_spot_code", "travel_date"]].drop_duplicates()
+        got = macro[["scenic_id", "travel_date"]].drop_duplicates()
+        miss = want.merge(got, left_on=["scenic_spot_code", "travel_date"],
+                          right_on=["scenic_id", "travel_date"], how="left")
+        _fail(errs, bool(miss["scenic_id"].notna().all()),
+              f"macro: core 有行而 macro 缺行的 (景区,日期) {int(miss['scenic_id'].isna().sum())} 个")
+    need_ch = set([MACRO_CHANNEL_ALL] + list(codes or []))
+    have = macro.groupby(grp)["channel"].agg(set)
+    lack = have[have.map(lambda s: not need_ch.issubset(s))]
+    _fail(errs, lack.empty, f"macro: 有 {len(lack)} 组 (景区,日期,周期) 缺渠道行")
+    if granularities:
+        g = macro.groupby(["scenic_id", "travel_date"])["time_granularity"].agg(set)
+        lack = g[g.map(lambda s: not set(granularities).issubset(s))]
+        _fail(errs, lack.empty, f"macro: 有 {len(lack)} 个 (景区,日期) 缺周期行")
+
+    for c in ("dimension_breakdown", "wordcloud_map", "period_comment_heatmap"):
+        try:
+            macro[c].map(json.loads)
+        except Exception as e:                      # noqa: BLE001
+            errs.append(f"macro: {c} 不是合法 JSON（{e}）")
     return errs

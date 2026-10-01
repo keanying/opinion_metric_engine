@@ -27,12 +27,13 @@ import pandas as pd
 from .builders.content import build_content
 from .builders.core import build_core
 from .builders.dimension import build_dimension
+from .builders.macro import build_macro, macro_data_ranges
 from .builders.platform import build_platform
 from .context import RunContext
 from .db import MySQL
 from .drill_analysis import build_drill_analysis
 from .loader import (TABLE_CONTENT, TABLE_CORE, TABLE_DIMENSION, TABLE_DRILL_ANALYSIS,
-                     TABLE_PLATFORM, load_all)
+                     TABLE_MACRO, TABLE_PLATFORM, load_all)
 from .metric_calc_domain import CORE_WINDOWS, daily_core_facts
 from .metric_calc_domain import PLATFORM_WINDOWS as D_PLATFORM_WINDOWS
 from .normalize import (build_comment_facts, build_dimension_facts, build_keyword_facts)
@@ -96,32 +97,49 @@ def run(settings: EtlSettings,
              ctx.output_dates[0], ctx.output_dates[-1], load_start, load_end,
              settings.lookback_days)
 
+    # macro 大盘表还要「上期」与「去年同期」的数据（需求 2.0 的环比/同比），
+    # 这两段可能落在 [load_start, load_end] 之外，单独多取；其余四张表只用取数区间。
+    ranges = macro_data_ranges(ctx) if settings.enable_macro_metric \
+        else [(load_start, load_end)]
+    extra = [r for r in ranges if r != (load_start, load_end)]
+    if extra:
+        log.info("macro 表额外取数：%s", "、".join(f"{a}~{b}" for a, b in ranges))
+
     # ---- 1. 抽取 ----
     if comments_df is None:
         if db is None:
             raise ValueError("未提供 comments_df 时必须传入已连接的 MySQL 实例")
-        comments_df = fetch_comments(db, load_start, load_end, scenic_codes)
+        parts = [fetch_comments(db, a, b, scenic_codes) for a, b in ranges]
+        parts = [p for p in parts if p is not None and not p.empty]
+        comments_df = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
     if comments_df is None or comments_df.empty:
         res.errors.append(f"取数区间 {load_start}~{load_end} 没有任何评论数据")
         res.elapsed = time.time() - t0
         return res
 
     # ---- 2. 标准化（全部在内存，不落中间表）----
-    cf = build_comment_facts(comments_df)
+    cf_all = build_comment_facts(comments_df)
     # 取数区间外的评论一律不参与计算。MySQL 侧已经按 publish_time 过滤过，
     # 但离线 CSV / 手工导出不一定 —— 源表里混进一条 2013 年的评论，
     # 就能把滚动面板的日历从 400 天撑到 4700 天。
-    n_all = len(cf)
-    cf = cf[cf["travel_date"].between(load_start, load_end)]
-    if len(cf) < n_all:
-        res.notes.append(f"取数区间外的评论已剔除 {n_all - len(cf):,} 条"
-                         f"（区间 {load_start}~{load_end}）")
+    n_all = len(cf_all)
+    in_range = pd.Series(False, index=cf_all.index)
+    for a, b in ranges:
+        in_range |= cf_all["travel_date"].between(a, b)
+    cf_all = cf_all[in_range]
+    if len(cf_all) < n_all:
+        res.notes.append(f"取数区间外的评论已剔除 {n_all - len(cf_all):,} 条"
+                         f"（区间 {'、'.join(f'{a}~{b}' for a, b in ranges)}）")
+    # 四张既有表只看 [load_start, load_end]，与加 macro 之前逐字节一致
+    cf = cf_all[cf_all["travel_date"].between(load_start, load_end)]
     if cf.empty:
         res.errors.append(f"取数区间 {load_start}~{load_end} 内没有评论数据")
         res.elapsed = time.time() - t0
         return res
-    dim_facts = build_dimension_facts(cf, settings.unknown_dimension_policy)
-    kw_facts = build_keyword_facts(cf)
+    dim_all = build_dimension_facts(cf_all, settings.unknown_dimension_policy)
+    kw_all = build_keyword_facts(cf_all)
+    dim_facts = dim_all[dim_all["travel_date"].between(load_start, load_end)]
+    kw_facts = kw_all[kw_all["travel_date"].between(load_start, load_end)]
     res.notes.append(f"评论明细 {len(cf):,} 行 | 维度明细 {len(dim_facts):,} 行 | "
                      f"关键词明细 {len(kw_facts):,} 行")
 
@@ -148,13 +166,27 @@ def run(settings: EtlSettings,
         res.tables[TABLE_DRILL_ANALYSIS] = drill
         res.notes.append(f"下钻明细（词→评论→作品）{len(drill):,} 行")
 
+    # ---- 4b. 需求 2.0 大盘表（景区 × 日期 × 周期粒度 × 渠道）----
+    macro = None
+    if settings.enable_macro_metric:
+        macro = build_macro(cf_all, dim_all, kw_all, ctx)
+        res.tables[TABLE_MACRO] = macro
+        res.notes.append(f"大盘 KPI（{len(ctx.macro_granularities)} 个周期 × 渠道）"
+                         f"{len(macro):,} 行")
+
     # ---- 5. 校验 ----
     from .builders.platform import platform_scope
     codes = platform_scope(ctx, cf["platform_code"].drop_duplicates().tolist())
-    res.errors = validate_all({"core": core, "platform": platform,
-                               "dimension": dimension, "content": content,
-                               "platform_codes": codes,
-                               "backfill_mode": settings.backfill_mode})
+    checks = {"core": core, "platform": platform,
+              "dimension": dimension, "content": content,
+              "platform_codes": codes,
+              "backfill_mode": settings.backfill_mode,
+              "score_formula": settings.score_formula,
+              "score_weights": settings.score_weights}
+    if macro is not None:
+        checks["macro"] = macro
+        checks["macro_granularities"] = [g["name"] for g in ctx.macro_granularities]
+    res.errors = validate_all(checks)
 
     # 回补可见化：整窗前移到底挪了多少行、挪了几天
     lb = ctx.backfill_lookback(D_PLATFORM_WINDOWS)

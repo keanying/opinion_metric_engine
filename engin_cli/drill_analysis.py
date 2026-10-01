@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from typing import List
 
 import pandas as pd
@@ -50,6 +51,8 @@ COLUMNS: List[str] = [
     "comment_id", "root_comment_id", "comment_level", "commenter_name",
     "content_snippet", "likes", "sentiment_score",
     "dimension_level1", "dimension_level2", "dimension_level3",
+    # 需求 2.0 新增：评论地域（location 归一，domain §1.11）与实体标签（原样 JSON 数组）
+    "region", "entity_tags",
     "publish_time", "travel_date", "etl_time", "detail_uk",
 ]
 
@@ -102,6 +105,10 @@ def build_drill_analysis(comment_facts: pd.DataFrame, works: pd.DataFrame,
                 n_no_match += 1
         comment_id = str(getattr(r, "comment_id", "") or "")
         work_id = str(getattr(r, "work_id", "") or "")
+        # 实体标签原样落 JSON 数组（解析一遍再序列化，单引号等脏写法顺手修掉）；没有就是 []
+        entities = json.dumps(parse_json_array(getattr(r, "entity_tags", None)),
+                              ensure_ascii=False, separators=(",", ":"))
+        region = str(getattr(r, "region", "") or "")
 
         seen = set()
         for w in words:
@@ -137,6 +144,8 @@ def build_drill_analysis(comment_facts: pd.DataFrame, works: pd.DataFrame,
                 "dimension_level1": d1,
                 "dimension_level2": d2,
                 "dimension_level3": d3,
+                "region": region,
+                "entity_tags": entities,
                 "publish_time": r.publish_dt,
                 "travel_date": int(r.travel_date),
                 "detail_uk": _uk(r.scenic_spot_code, word, r.platform_code,

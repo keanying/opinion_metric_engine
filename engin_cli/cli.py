@@ -36,7 +36,7 @@ from .analytics import (dimension_trend, kpi_cards, negative_surge, overall_scor
                         platform_distribution, top_dimensions, trend_stacked, wordcloud)
 from .db import MySQL
 from .loader import (TABLE_CONTENT, TABLE_CORE, TABLE_DIMENSION,
-                     TABLE_DRILL_ANALYSIS, TABLE_PLATFORM)
+                     TABLE_DRILL_ANALYSIS, TABLE_MACRO, TABLE_PLATFORM)
 from .pipeline import run as run_pipeline
 from .repair import (CORE_SCORE_FIELDS, DIM_SCORE_FIELDS, repair_core,
                      repair_dimension)
@@ -94,6 +94,8 @@ def cmd_run(args) -> int:
         st.backfill_lookback = _parse_lookback(args.backfill_lookback)
     if args.no_drill_analysis:
         st.enable_drill_analysis = False
+    if args.no_macro:
+        st.enable_macro_metric = False
     _apply_push_args(st, args)
     _setup_log(args.log_level or st.log_level)
 
@@ -281,6 +283,8 @@ TABLE_ALIAS = {
     "content": TABLE_CONTENT,
     "word": TABLE_CONTENT,
     "drill": TABLE_DRILL_ANALYSIS,
+    "macro": TABLE_MACRO,
+    "kpi": TABLE_MACRO,
 }
 
 
@@ -390,6 +394,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--backfill-lookback",
                    help="覆盖各窗口最大前移天数，形如 1:5,7:10,30:20；只写要改的档")
     r.add_argument("--no-drill-analysis", action="store_true", help="不产出 5.2 下钻明细表")
+    r.add_argument("--no-macro", action="store_true",
+                   help="不产出 2.0 大盘 KPI 表（也就不会为同比多取去年同期的数据）")
     r.add_argument("--push", nargs="?", const="all", metavar="表名",
                    help="跑完推送下游。不带值=全部表；也可以只推其中几张，"
                         "如 --push core,platform（简写见下）")
@@ -413,7 +419,7 @@ def build_parser() -> argparse.ArgumentParser:
     u = sub.add_parser("push", help="把已产出的 CSV 推给下游（补推用，不重算）")
     u.add_argument("--tables", metavar="表名",
                    help="表名，逗号分隔；不填或 all=全部。"
-                        "简写：core/platform/dimension/content/drill")
+                        "简写：core/platform/dimension/content/drill/macro")
     u.add_argument("--output-dir", help="CSV 所在目录")
     u.add_argument("--push-url", help="推送地址，覆盖配置")
     u.add_argument("--push-dry-run", action="store_true", help="只组报文不真发")

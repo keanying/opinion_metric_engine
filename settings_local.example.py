@@ -189,6 +189,13 @@ ETL = {
     #   只重算并回写得分字段，其他列一个都不碰。
     # "score_formula": "weighted_v2",
 
+    # 【是什么】v2 得分公式的三档权重：S = 5 × (好评率×正面分值 + 中评率×中性分值 + 差评率×负面分值)
+    #   （需求 2.0「正面分值/中性分值/负面分值 支持配置化」）。默认 1.0 / 0.9 / 0.5。
+    # 【怎么写】只写要改的档，其余仍用默认；每档必须在 [0, 1]，配错跑批直接报错。
+    # 【影响范围】全引擎一套：core 的 emotional_score、维度表的得分、大盘表的
+    #   overall_sentiment_score / 维度明细同时生效。改完要用 repair 重刷历史分数。
+    # "score_weights": {"positive": 1.0, "neutral": 0.9, "negative": 0.5},
+
     # 【是什么】源表里一级维度不在白名单（游玩体验/服务质量/餐饮购物/设施环境/
     #           安全秩序/交通接驳）里时怎么处理。
     #   keep（默认） 保留，按原样出行 —— 大模型标出了新维度，先留着看看
@@ -218,6 +225,39 @@ ETL = {
     # 【是什么】下钻表里评论摘要截断到多少字。
     # 【什么时候改】前端展示不下那么长就调小；要看全文就调大（表会变大）。
     # "drill_content_limit": 200,
+
+
+    # ══════════════════════════════════════════════════════════════
+    # 五b、2.0 大盘 KPI 表（ads_trf_social_opinion_macro_gran_metric_di）
+    # ══════════════════════════════════════════════════════════════
+
+    # 【是什么】一行 = 景区 × 日期 × 周期粒度 × 渠道（6 个渠道 + all），
+    #   看板「总览」页的周期页签 + 平台下拉选的就是这一行。
+    # 【为什么跑批会多读一段历史】同比要去年同期的数据，引擎会额外按 publish_time
+    #   取「去年同期」那一段（不是把一年半全读进来）。关掉这张表就不读。
+    # "enable_macro_metric": True,
+
+    # 【是什么】周期粒度清单，name 原样写进 time_granularity 列。
+    #   type: rolling 近 N 日（days 天，offset 锚点往前挪几天）
+    #         week / month / quarter / year  本周 / 本月 / 本季度 / 本年（到 travel_date 为止）
+    # 【上期怎么取】rolling = 再往前 N 天；日历周期 = 上一个周期的**同样几天**
+    #   （9/1~9/17 的上期是 8/1~8/17）。同比 = 本期日期整体减一年。
+    # 【缺数回补】rolling 周期按渠道整窗前移（跟 core/platform 一样），日历周期与同比不回补。
+    # 【默认值】不配就是下面这 9 个；要加一个周期就把整份清单抄过来再加一行。
+    # "macro_granularities": [
+    #     {"name": "今日",   "type": "rolling", "days": 1},
+    #     {"name": "近一日", "type": "rolling", "days": 1, "offset": 1},
+    #     {"name": "近7日",  "type": "rolling", "days": 7},
+    #     {"name": "本周",   "type": "week"},
+    #     {"name": "近30日", "type": "rolling", "days": 30},
+    #     {"name": "本月",   "type": "month"},
+    #     {"name": "近60日", "type": "rolling", "days": 60},
+    #     {"name": "近90日", "type": "rolling", "days": 90},
+    #     {"name": "本季度", "type": "quarter"},
+    # ],
+
+    # 【是什么】词云好/中/差各取前几个词。
+    # "macro_wordcloud_top_n": 30,
 
     # ---- content_snippet 掩码：除命中的关键词外，其余内容一律隐藏 ----
     # 【效果】
@@ -330,6 +370,16 @@ ETL = {
     #   之后用 `python -m engin_cli.cli push` 从 CSV 补推一次就行。
     # 【什么时候改 True】下游是强依赖，推不过去就必须告警。
     # "push_strict": False,
+
+    # 【是什么】网关 HTTP 恒为 200，成败写在响应体里：
+    #   {"status": false, "code": 5011, "msg": "...", "trace_id": "..."}
+    #   响应体是 JSON 且带 push_success_field 时，它为假就算这一批推送失败（不重试），
+    #   报告里带上 code / msg / trace_id，拿 trace_id 找对方查日志。
+    # 【什么时候改】下游用别的字段名就改这四项；"push_success_field": "" 关闭检查。
+    # "push_success_field": "status",
+    # "push_code_field": "code",
+    # "push_message_field": "msg",
+    # "push_trace_field": "trace_id",
 
 
     # ══════════════════════════════════════════════════════════════

@@ -83,7 +83,8 @@ def build_core(comment_facts: pd.DataFrame, ctx: RunContext) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=COLUMNS)
 
-    out = D.core_metrics(df, formula=ctx.settings.score_formula)
+    out = D.core_metrics(df, formula=ctx.settings.score_formula,
+                         weights=ctx.score_weights)
     out["scenic_spot_name"] = df["scenic_spot_name"]
     out["scenic_spot_code"] = df["scenic_spot_code"]
     out["travel_date"] = df["travel_date"].astype(int)

@@ -60,7 +60,8 @@ def build_dimension(dim_facts: pd.DataFrame, ctx: RunContext) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=COLUMNS)
 
-    out = D.dimension_metrics(df, formula=ctx.settings.score_formula)
+    out = D.dimension_metrics(df, formula=ctx.settings.score_formula,
+                              weights=ctx.score_weights)
     out["scenic_spot_code"] = df["scenic_spot_code"]
     out["scenic_spot_name"] = df["scenic_spot_name"]
     out["dimension_level1"] = df["dimension_level1"]

@@ -36,6 +36,10 @@ DIMS = [
 POS_WORDS = ["鬼斧神工", "心旷神怡", "流连忘返", "名不虚传", "身临其境", "值得再来", "凉爽"]
 NEU_WORDS = ["人多", "排队", "周末", "自驾", "亲子", "小长假"]
 NEG_WORDS = ["太差", "超级累", "排队久", "宰客", "脏乱", "堵车", "滞留", "泥石流"]
+# 发布地址：各平台写法不统一（带「IP属地」前缀、省/市全称、只写城市、境外、空），
+# 用来覆盖地域归一（domain §1.11）。按评论 ID 取，不消耗随机数 —— 加这一列不改变其余样例数据。
+LOCATIONS = ["IP属地：广东", "北京", "上海市", "四川成都", "浙江省", "江苏", "IP属地:湖北",
+             "", "美国", "黑龙江哈尔滨", "广西壮族自治区", "广东省深圳市", "北京市"]
 
 
 def _uk(*p):
@@ -109,7 +113,8 @@ def main():
                     "work_id": wid, "comment_level": lvl,
                     "comment_parent_id": "" if lvl == "level_1" else f"c{code}_{d}_0",
                     "comment_id": cid, "commenter_id": f"u{j}",
-                    "image_list": "[]", "video_list": "[]", "location": "",
+                    "image_list": "[]", "video_list": "[]",
+                    "location": LOCATIONS[int(_uk(cid)[:8], 16) % len(LOCATIONS)],
                     "content": f"{name}的{dim[1]}，{'很棒' if s > 0 else ('一般' if s == 0 else '很差')}",
                     "likes": random.randint(0, 300), "extra_content": "{}",
                     "sentiment_label": {1: "正向", 0: "中性", -1: "负向"}[s],

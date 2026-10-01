@@ -45,6 +45,18 @@ class RunContext:
             return travel_date.astype(str)
         return pd.to_datetime(travel_date.astype(str), format="%Y%m%d").dt.strftime(fmt)
 
+    @property
+    def score_weights(self) -> tuple:
+        """本次跑批的得分权重 (好, 中, 差)，来自 settings.score_weights（domain §1.1）。"""
+        from . import metric_calc_domain as D
+        return D.resolve_score_weights(getattr(self.settings, "score_weights", None))
+
+    @property
+    def macro_granularities(self) -> list:
+        """macro 表的周期粒度清单（domain §1.10），已校验。"""
+        from . import metric_calc_domain as D
+        return D.macro_granularities(getattr(self.settings, "macro_granularities", None))
+
     def backfill_lookback(self, windows) -> dict:
         """本次跑批用的「整窗前移」上限：{窗口天数: 最大前移天数}。
 

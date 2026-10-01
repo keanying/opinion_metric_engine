@@ -30,7 +30,7 @@ TABLE_WORK = "src_opinion_social_work_di"
 COMMENT_COLS = [
     "scenic_id", "scenic_name", "channel", "work_id",
     "comment_level", "comment_parent_id", "comment_id", "root_comment_id",
-    "commenter_name", "content", "likes",
+    "commenter_name", "content", "likes", "location",
     "sentiment_label", "sentiment_score",
     "dimension_tags", "entity_tags", "keyword_tags",
     "publish_time",

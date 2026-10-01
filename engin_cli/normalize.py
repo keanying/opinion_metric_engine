@@ -26,7 +26,7 @@ import pandas as pd
 
 from .metric_calc_domain import (
     CHANNEL_NAME, L1_DIMENSIONS, NEGATIVE, NEUTRAL, POSITIVE,
-    SENTIMENT_TYPE, judge_sentiment,
+    SENTIMENT_TYPE, judge_sentiment, normalize_region,
 )
 
 log = logging.getLogger(__name__)
@@ -83,7 +83,8 @@ def build_comment_facts(comments: pd.DataFrame) -> pd.DataFrame:
     返回列：
       scenic_spot_code / scenic_spot_name / travel_date / channel /
       platform_code / platform_name / comment_id / work_id / comment_uk /
-      sentiment / is_positive / is_neutral / is_negative / publish_dt
+      sentiment / is_positive / is_neutral / is_negative / publish_dt /
+      region（location 归一后的地域，见 domain §1.11）
     """
     if comments.empty:
         return _empty_comment_facts()
@@ -116,10 +117,13 @@ def build_comment_facts(comments: pd.DataFrame) -> pd.DataFrame:
     df["is_positive"] = (df["sentiment"] == POSITIVE).astype("int64")
     df["is_neutral"] = (df["sentiment"] == NEUTRAL).astype("int64")
     df["is_negative"] = (df["sentiment"] == NEGATIVE).astype("int64")
+    # 地域：热力地图与下钻表都用它。源表没有 location 列（老 CSV）时全部为空
+    df["region"] = (df["location"].map(normalize_region) if "location" in df.columns
+                    else "")
 
     keep = ["scenic_spot_code", "scenic_spot_name", "travel_date", "channel",
             "platform_code", "platform_name", "sentiment",
-            "is_positive", "is_neutral", "is_negative", "publish_dt"]
+            "is_positive", "is_neutral", "is_negative", "publish_dt", "region"]
     for c in ("comment_id", "work_id", "comment_uk", "comment_level",
               "root_comment_id", "likes", "content", "commenter_name",
               "dimension_tags", "keyword_tags", "entity_tags"):
@@ -132,7 +136,7 @@ def _empty_comment_facts() -> pd.DataFrame:
     return pd.DataFrame(columns=[
         "scenic_spot_code", "scenic_spot_name", "travel_date", "channel",
         "platform_code", "platform_name", "sentiment",
-        "is_positive", "is_neutral", "is_negative", "publish_dt"])
+        "is_positive", "is_neutral", "is_negative", "publish_dt", "region"])
 
 
 # ============================================================
@@ -147,7 +151,7 @@ def build_dimension_facts(comment_facts: pd.DataFrame,
 
     每行的情感取**该维度自己的 sentiment**，拿不到才退回整条评论的情感。
     """
-    cols = ["scenic_spot_code", "scenic_spot_name", "travel_date",
+    cols = ["scenic_spot_code", "scenic_spot_name", "travel_date", "platform_code",
             "dimension_level1", "dimension_level2", "dimension_level3",
             "dim_sentiment", "is_positive", "is_neutral", "is_negative"]
     if comment_facts.empty or "dimension_tags" not in comment_facts.columns:
@@ -175,6 +179,7 @@ def build_dimension_facts(comment_facts: pd.DataFrame,
                 "scenic_spot_code": r.scenic_spot_code,
                 "scenic_spot_name": r.scenic_spot_name,
                 "travel_date": r.travel_date,
+                "platform_code": getattr(r, "platform_code", ""),
                 "dimension_level1": l1,
                 "dimension_level2": str(t.get("dim2") or "").strip(),
                 "dimension_level3": str(t.get("dim3") or "").strip(),
@@ -202,8 +207,8 @@ def build_keyword_facts(comment_facts: pd.DataFrame) -> pd.DataFrame:
     同一个词若同时出现在正/负评论中，会分别计入 positive / negative 两组，
     最终由 content builder 按 emotion_word 去重时保留计数更大的那一组。
     """
-    cols = ["scenic_spot_code", "scenic_spot_name", "travel_date",
-            "emotion_type", "emotion_word"]
+    cols = ["scenic_spot_code", "scenic_spot_name", "travel_date", "platform_code",
+            "sentiment", "emotion_type", "emotion_word"]
     if comment_facts.empty or "keyword_tags" not in comment_facts.columns:
         return pd.DataFrame(columns=cols)
 
@@ -225,6 +230,8 @@ def build_keyword_facts(comment_facts: pd.DataFrame) -> pd.DataFrame:
                 "scenic_spot_code": r.scenic_spot_code,
                 "scenic_spot_name": r.scenic_spot_name,
                 "travel_date": r.travel_date,
+                "platform_code": getattr(r, "platform_code", ""),
+                "sentiment": int(r.sentiment),
                 "emotion_type": etype,
                 "emotion_word": word,
             })

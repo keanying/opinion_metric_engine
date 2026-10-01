@@ -117,6 +117,13 @@ class EtlSettings:
     push_retry_backoff: float = 1.0          # 重试退避基数，第 n 次等 backoff×2^n 秒
     push_dry_run: bool = False               # 只组报文不真发，用来验证配置
     push_strict: bool = False                # True: 推送失败也让跑批退出码非 0
+    # 网关把业务失败放在响应体里：HTTP 200 + {"status": false, "code": ..., "msg": ...}。
+    # 响应体是 JSON 且带 push_success_field 时，它为假就算推送失败（不重试，报文/鉴权问题）。
+    # 响应体不是 JSON、或没有这个字段 → 只看 HTTP 状态码。设成 "" 关闭这项检查。
+    push_success_field: str = "status"
+    push_code_field: str = "code"
+    push_message_field: str = "msg"
+    push_trace_field: str = "trace_id"
 
     # ---- 5.2 下钻分析表（ads_trf_social_opinion_drill_analysis_di）----
     enable_drill_analysis: bool = True
@@ -154,6 +161,20 @@ class EtlSettings:
     #   S = 5 × (好评率×1.0 + 中评率×0.9 + 差评率×0.5)，值域 [2.5, 5]
     # 回滚到历史口径填 "confidence_v1"（值域 [0,10]），看板刻度要同步改。
     score_formula: str = "weighted_v2"
+    # v2 的三档权重（需求 2.0「正面分值/中性分值/负面分值 支持配置化」）。
+    # None = 1.0 / 0.9 / 0.5；只写要改的档，例如 {"neutral": 0.8}。每档须在 [0, 1]。
+    # 全引擎一套：core / dimension / macro 三张表同时生效，改了要用 repair 重刷历史分数。
+    score_weights: Optional[Dict[str, float]] = None
+
+    # ---- macro 大盘表（ads_trf_social_opinion_macro_gran_metric_di，需求 2.0）----
+    enable_macro_metric: bool = True
+    # 周期粒度清单。None = domain §1.10 的默认 9 个：
+    #   今日 / 近一日 / 近7日 / 本周 / 近30日 / 本月 / 近60日 / 近90日 / 本季度
+    # 每项 {"name": 写进 time_granularity 的值, "type": rolling|week|month|quarter|year,
+    #       "days": rolling 的天数, "offset": 锚点往前挪几天（默认 0）}
+    # 例：加一个「近14日」→ {"name": "近14日", "type": "rolling", "days": 14}
+    macro_granularities: Optional[List[Dict[str, Any]]] = None
+    macro_wordcloud_top_n: int = 30          # 词云好/中/差各取前 N 个
 
     # ---- 其他 ----
     unknown_dimension_policy: str = "keep"   # keep | drop：非白名单一级维度的处理
