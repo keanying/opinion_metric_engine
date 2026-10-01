@@ -237,7 +237,8 @@ ETL = {
     #   取「去年同期」那一段（不是把一年半全读进来）。关掉这张表就不读。
     # "enable_macro_metric": True,
 
-    # 【是什么】周期粒度清单，name 原样写进 time_granularity 列。
+    # 【是什么】周期粒度清单，name 原样写进 time_granularity 列（英文编码），
+    #   label 是中文名，只是方便看，不落表。
     #   type: rolling 近 N 日（days 天，offset 锚点往前挪几天）
     #         week / month / quarter / year  本周 / 本月 / 本季度 / 本年（到 travel_date 为止）
     # 【上期怎么取】rolling = 再往前 N 天；日历周期 = 上一个周期的**同样几天**
@@ -245,15 +246,15 @@ ETL = {
     # 【缺数回补】rolling 周期按渠道整窗前移（跟 core/platform 一样），日历周期与同比不回补。
     # 【默认值】不配就是下面这 9 个；要加一个周期就把整份清单抄过来再加一行。
     # "macro_granularities": [
-    #     {"name": "今日",   "type": "rolling", "days": 1},
-    #     {"name": "近一日", "type": "rolling", "days": 1, "offset": 1},
-    #     {"name": "近7日",  "type": "rolling", "days": 7},
-    #     {"name": "本周",   "type": "week"},
-    #     {"name": "近30日", "type": "rolling", "days": 30},
-    #     {"name": "本月",   "type": "month"},
-    #     {"name": "近60日", "type": "rolling", "days": 60},
-    #     {"name": "近90日", "type": "rolling", "days": 90},
-    #     {"name": "本季度", "type": "quarter"},
+    #     {"name": "today",        "label": "今日",   "type": "rolling", "days": 1},
+    #     {"name": "latest_1d",    "label": "近一日", "type": "rolling", "days": 1, "offset": 1},
+    #     {"name": "latest_7d",    "label": "近7日",  "type": "rolling", "days": 7},
+    #     {"name": "this_week",    "label": "本周",   "type": "week"},
+    #     {"name": "latest_30d",   "label": "近30日", "type": "rolling", "days": 30},
+    #     {"name": "this_month",   "label": "本月",   "type": "month"},
+    #     {"name": "latest_60d",   "label": "近60日", "type": "rolling", "days": 60},
+    #     {"name": "latest_90d",   "label": "近90日", "type": "rolling", "days": 90},
+    #     {"name": "this_quarter", "label": "本季度", "type": "quarter"},
     # ],
 
     # 【是什么】词云好/中/差各取前几个词。

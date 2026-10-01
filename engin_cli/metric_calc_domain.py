@@ -242,7 +242,22 @@ DEFAULT_BACKFILL_MODE = BACKFILL_MODE_SHIFT
 #
 # 一行 = 景区 × 日期 × 周期粒度 × 渠道（6 个渠道 + all）。看板「总览」页的
 # 周期页签 + 平台下拉，选中的就是这一行。周期粒度可配置（settings.macro_granularities），
-# 每一项是 {"name": 写进 time_granularity 的值, "type": 周期类型, ...}：
+# 每一项是 {"name": 写进 time_granularity 的编码, "label": 中文名（只用于注释/日志，不落表）,
+#           "type": 周期类型, ...}：
+#
+#   time_granularity  中文名   类型
+#   ────────────────  ──────  ─────────────────────
+#   today             今日     rolling 1 天
+#   latest_1d         近一日   rolling 1 天，offset 1
+#   latest_7d         近7日    rolling 7 天
+#   this_week         本周     week
+#   latest_30d        近30日   rolling 30 天
+#   this_month        本月     month
+#   latest_60d        近60日   rolling 60 天
+#   latest_90d        近90日   rolling 90 天
+#   this_quarter      本季度   quarter
+#
+# 各类型的本期 / 上期：
 #
 #   type       本期                                     上期（环比的分母）
 #   ─────────  ───────────────────────────────────────  ─────────────────────────────
@@ -255,17 +270,29 @@ DEFAULT_BACKFILL_MODE = BACKFILL_MODE_SHIFT
 #
 #   同比（yoy）的对比期 = **本期日期整体减一年**（2026-09-01~09-17 → 2025-09-01~09-17）。
 #
-# 「今日 / 近一日」的区分（业务确认）：
-#   今日   = travel_date 当天（定时任务按当天跑时是不完整的一天）
-#   近一日 = travel_date 的前一天（最近一个完整日）
+# 「今日 today / 近一日 latest_1d」的区分（业务确认）：
+#   today     = travel_date 当天（定时任务按当天跑时是不完整的一天）
+#   latest_1d = travel_date 的前一天（最近一个完整日）
 #
-# 缺数回补（业务确认，与 core/platform 一致）：
-#   · rolling 周期在**渠道粒度**上整窗前移（同 §1.8/§1.9 的规则与上限），
-#     所以「近 7 日」某渠道的 comment_total == platform 表该渠道的 comment_cnt_7d，
-#     all 行 == 各渠道相加；挪了窗口时，上期跟着挪，词云/维度/热力也取挪后的那个窗口。
-#     上限按窗口天数查 §1.8 的表（1/7/14/30/60/90/365），表里没有的天数不回补。
-#   · week / month / quarter / year 是日历周期，**不回补**，取真实计数。
-#   · 同比的去年同期**不回补**，取真实计数（对比期 = 实际使用的本期窗口减一年）。
+# 缺数回补（业务确认：**所有指标都在补齐数据之后再算**，不能有指标因为当期没数据而没有值）
+#
+#   规则同 §1.8 / §1.9：在**渠道粒度**上整窗前移，一天一天往前挪，挪到窗口里有数据为止，
+#   用那一个窗口的值（不是累计）；挪满上限仍没有数据才取 0。all 行 = 各渠道补齐后相加。
+#   本期、上期、去年同期三个窗口**各自**检查、各自补：
+#
+#   · 本期    当期没数据 → 整窗前移 s 天。rolling 周期的 s 直接取 windows.rolling_windows
+#             （与 core/platform 同一个实现），所以 latest_7d 某渠道的 comment_total
+#             == platform 表该渠道的 comment_cnt_7d。日历周期（本周/本月/本季度）同样前移，
+#             窗口长度 = 本期已过的天数（周三的 this_week 就是 3 天的窗口）。
+#   · 上期    先跟着本期挪 s 天；挪完的上期窗口还是没数据 → 再独立往前挪 p 天。
+#   · 去年同期 = 实际使用的本期窗口减一年；没数据 → 再独立往前挪 y 天。
+#             （源表如果只留了半年，去年同期根本没数据，挪到上限也补不出来，同比仍是 0。）
+#
+#   上限（最大前移天数）按窗口档位查 §1.8 的表，settings.backfill_lookback 改了也跟着生效：
+#     rolling N 日 → N 日档（表里没有的天数不回补）
+#     本周 → 7 日档（10 天）  本月 → 30 日档（20 天）  本季度 → 90 日档（60 天）  本年 → 365 日档（90 天）
+#   上期、去年同期的上限与本期相同。词云 / 维度 / 热力都取补齐后实际使用的那个窗口。
+#   backfill_mode = "off" 时三个窗口都不回补。
 MACRO_PERIOD_ROLLING = "rolling"
 MACRO_PERIOD_WEEK = "week"
 MACRO_PERIOD_MONTH = "month"
@@ -273,17 +300,20 @@ MACRO_PERIOD_QUARTER = "quarter"
 MACRO_PERIOD_YEAR = "year"
 MACRO_PERIOD_TYPES = (MACRO_PERIOD_ROLLING, MACRO_PERIOD_WEEK, MACRO_PERIOD_MONTH,
                       MACRO_PERIOD_QUARTER, MACRO_PERIOD_YEAR)
+# 日历周期回补上限借用哪个窗口档位（见上面「缺数回补」）
+MACRO_CALENDAR_BACKFILL_WINDOW = {MACRO_PERIOD_WEEK: 7, MACRO_PERIOD_MONTH: 30,
+                                  MACRO_PERIOD_QUARTER: 90, MACRO_PERIOD_YEAR: 365}
 
 MACRO_GRANULARITIES: List[Dict[str, Any]] = [
-    {"name": "今日", "type": MACRO_PERIOD_ROLLING, "days": 1},
-    {"name": "近一日", "type": MACRO_PERIOD_ROLLING, "days": 1, "offset": 1},
-    {"name": "近7日", "type": MACRO_PERIOD_ROLLING, "days": 7},
-    {"name": "本周", "type": MACRO_PERIOD_WEEK},
-    {"name": "近30日", "type": MACRO_PERIOD_ROLLING, "days": 30},
-    {"name": "本月", "type": MACRO_PERIOD_MONTH},
-    {"name": "近60日", "type": MACRO_PERIOD_ROLLING, "days": 60},
-    {"name": "近90日", "type": MACRO_PERIOD_ROLLING, "days": 90},
-    {"name": "本季度", "type": MACRO_PERIOD_QUARTER},
+    {"name": "today", "label": "今日", "type": MACRO_PERIOD_ROLLING, "days": 1},
+    {"name": "latest_1d", "label": "近一日", "type": MACRO_PERIOD_ROLLING, "days": 1, "offset": 1},
+    {"name": "latest_7d", "label": "近7日", "type": MACRO_PERIOD_ROLLING, "days": 7},
+    {"name": "this_week", "label": "本周", "type": MACRO_PERIOD_WEEK},
+    {"name": "latest_30d", "label": "近30日", "type": MACRO_PERIOD_ROLLING, "days": 30},
+    {"name": "this_month", "label": "本月", "type": MACRO_PERIOD_MONTH},
+    {"name": "latest_60d", "label": "近60日", "type": MACRO_PERIOD_ROLLING, "days": 60},
+    {"name": "latest_90d", "label": "近90日", "type": MACRO_PERIOD_ROLLING, "days": 90},
+    {"name": "this_quarter", "label": "本季度", "type": MACRO_PERIOD_QUARTER},
 ]
 
 # 渠道 = 配置的渠道全集（同 platform 表，见 §1.7）+ 一条「整体」
@@ -1290,8 +1320,8 @@ def macro_granularities(cfg=None) -> List[Dict[str, Any]]:
     """校验并补全周期粒度配置（settings.macro_granularities）。
 
     入参：cfg None（用 §1.10 的默认 9 个周期）/ list[dict]，每项
-          {"name": "近7日", "type": "rolling", "days": 7, "offset": 0}
-    出参：list[dict]，每项都带齐 name/type/days/offset
+          {"name": "latest_7d", "label": "近7日", "type": "rolling", "days": 7, "offset": 0}
+    出参：list[dict]，每项都带齐 name/label/type/days/offset（label 没写就等于 name）
     口径要点：name 写进 time_granularity 并进唯一键，不能重名；
               配错直接抛错 —— 少一个周期看板就空一块，不能悄悄跳过。
     """
@@ -1316,7 +1346,7 @@ def macro_granularities(cfg=None) -> List[Dict[str, Any]]:
         if typ == MACRO_PERIOD_ROLLING and days < 1:
             raise ValueError(f"周期 {name!r} 是 rolling，必须写 days（≥1）")
         seen.add(name)
-        out.append({"name": name, "type": typ,
+        out.append({"name": name, "label": str(raw.get("label") or name), "type": typ,
                      "days": days if typ == MACRO_PERIOD_ROLLING else 0,
                      "offset": offset})
     if not out:
@@ -1344,19 +1374,32 @@ def _prev_period_start(typ: str, start: pd.Timestamp) -> pd.Timestamp:
     return start - _ONE_YEAR
 
 
-def macro_period_ranges(spec: Dict[str, Any], travel_date, shift: int = 0) -> Dict[str, tuple]:
+def macro_backfill_window(spec: Dict[str, Any]) -> int:
+    """这个周期的缺数回补上限按哪个窗口档位查（§1.10）：rolling = 自身天数，日历周期见映射表。"""
+    if spec["type"] == MACRO_PERIOD_ROLLING:
+        return int(spec["days"])
+    return MACRO_CALENDAR_BACKFILL_WINDOW[spec["type"]]
+
+
+def macro_period_ranges(spec: Dict[str, Any], travel_date, shift: int = 0,
+                        prev_shift: int = 0, yoy_shift: int = 0) -> Dict[str, tuple]:
     """周期 → 本期 / 上期 / 去年同期 三段日期区间（闭区间）。
 
     公式（规则见 §1.10）
     ----
-      rolling  锚点 A = travel_date - offset - shift
+      rolling  锚点 A = travel_date - offset
                本期 [A-N+1, A]，上期 [A-2N+1, A-N]
       日历周期 本期 [周期首日, travel_date]，
                上期 [上周期首日, min(上周期首日 + 已过天数, 上周期末日)]
       同比     去年同期 = 本期两端各减一年（2 月 29 日落到 2 月 28 日）
 
+      整窗前移（缺数回补）：
+        本期      整体往前挪 shift 天
+        上期      跟着本期挪 shift 天，再独立往前挪 prev_shift 天
+        去年同期  = 挪过的本期减一年，再独立往前挪 yoy_shift 天
+
     入参：spec macro_granularities() 的一项；travel_date yyyyMMdd 或 Timestamp；
-          shift 整窗前移天数（只对 rolling 有意义，来自 windows.rolling_windows 的 shift_<N>d）
+          shift / prev_shift / yoy_shift 前移天数（由 builder 按「挪到有数据为止」找出来）
     出参：{"cur": (lo, hi), "prev": (lo, hi), "yoy": (lo, hi)}，值为 Timestamp
     """
     t = (pd.to_datetime(str(travel_date), format=DATE_FMT)
@@ -1364,16 +1407,22 @@ def macro_period_ranges(spec: Dict[str, Any], travel_date, shift: int = 0) -> Di
     t = t - pd.Timedelta(days=int(spec.get("offset") or 0))
     if spec["type"] == MACRO_PERIOD_ROLLING:
         n = int(spec["days"])
-        a = t - pd.Timedelta(days=int(shift))
-        cur = (a - pd.Timedelta(days=n - 1), a)
-        prev = (a - pd.Timedelta(days=2 * n - 1), a - pd.Timedelta(days=n))
+        cur = (t - pd.Timedelta(days=n - 1), t)
+        prev = (t - pd.Timedelta(days=2 * n - 1), t - pd.Timedelta(days=n))
     else:
         start = _period_start(spec["type"], t)
         prev_start = _prev_period_start(spec["type"], start)
         prev_end = start - pd.Timedelta(days=1)
         cur = (start, t)
         prev = (prev_start, min(prev_start + (t - start), prev_end))
-    yoy = (cur[0] - _ONE_YEAR, cur[1] - _ONE_YEAR)
+
+    def _move(rng, days):
+        d = pd.Timedelta(days=int(days))
+        return (rng[0] - d, rng[1] - d)
+
+    cur = _move(cur, shift)
+    prev = _move(prev, int(shift) + int(prev_shift))
+    yoy = _move((cur[0] - _ONE_YEAR, cur[1] - _ONE_YEAR), yoy_shift)
     return {"cur": cur, "prev": prev, "yoy": yoy}
 
 

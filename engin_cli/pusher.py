@@ -36,8 +36,10 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
+import socket
 import time
 import urllib.error
 import urllib.request
@@ -83,6 +85,7 @@ class PushResult:
     batches: int = 0            # 成功的批次数
     failed_batches: int = 0
     skipped: bool = False       # 未配置/被开关关掉/空表
+    unreachable: bool = False   # 推送地址连不上（拒绝连接 / 域名解析失败），后面的表不再推
     error: str = ""
     elapsed: float = 0.0
 
@@ -169,6 +172,39 @@ class BusinessError(RuntimeError):
     """HTTP 2xx，但响应体说失败了（status=false）。不重试。"""
 
 
+class UnreachableError(RuntimeError):
+    """推送地址根本连不上（每次都是拒绝连接 / 域名解析失败）。
+
+    这种情况下后面每一批、每一张表都会一样失败，每批还要白等完整的重试退避 ——
+    表现出来就是「卡住了」。所以一旦确认连不上，整次推送立即停止。
+    """
+
+
+_UNREACHABLE_ERRNO = {getattr(errno, n) for n in
+                      ("ECONNREFUSED", "ENETUNREACH", "EHOSTUNREACH", "EADDRNOTAVAIL")
+                      if hasattr(errno, n)}
+
+
+def _is_unreachable(reason: Any) -> bool:
+    """URLError.reason 是不是「地址连不上」。超时不算（可能只是这一批慢）。"""
+    if isinstance(reason, (socket.timeout, TimeoutError)):
+        return False
+    if isinstance(reason, (ConnectionRefusedError, socket.gaierror)):
+        return True
+    return isinstance(reason, OSError) and getattr(reason, "errno", None) in _UNREACHABLE_ERRNO
+
+
+def _reason_text(reason: Any) -> str:
+    """把常见网络错误翻成人话，原文附在后面方便查。"""
+    if isinstance(reason, ConnectionRefusedError):
+        return f"连接被拒绝（地址上没有服务在监听）[{reason}]"
+    if isinstance(reason, socket.gaierror):
+        return f"域名解析失败 [{reason}]"
+    if isinstance(reason, (socket.timeout, TimeoutError)):
+        return "超时"
+    return str(reason)
+
+
 def _post(url: str, body: Dict[str, Any], headers: Dict[str, str],
           timeout: float) -> tuple:
     """发一个 POST，返回 (status, 响应文本)。只用标准库。"""
@@ -214,9 +250,15 @@ def check_response(text: str, fields: Optional[Dict[str, str]] = None) -> None:
 
 def _post_with_retry(url: str, body: Dict[str, Any], headers: Dict[str, str],
                      timeout: float, retries: int, backoff: float,
-                     response_fields: Optional[Dict[str, str]] = None) -> None:
-    """失败重试。不可重试的错误直接抛，不浪费时间。"""
+                     response_fields: Optional[Dict[str, str]] = None,
+                     on_retry=None) -> None:
+    """失败重试。不可重试的错误直接抛，不浪费时间。
+
+    on_retry(第几次重试, 共几次, 原因, 等几秒)：每次重试前回调，进度条用它把「在重试」显示出来。
+    每一次都是「连不上」→ 抛 UnreachableError，调用方据此停止整次推送。
+    """
     last = None
+    unreachable = True
     for attempt in range(max(int(retries), 0) + 1):
         try:
             status, text = _post(url, body, headers, timeout)
@@ -228,22 +270,37 @@ def _post_with_retry(url: str, body: Dict[str, Any], headers: Dict[str, str],
             last = f"HTTP {status}: {text}"
             if status not in RETRYABLE_STATUS:
                 raise RuntimeError(last)           # 4xx：报文/鉴权问题，重试无意义
+            unreachable = False
         except urllib.error.HTTPError as e:
+            unreachable = False
             text = e.read().decode("utf-8", "replace")[:500] if e.fp else ""
             last = f"HTTP {e.code}: {text}"
             if e.code not in RETRYABLE_STATUS:
                 raise RuntimeError(last) from None
         except urllib.error.URLError as e:
-            last = f"网络错误: {e.reason}"
-        except TimeoutError:
-            last = f"超时（{timeout}s）"
+            unreachable = unreachable and _is_unreachable(e.reason)
+            last = f"网络错误：{_reason_text(e.reason)}"
+            if isinstance(e.reason, (socket.timeout, TimeoutError)):
+                last = f"超时（{timeout:g}s 没有响应）"
+        except (socket.timeout, TimeoutError):
+            unreachable = False
+            last = f"超时（{timeout:g}s 没有响应）"
         if attempt < retries:
-            time.sleep(backoff * (2 ** attempt))   # 指数退避，别把下游打死
+            wait = backoff * (2 ** attempt)        # 指数退避，别把下游打死
+            if on_retry is not None:
+                on_retry(attempt + 1, int(retries), last, wait)
+            time.sleep(wait)
+    if unreachable:
+        raise UnreachableError(f"{last}（地址 {url}）")
     raise RuntimeError(last or "未知错误")
 
 
-def push_table(table: str, df: pd.DataFrame, *, settings) -> PushResult:
-    """推一张表。分批发，任何一批失败都记下来但不中断其余批次。"""
+def push_table(table: str, df: pd.DataFrame, *, settings, progress=None) -> PushResult:
+    """推一张表。分批发，任何一批失败都记下来但不中断其余批次。
+
+    例外：推送地址连不上（UnreachableError）时立即停止，res.unreachable = True。
+    progress：进度条（见 progress.PushProgress），None 就不显示。
+    """
     res = PushResult(table=table)
     t0 = time.time()
     if df is None or df.empty:
@@ -264,9 +321,17 @@ def push_table(table: str, df: pd.DataFrame, *, settings) -> PushResult:
     timeout = float(getattr(settings, "push_timeout", 30))
     retries = int(getattr(settings, "push_retries", 2))
     backoff = float(getattr(settings, "push_retry_backoff", 1.0))
+    total = (len(df) + size - 1) // size
+    if progress is not None:
+        progress.start()
 
     for i in range(0, len(df), size):
         chunk = df.iloc[i:i + size]
+        batch_no = i // size + 1
+        on_retry = None
+        if progress is not None:
+            def on_retry(attempt, n, reason, wait, _b=batch_no):
+                progress.retry(_b, attempt, n, reason, wait)
         body = build_payload(table, chunk, pk,
                              body_fields=getattr(settings, "push_body_fields", None),
                              table_name=cfg["name"],
@@ -277,15 +342,35 @@ def push_table(table: str, df: pd.DataFrame, *, settings) -> PushResult:
                          table, res.batches + 1, len(chunk))
             else:
                 _post_with_retry(url, body, headers, timeout, retries, backoff,
-                                 response_fields=_response_fields(settings))
+                                 response_fields=_response_fields(settings),
+                                 on_retry=on_retry)
             res.batches += 1
             res.rows += len(chunk)
+            if progress is not None:
+                progress.batch_done(len(chunk), ok=True)
+        except UnreachableError as e:
+            # 连不上：剩下的批次一样会失败，别再一批一批地白等重试
+            res.unreachable = True
+            res.failed_batches += total - res.batches
+            res.error = f"推送地址连不上，已停止推送：{e}"
+            if progress is not None:
+                progress.batch_failed(batch_no, str(e))
+            else:
+                log.error("推送 %s 第 %d 批：%s", table, batch_no, res.error)
+            break
         except Exception as e:                      # noqa: BLE001 —— 推送失败不能拖垮跑批
             res.failed_batches += 1
             if not res.error:
-                res.error = f"第 {i // size + 1} 批（{len(chunk)} 行）{e}"
-            log.warning("推送 %s 第 %d 批失败：%s", table, i // size + 1, e)
+                res.error = f"第 {batch_no} 批（{len(chunk)} 行）{e}"
+            if progress is not None:
+                progress.batch_done(len(chunk), ok=False)
+                progress.batch_failed(batch_no, str(e))
+            else:
+                log.warning("推送 %s 第 %d 批失败：%s", table, batch_no, e)
     res.elapsed = time.time() - t0
+    if progress is not None:
+        progress.finish("✓" if res.ok else "✗ 连不上，已停止" if res.unreachable
+                        else f"✗ {res.failed_batches} 批失败")
     return res
 
 
@@ -304,11 +389,14 @@ def _table_config(table: str, settings) -> Dict[str, Any]:
     return {"pk": list(pk_map.get(table, [])), "name": name_map.get(table, table)}
 
 
-def push_all(tables: Dict[str, pd.DataFrame], *, settings) -> PushReport:
+def push_all(tables: Dict[str, pd.DataFrame], *, settings,
+             progress_factory=None) -> PushReport:
     """跑批产物 → 逐表推送。开关关着、地址没配就整体跳过。
 
     入参：tables {表名: DataFrame}（就是 PipelineResult.tables）
+          progress_factory(表名, 总批数, 总行数) → 进度条；None 不显示
     出参：PushReport（.ok / .errors / .notes()）
+    推送地址连不上时，剩下的表不再推，记为失败（error 里写明原因），可之后用 push 补推。
     """
     rep = PushReport()
     if not getattr(settings, "push_enabled", False):
@@ -320,8 +408,17 @@ def push_all(tables: Dict[str, pd.DataFrame], *, settings) -> PushReport:
 
     only = getattr(settings, "push_tables", None)
     only = set(only) if only else None
-    for table, df in tables.items():
-        if only is not None and table not in only:
-            continue
-        rep.results.append(push_table(table, df, settings=settings))
+    size = max(int(getattr(settings, "push_batch_size", 500)), 1)
+    todo = [(t, df) for t, df in tables.items() if only is None or t in only]
+    for k, (table, df) in enumerate(todo):
+        progress = None
+        if progress_factory is not None and df is not None and not df.empty:
+            progress = progress_factory(table, (len(df) + size - 1) // size, len(df))
+        r = push_table(table, df, settings=settings, progress=progress)
+        rep.results.append(r)
+        if r.unreachable:
+            for t2, _ in todo[k + 1:]:
+                rep.results.append(PushResult(table=t2, skipped=True,
+                                              error="未推送：推送地址连不上（见上一张表的报错）"))
+            break
     return rep

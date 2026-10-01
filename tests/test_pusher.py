@@ -439,3 +439,68 @@ def test_macro_alias_resolves():
     from engin_cli.loader import TABLE_MACRO
     assert _resolve_tables("macro") == [TABLE_MACRO]
     assert _resolve_tables("core,kpi") == [CORE, TABLE_MACRO]
+
+
+# ══════════════════════════════════════════════════════════════════
+# 推送地址连不上：立即停止，不要一批一批地白等重试（以前表现为「卡住」）
+# ══════════════════════════════════════════════════════════════════
+def _closed_port_url():
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()                                  # 端口空出来，没有服务在监听
+    return f"http://127.0.0.1:{port}/sync"
+
+
+def test_unreachable_url_stops_the_whole_push_quickly():
+    import time
+    st = EtlSettings()
+    st.push_enabled = True
+    st.push_url = _closed_port_url()
+    st.push_retries = 2
+    st.push_retry_backoff = 0.01
+    st.push_batch_size = 1
+    t0 = time.time()
+    rep = push_all({CORE: _core_df(50), "ads_trf_social_opinion_comment_platform_di": _core_df(5)},
+                   settings=st)
+    assert time.time() - t0 < 5, "连不上时应该第一批就停，而不是 50 批挨个重试"
+    first, second = rep.results
+    assert first.unreachable and first.batches == 0 and first.failed_batches == 50
+    assert "连不上" in first.error and "连接被拒绝" in first.error
+    assert second.skipped and "未推送" in second.error       # 后面的表不再推
+    assert not rep.ok
+
+
+def test_progress_bar_reports_batches_and_retries(server):
+    import io
+    from engin_cli.progress import push_progress_factory
+    srv, rec = server
+    rec.status_plan = [200, 503, 200, 200]                  # 第 2 批第一次 503，重试后成功
+    out = io.StringIO()                                     # 不是终端 → 每 10% 一行
+    st = _settings(srv, push_batch_size=1, push_retries=1, push_retry_backoff=0.01)
+    rep = push_all({CORE: _core_df(3)}, settings=st, progress_factory=push_progress_factory(out))
+    assert rep.ok
+    text = out.getvalue()
+    assert "推送 comment_core_di：3 行，3 批" in text
+    assert "第 2 批失败：HTTP 503" in text and "第 1/1 次重试" in text
+    assert "3/3 批 100.0%" in text and "✓" in text
+    assert "\r" not in text                                 # 日志文件里不能有回车刷新
+
+
+def test_progress_bar_in_a_terminal_redraws_in_place(server):
+    import io
+    from engin_cli.progress import PushProgress
+
+    class _Tty(io.StringIO):
+        def isatty(self):
+            return True
+
+    srv, _ = server
+    out = _Tty()
+    push_table(CORE, _core_df(4), settings=_settings(srv, push_batch_size=1),
+               progress=PushProgress(CORE, 4, 4, stream=out))
+    text = out.getvalue()
+    assert text.count("\n") == 1                            # 只在结束时换一次行
+    assert "\r" in text and "4/4 批 100.0%" in text
+    assert "\033" not in text                               # 不用 ANSI 控制符，旧版 Windows 控制台不认

@@ -168,11 +168,13 @@ class EtlSettings:
 
     # ---- macro 大盘表（ads_trf_social_opinion_macro_gran_metric_di，需求 2.0）----
     enable_macro_metric: bool = True
-    # 周期粒度清单。None = domain §1.10 的默认 9 个：
-    #   今日 / 近一日 / 近7日 / 本周 / 近30日 / 本月 / 近60日 / 近90日 / 本季度
-    # 每项 {"name": 写进 time_granularity 的值, "type": rolling|week|month|quarter|year,
+    # 周期粒度清单。None = domain §1.10 的默认 9 个（time_granularity 的值 / 中文名）：
+    #   today 今日 / latest_1d 近一日 / latest_7d 近7日 / this_week 本周 / latest_30d 近30日 /
+    #   this_month 本月 / latest_60d 近60日 / latest_90d 近90日 / this_quarter 本季度
+    # 每项 {"name": 写进 time_granularity 的编码, "label": 中文名（可选，不落表）,
+    #       "type": rolling|week|month|quarter|year,
     #       "days": rolling 的天数, "offset": 锚点往前挪几天（默认 0）}
-    # 例：加一个「近14日」→ {"name": "近14日", "type": "rolling", "days": 14}
+    # 例：加一个「近14日」→ {"name": "latest_14d", "label": "近14日", "type": "rolling", "days": 14}
     macro_granularities: Optional[List[Dict[str, Any]]] = None
     macro_wordcloud_top_n: int = 30          # 词云好/中/差各取前 N 个
 
