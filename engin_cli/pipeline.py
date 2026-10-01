@@ -80,11 +80,13 @@ def run(settings: EtlSettings,
         scenic_codes: Optional[List[str]] = None,
         db: Optional[MySQL] = None,
         comments_df: Optional[pd.DataFrame] = None,
-        works_df: Optional[pd.DataFrame] = None) -> PipelineResult:
+        works_df: Optional[pd.DataFrame] = None,
+        push_progress=None) -> PipelineResult:
     """跑一次批。
 
     dates          要产出的目标日期（yyyyMMdd）
     comments_df    直接喂源数据（测试/离线用）；为 None 则从 MySQL 取
+    push_progress  推送进度条工厂（见 progress.push_progress_factory），None 不显示
     """
     t0 = time.time()
     res = PipelineResult()
@@ -230,7 +232,7 @@ def run(settings: EtlSettings,
     # 放在落库**之后**：先保证数据落定，再推。推失败了数据还在库里，
     # 补推一次就行；反过来推成功但落库失败，下游拿到的就是查无对证的数据。
     if getattr(settings, "push_enabled", False):
-        res.push = push_all(res.tables, settings=settings)
+        res.push = push_all(res.tables, settings=settings, progress_factory=push_progress)
         res.notes.extend(res.push.notes())
         if not res.push.ok:
             if getattr(settings, "push_strict", False):

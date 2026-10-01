@@ -41,6 +41,7 @@ from .db import MySQL
 from .loader import (TABLE_CONTENT, TABLE_CORE, TABLE_DIMENSION,
                      TABLE_DRILL_ANALYSIS, TABLE_MACRO, TABLE_PLATFORM)
 from .pipeline import run as run_pipeline
+from .progress import push_progress_factory
 from .repair import (CORE_SCORE_FIELDS, DIM_SCORE_FIELDS, repair_core,
                      repair_dimension)
 from .settings import load_settings
@@ -182,7 +183,8 @@ def cmd_run(args) -> int:
         for i, sc in enumerate(scenics, 1):
             print(f"\n[{i}/{len(scenics)}] 景区 {sc}")
             ok, line = _run_one_scenic(st, sc, dates, db, comments_df, works_df,
-                                       verbose=bool(args.verbose))
+                                       verbose=bool(args.verbose),
+                                       no_progress=bool(args.no_progress))
             summary.append((sc, ok, line))
             if not ok and args.fail_fast:
                 print("  --fail-fast：停止，后面的景区不再跑")
@@ -199,7 +201,7 @@ def cmd_run(args) -> int:
 
 
 def _run_one_scenic(st, scenic: str, dates: List[str], db, comments_df, works_df,
-                    verbose: bool = False) -> tuple:
+                    verbose: bool = False, no_progress: bool = False) -> tuple:
     """跑一个景区。返回 (是否成功, 汇总行文字)。"""
     s1 = replace(st, output_dir=os.path.join(st.output_dir, scenic))
     c = w = None
@@ -209,7 +211,8 @@ def _run_one_scenic(st, scenic: str, dates: List[str], db, comments_df, works_df
         w = works_df[works_df["scenic_id"].astype(str).str.strip() == scenic]
     try:
         res = run_pipeline(s1, dates, scenic_codes=[scenic], db=db,
-                           comments_df=c, works_df=w)
+                           comments_df=c, works_df=w,
+                           push_progress=None if no_progress else push_progress_factory())
     except Exception as e:                      # noqa: BLE001 —— 一个景区炸了不拖累其他景区
         logging.getLogger(__name__).exception("景区 %s 跑批异常", scenic)
         print(f"  ✗ 异常：{e}")
@@ -231,6 +234,11 @@ def _run_one_scenic(st, scenic: str, dates: List[str], db, comments_df, works_df
             print(f"  推送 {r.table:<48} {r.rows:>8,} 行  [{r.batches} 批 {r.elapsed:.1f}s]"
                   + ("" if r.ok else f"  ✗ {r.error}"))
         push_note = "推送 ✓" if res.push.ok else f"推送 ✗（{len(res.push.errors)} 张表失败，可用 push 补推）"
+        if any(r.unreachable for r in res.push.results):
+            # 地址连不上，后面的景区推也是白等：只算、只落库，事后用 push 补推
+            st.push_enabled = False
+            push_note = "推送 ✗（地址连不上，后面的景区不再推送，修好地址后用 push 补推）"
+            print(f"  ✗ 推送地址连不上：{st.push_url}，后面的景区只计算、落库，不再推送")
     if res.errors:
         for e in res.errors:
             print(f"  ✗ {e}")
@@ -558,17 +566,27 @@ def cmd_push(args) -> int:
     print("=" * 72)
     print(f"补推 {len(batches)} 个景区 → {st.push_url}"
           + ("   [dry-run 只组报文不发送]" if st.push_dry_run else ""))
-    print("=" * 72)
-    ok = True
+    print(f"每批 {st.push_batch_size} 行，超时 {st.push_timeout:g}s，失败重试 {st.push_retries} 次")
+    print("=" * 72, flush=True)
+    factory = None if args.no_progress else push_progress_factory()
+    failed = []
     for sc, tables in batches:
-        print(f"\n景区 {sc}")
-        rep = push_all(tables, settings=st)
+        print(f"\n景区 {sc}", flush=True)
+        rep = push_all(tables, settings=st, progress_factory=factory)
         for r in rep.results:
-            print(f"  {r.table:<52} {r.rows:>8,} 行  [{r.batches} 批 {r.elapsed:.1f}s]"
-                  + ("" if r.ok else f"  ✗ {r.error}"))
-        ok &= rep.ok
-    if not ok:
-        print("\n推送未全部成功，见上面的 ✗")
+            if factory is None or r.skipped:     # 有进度条时每张表已经打过结果行了
+                print(f"  {r.table:<52} {r.rows:>8,} 行  [{r.batches} 批 {r.elapsed:.1f}s]"
+                      + ("" if r.ok else f"  ✗ {r.error}"))
+        failed += [f"{sc} · {e}" for e in rep.errors]
+        if any(r.unreachable for r in rep.results):
+            print(f"\n✗ 推送地址连不上：{st.push_url}\n"
+                  "  请确认地址是否正确（settings_local.py 的 push_url / 环境变量 OPINION_PUSH_URL），"
+                  "以及对方服务是否已启动。后面的景区不再推送。")
+            return 1
+    if failed:
+        print("\n推送未全部成功：")
+        for e in failed:
+            print(f"  ✗ {e}")
         return 1
     print("\n推送完成 ✓")
     return 0
@@ -605,6 +623,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--comments-csv", help="离线源：评论表 CSV")
     r.add_argument("--works-csv", help="离线源：作品表 CSV")
     r.add_argument("--fail-fast", action="store_true", help="某个景区失败就停，不跑后面的")
+    r.add_argument("--no-progress", action="store_true", help="不显示推送进度条")
     r.add_argument("-v", "--verbose", action="store_true",
                    help="额外打印回补触发情况、补零行数量等说明")
     r.add_argument("--log-level", help="DEBUG/INFO/WARNING")
@@ -633,6 +652,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="打印每张表第一批报文（令牌打码），不发送")
     u.add_argument("--preview-rows", type=int, metavar="N",
                    help="预览时每张表打印前 N 行（默认 2），隐含 --preview")
+    u.add_argument("--no-progress", action="store_true", help="不显示推送进度条")
     u.add_argument("--log-level")
     u.set_defaults(func=cmd_push)
 
