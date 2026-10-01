@@ -191,10 +191,15 @@ def load_settings() -> EtlSettings:
     """加载配置：默认值 → settings_local.py → 环境变量。"""
     s = EtlSettings()
 
-    try:
-        import settings_local  # type: ignore
-    except Exception:
-        settings_local = None
+    # OPINION_IGNORE_LOCAL_SETTINGS=1 时不读 settings_local.py。
+    # 单测靠它隔离：settings_local.py 里是线上库和线上推送地址，
+    # 测试里跑一次 `run --push` 就会把测试数据推到真网关。
+    settings_local = None
+    if not _env("OPINION_IGNORE_LOCAL_SETTINGS", False, bool):
+        try:
+            import settings_local  # type: ignore
+        except Exception:
+            settings_local = None
 
     if settings_local is not None:
         db = getattr(settings_local, "DB", None)
@@ -225,8 +230,12 @@ def load_settings() -> EtlSettings:
     # 想用别的头就直接在 settings_local 的 push_headers 里写全。
     s.push_enabled = _env("OPINION_PUSH_ENABLED", s.push_enabled, bool)
     s.push_url = _env("OPINION_PUSH_URL", s.push_url)
+    # 令牌放在哪个请求头、前面带什么前缀，也都能用环境变量指定：
+    #   OPINION_PUSH_TOKEN_HEADER=xpftkey  OPINION_PUSH_TOKEN_PREFIX=   → xpftkey: pfk_xxx
+    # 前缀**设成空串也算设了**（= 不加前缀），所以这里不能用 _env（它把空串当没设）。
     token = _env("OPINION_PUSH_TOKEN")
     if token:
-        s.push_headers = {**(s.push_headers or {}),
-                          "Authorization": f"Bearer {token}"}
+        header = _env("OPINION_PUSH_TOKEN_HEADER", "Authorization")
+        prefix = os.environ.get("OPINION_PUSH_TOKEN_PREFIX", "Bearer ")
+        s.push_headers = {**(s.push_headers or {}), header: f"{prefix}{token}"}
     return s
