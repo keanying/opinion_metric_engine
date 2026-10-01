@@ -506,7 +506,7 @@ def cmd_push(args) -> int:
     可按景区、日期、表过滤；--preview 只打印每张表第一批报文，不发送。
     """
     from .loader import scenic_key
-    from .pusher import DEFAULT_PUSH_PK, _table_config, build_payload, push_all
+    from .pusher import DEFAULT_PUSH_PK, _table_config, build_payload, diagnose, push_all
 
     st = load_settings()
     _apply_push_args(st, args)
@@ -554,6 +554,21 @@ def cmd_push(args) -> int:
         print(f"{base} 下没有可推送的数据（{'，'.join(what)}）。"
               f"\n先用 run 跑出 CSV（写在 {base}/<景区编码>/ 下），再补推。")
         return 2
+
+    if args.diagnose:
+        # 用一行真实数据（优先 core 表）一步步排查：域名解析 / 代理 / 逐个地址 / 报文差异
+        sc, tables = batches[0]
+        name = TABLE_CORE if TABLE_CORE in tables else next(iter(tables))
+        cfg = _table_config(name, st)
+        body = build_payload(name, tables[name].head(1), cfg["pk"],
+                             body_fields=st.push_body_fields, table_name=cfg["name"],
+                             extra=st.push_extra_fields)
+        print("=" * 72)
+        print(f"推送诊断（景区 {sc}，只发 1 行，不影响其他数据）")
+        print("=" * 72)
+        res = diagnose(st.push_url, st.push_headers or {}, body,
+                       timeout=min(float(st.push_timeout), 15.0))
+        return 0 if res.get("actual") else 1
 
     if preview:
         n = int(args.preview_rows or 2)
@@ -667,6 +682,8 @@ def build_parser() -> argparse.ArgumentParser:
     u.add_argument("--preview-rows", type=int, metavar="N",
                    help="预览时每张表打印前 N 行（默认 2），隐含 --preview")
     u.add_argument("--no-progress", action="store_true", help="不显示推送进度条")
+    u.add_argument("--diagnose", action="store_true",
+                   help="推送卡住 / 超时时用：拿 1 行数据排查域名解析、代理、逐个地址、报文差异，给出结论")
     u.add_argument("--log-level")
     u.set_defaults(func=cmd_push)
 
