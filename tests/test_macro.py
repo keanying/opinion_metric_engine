@@ -130,9 +130,9 @@ def test_default_granularities_match_the_requirement():
     """time_granularity 落表的是英文编码，中文名只放在 label 里（业务指定的取值）。"""
     specs = D.macro_granularities()
     assert [(s["name"], s["label"]) for s in specs] == [
-        ("today", "今日"), ("latest_1d", "近一日"), ("latest_7d", "近7日"),
-        ("this_week", "本周"), ("latest_30d", "近30日"), ("this_month", "本月"),
-        ("latest_60d", "近60日"), ("latest_90d", "近90日"), ("this_quarter", "本季度")]
+        ("td", "今日"), ("latest_1d", "近一日"), ("latest_7d", "近7日"),
+        ("wtd", "本周"), ("latest_30d", "近30日"), ("mtd", "本月"),
+        ("latest_60d", "近60日"), ("latest_90d", "近90日"), ("qtd", "本季度")]
 
 
 def test_label_defaults_to_name():
@@ -142,7 +142,7 @@ def test_label_defaults_to_name():
 
 def test_today_vs_last_day():
     """今日 = travel_date 当天；近一日 = 前一天（业务确认）。"""
-    assert _fmt(D.macro_period_ranges(_spec("today"), "20260917")) == {
+    assert _fmt(D.macro_period_ranges(_spec("td"), "20260917")) == {
         "cur": ("20260917", "20260917"), "prev": ("20260916", "20260916"),
         "yoy": ("20250917", "20250917")}
     assert _fmt(D.macro_period_ranges(_spec("latest_1d"), "20260917"))["cur"] == (
@@ -158,28 +158,28 @@ def test_rolling_window_and_previous_period():
 
 def test_week_is_to_date_and_previous_week_is_the_same_days():
     """2026-09-17 是周四：本周 = 周一~周四，上期 = 上周一~上周四。"""
-    r = _fmt(D.macro_period_ranges(_spec("this_week"), "20260917"))
+    r = _fmt(D.macro_period_ranges(_spec("wtd"), "20260917"))
     assert r["cur"] == ("20260914", "20260917")
     assert r["prev"] == ("20260907", "20260910")
 
 
 def test_month_previous_is_clipped_to_a_shorter_month():
-    r = _fmt(D.macro_period_ranges(_spec("this_month"), "20260331"))
+    r = _fmt(D.macro_period_ranges(_spec("mtd"), "20260331"))
     assert r["cur"] == ("20260301", "20260331")
     assert r["prev"] == ("20260201", "20260228")      # 2 月没有 29~31 号
-    assert _fmt(D.macro_period_ranges(_spec("this_month"), "20260917"))["prev"] == (
+    assert _fmt(D.macro_period_ranges(_spec("mtd"), "20260917"))["prev"] == (
         "20260801", "20260817")
 
 
 def test_quarter_to_date():
-    r = _fmt(D.macro_period_ranges(_spec("this_quarter"), "20260917"))
+    r = _fmt(D.macro_period_ranges(_spec("qtd"), "20260917"))
     assert r["cur"] == ("20260701", "20260917")
     assert r["prev"] == ("20260401", "20260618")      # 本季度第 79 天 → 上季度第 79 天
     assert r["yoy"] == ("20250701", "20250917")
 
 
 def test_yoy_on_leap_day():
-    r = _fmt(D.macro_period_ranges(_spec("today"), "20280229"))
+    r = _fmt(D.macro_period_ranges(_spec("td"), "20280229"))
     assert r["yoy"] == ("20270228", "20270228")
 
 
@@ -257,7 +257,7 @@ def test_backfill_actually_happened(result):
     assert "已复制往前最近一天的明细" in note and not note.startswith("输出日期上有 0 ")
 
 
-@pytest.mark.parametrize("gran,days", [("today", 1), ("latest_7d", 7), ("latest_30d", 30),
+@pytest.mark.parametrize("gran,days", [("td", 1), ("latest_7d", 7), ("latest_30d", 30),
                                        ("latest_60d", 60), ("latest_90d", 90)])
 def test_rolling_channel_rows_equal_platform_table(macro, result, gran, days):
     """近 N 日的渠道行 == platform 表同渠道的 N 日计数（补齐后），逐行对账。"""
@@ -272,7 +272,7 @@ def test_rolling_channel_rows_equal_platform_table(macro, result, gran, days):
 
 def test_today_all_row_equals_core_comment_count(macro, result):
     core = result.tables[CORE]
-    m = macro[(macro.time_granularity == "today") & (macro.channel == "all")]
+    m = macro[(macro.time_granularity == "td") & (macro.channel == "all")]
     j = m.merge(core, left_on=["scenic_id", "travel_date"],
                 right_on=["scenic_spot_code", "travel_date"])
     assert len(j) == len(m)
@@ -300,7 +300,7 @@ def test_calendar_month_against_independent_count(macro, facts):
     """本月：本期 = 9/1~9/17，上期 = 8/1~8/17，同比 = 2025-09-01~09-17，
     三段都在补齐后的明细上求和（本月 → 30 日档，最多往前找 20 天）。"""
     sc = "PFTSCA01002434"
-    r = _row(macro, sc, END, "this_month")
+    r = _row(macro, sc, END, "mtd")
     cur = _fcount(facts, sc, "20260901", END, 20)
     prev = _fcount(facts, sc, "20260801", "20260817", 20)
     yoy = _fcount(facts, sc, "20250901", "20250917", 20)
@@ -318,7 +318,7 @@ def test_calendar_month_against_independent_count(macro, facts):
 
 def test_channel_yoy_against_independent_count(macro, facts):
     sc, ch = "PFT_S_00001", "douyin"
-    r = _row(macro, sc, END, "this_week", ch)
+    r = _row(macro, sc, END, "wtd", ch)
     cur = _fcount(facts, sc, "20260914", END, 10, ch)
     yoy = _fcount(facts, sc, "20250914", "20250917", 10, ch)
     assert r.comment_total == sum(cur)
@@ -328,7 +328,7 @@ def test_channel_yoy_against_independent_count(macro, facts):
 
 def test_dimension_breakdown(macro, sample):
     sc = "PFTSCA01002434"
-    r = _row(macro, sc, END, "this_month")
+    r = _row(macro, sc, END, "mtd")
     items = json.loads(r.dimension_breakdown)
     assert [i["dimension1"] for i in items] == D.L1_DIMENSIONS
     assert all(i["dimension1"] == i["preDimension1"] for i in items)
@@ -385,7 +385,7 @@ def test_score_weights_apply_to_macro_and_core(sample):
               [END], comments_df=comments, works_df=works)
     assert res.ok, res.errors
     m = res.tables[MACRO]
-    r = m[(m.scenic_id == "PFTSCA01002434") & (m.time_granularity == "today")
+    r = m[(m.scenic_id == "PFTSCA01002434") & (m.time_granularity == "td")
           & (m.channel == "all")].iloc[0]
     want = D.weighted_score_from_counts(r.positive_comment_cnt, r.neutral_comment_cnt,
                                         r.negative_comment_cnt, r.comment_total,
@@ -481,7 +481,7 @@ def gap_macro(gap_run, gap_comments):
 def test_calendar_period_is_filled_day_by_day(gap_macro):
     """本周（9/14 周一 ~ 9/17）同程一条都没有 → 每一天各自复制 9/13 的明细（本周 → 最多找 10 天）。"""
     macro, cf = gap_macro
-    r = _row(macro, GAP_SCENIC, END, "this_week", "tongcheng")
+    r = _row(macro, GAP_SCENIC, END, "wtd", "tongcheng")
     day = _count(cf, GAP_SCENIC, "20260913", "20260913", "tongcheng")
     assert sum(day) > 0
     assert (r.positive_comment_cnt, r.neutral_comment_cnt, r.negative_comment_cnt) == \
@@ -495,7 +495,7 @@ def test_calendar_period_is_filled_day_by_day(gap_macro):
 def test_year_ago_period_uses_filled_detail(gap_macro):
     """抖音去年 9/14~9/17 没数据 → 去年同期每天复制 2025-09-13 的明细，同比不再是 0 / -100。"""
     macro, cf = gap_macro
-    r = _row(macro, GAP_SCENIC, END, "this_week", "douyin")
+    r = _row(macro, GAP_SCENIC, END, "wtd", "douyin")
     cur = _fcount(cf, GAP_SCENIC, "20260914", END, 10, "douyin")
     day = _count(cf, GAP_SCENIC, "20250913", "20250913", "douyin")
     assert sum(day) > 0
@@ -513,7 +513,7 @@ def test_previous_period_uses_filled_detail(gap_comments, sample):
     c = c[~((c.scenic_id == GAP_SCENIC) & (c.channel == "douyin") & d.between("20260801", "20260817"))]
     res = run(_settings(enable_drill_analysis=False), [END], comments_df=c, works_df=sample[1])
     assert res.ok, res.errors
-    r = _row(res.tables[MACRO], GAP_SCENIC, END, "this_month", "douyin")
+    r = _row(res.tables[MACRO], GAP_SCENIC, END, "mtd", "douyin")
     cf = build_comment_facts(c)
     cur = _fcount(cf, GAP_SCENIC, "20260901", END, 20, "douyin")
     day = sum(_count(cf, GAP_SCENIC, "20260731", "20260731", "douyin"))
@@ -525,7 +525,7 @@ def test_previous_period_uses_filled_detail(gap_comments, sample):
 def test_backfill_off_keeps_raw_counts(gap_comments, sample):
     res = run(_settings(enable_drill_analysis=False, backfill_mode="off"), [END],
               comments_df=gap_comments, works_df=sample[1])
-    r = _row(res.tables[MACRO], GAP_SCENIC, END, "this_week", "tongcheng")
+    r = _row(res.tables[MACRO], GAP_SCENIC, END, "wtd", "tongcheng")
     assert r.comment_total == 0
 
 

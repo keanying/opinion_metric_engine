@@ -270,15 +270,15 @@ def resolve_backfill_lookback(mode: str, overrides: dict | None = None,
 #
 #   time_granularity  中文名   类型
 #   ────────────────  ──────  ─────────────────────
-#   today             今日     rolling 1 天
+#   td                今日     rolling 1 天
 #   latest_1d         近一日   rolling 1 天，offset 1
 #   latest_7d         近7日    rolling 7 天
-#   this_week         本周     week
+#   wtd               本周     week
 #   latest_30d        近30日   rolling 30 天
-#   this_month        本月     month
+#   mtd               本月     month
 #   latest_60d        近60日   rolling 60 天
 #   latest_90d        近90日   rolling 90 天
-#   this_quarter      本季度   quarter
+#   qtd               本季度   quarter
 #
 # 各类型的本期 / 上期：
 #
@@ -293,8 +293,8 @@ def resolve_backfill_lookback(mode: str, overrides: dict | None = None,
 #
 #   同比（yoy）的对比期 = **本期日期整体减一年**（2026-09-01~09-17 → 2025-09-01~09-17）。
 #
-# 「今日 today / 近一日 latest_1d」的区分（业务确认）：
-#   today     = travel_date 当天（定时任务按当天跑时是不完整的一天）
+# 「今日 td / 近一日 latest_1d」的区分（业务确认）：
+#   td        = travel_date 当天（定时任务按当天跑时是不完整的一天）
 #   latest_1d = travel_date 的前一天（最近一个完整日）
 #
 # 缺数回补（业务确认：**所有指标都在补齐数据之后再算**，不能有指标因为当期没数据而没有值）
@@ -305,11 +305,11 @@ def resolve_backfill_lookback(mode: str, overrides: dict | None = None,
 #   区间里有就有，没有就没有（源表只留了半年时，去年同期补不出来，同比照旧是 0）。
 #
 #   往前最多找几天按窗口档位查 §1.8 的表，settings.backfill_lookback 改了也跟着生效：
-#     today / latest_1d → 1 日档（5 天）   rolling N 日 → N 日档（表里没有的天数不补）
+#     td / latest_1d → 1 日档（5 天）   rolling N 日 → N 日档（表里没有的天数不补）
 #     本周 → 7 日档（10 天）  本月 → 30 日档（20 天）  本季度 → 90 日档（60 天）  本年 → 365 日档（90 天）
 #   上期、去年同期与本期用同一档。词云 / 维度 / 热力也来自同一份补齐后的明细。
 #   因为与 core/platform 是同一套补齐规则，latest_7d 某渠道的 comment_total
-#   == platform 表该渠道的 comment_cnt_7d，today 的 all 行 == core.comment_count。
+#   == platform 表该渠道的 comment_cnt_7d，td 的 all 行 == core.comment_count。
 #   backfill_mode = "off" 时不补。
 MACRO_PERIOD_ROLLING = "rolling"
 MACRO_PERIOD_WEEK = "week"
@@ -323,15 +323,15 @@ MACRO_CALENDAR_BACKFILL_WINDOW = {MACRO_PERIOD_WEEK: 7, MACRO_PERIOD_MONTH: 30,
                                   MACRO_PERIOD_QUARTER: 90, MACRO_PERIOD_YEAR: 365}
 
 MACRO_GRANULARITIES: List[Dict[str, Any]] = [
-    {"name": "today", "label": "今日", "type": MACRO_PERIOD_ROLLING, "days": 1},
+    {"name": "td", "label": "今日", "type": MACRO_PERIOD_ROLLING, "days": 1},
     {"name": "latest_1d", "label": "近一日", "type": MACRO_PERIOD_ROLLING, "days": 1, "offset": 1},
     {"name": "latest_7d", "label": "近7日", "type": MACRO_PERIOD_ROLLING, "days": 7},
-    {"name": "this_week", "label": "本周", "type": MACRO_PERIOD_WEEK},
+    {"name": "wtd", "label": "本周", "type": MACRO_PERIOD_WEEK},
     {"name": "latest_30d", "label": "近30日", "type": MACRO_PERIOD_ROLLING, "days": 30},
-    {"name": "this_month", "label": "本月", "type": MACRO_PERIOD_MONTH},
+    {"name": "mtd", "label": "本月", "type": MACRO_PERIOD_MONTH},
     {"name": "latest_60d", "label": "近60日", "type": MACRO_PERIOD_ROLLING, "days": 60},
     {"name": "latest_90d", "label": "近90日", "type": MACRO_PERIOD_ROLLING, "days": 90},
-    {"name": "this_quarter", "label": "本季度", "type": MACRO_PERIOD_QUARTER},
+    {"name": "qtd",          "label": "本季度", "type": MACRO_PERIOD_QUARTER},
 ]
 
 # 渠道 = 配置的渠道全集（同 platform 表，见 §1.7）+ 一条「整体」

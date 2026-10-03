@@ -246,15 +246,15 @@ ETL = {
     #   往前最多找几天：rolling N 日查 N 日档；本周→7 日档、本月→30 日档、本季度→90 日档。
     # 【默认值】不配就是下面这 9 个；要加一个周期就把整份清单抄过来再加一行。
     # "macro_granularities": [
-    #     {"name": "today",        "label": "今日",   "type": "rolling", "days": 1},
+    #     {"name": "td",           "label": "今日",   "type": "rolling", "days": 1},
     #     {"name": "latest_1d",    "label": "近一日", "type": "rolling", "days": 1, "offset": 1},
     #     {"name": "latest_7d",    "label": "近7日",  "type": "rolling", "days": 7},
-    #     {"name": "this_week",    "label": "本周",   "type": "week"},
+    #     {"name": "wtd",          "label": "本周",   "type": "week"},
     #     {"name": "latest_30d",   "label": "近30日", "type": "rolling", "days": 30},
-    #     {"name": "this_month",   "label": "本月",   "type": "month"},
+    #     {"name": "mtd",          "label": "本月",   "type": "month"},
     #     {"name": "latest_60d",   "label": "近60日", "type": "rolling", "days": 60},
     #     {"name": "latest_90d",   "label": "近90日", "type": "rolling", "days": 90},
-    #     {"name": "this_quarter", "label": "本季度", "type": "quarter"},
+    #     {"name": "qtd",          "label": "本季度", "type": "quarter"},
     # ],
 
     # 【是什么】词云好/中/差各取前几个词。

@@ -498,16 +498,16 @@ select * from ads_trf_social_opinion_macro_gran_metric_di
 
 | `time_granularity` | 中文名 | 类型 | 本期 | 上期（环比分母） |
 |---|---|---|---|---|
-| `today` | 今日 | rolling 1 | travel_date 当天 | 前一天 |
+| `td` | 今日 | rolling 1 | travel_date 当天 | 前一天 |
 | `latest_1d` | 近一日 | rolling 1，offset 1 | travel_date 前一天（最近一个完整日） | 再前一天 |
 | `latest_7d` / `latest_30d` / `latest_60d` / `latest_90d` | 近7日 / 近30日 / 近60日 / 近90日 | rolling N | [T-N+1, T] | [T-2N+1, T-N] |
-| `this_week` | 本周 | week | 周一 ~ T | 上周一起的**同样几天** |
-| `this_month` | 本月 | month | 1 号 ~ T | 上月同样几天（上月短就截到月底） |
-| `this_quarter` | 本季度 | quarter | 季初 ~ T | 上季度同样几天 |
+| `wtd` | 本周 | week | 周一 ~ T | 上周一起的**同样几天** |
+| `mtd` | 本月 | month | 1 号 ~ T | 上月同样几天（上月短就截到月底） |
+| `qtd` | 本季度 | quarter | 季初 ~ T | 上季度同样几天 |
 
 - **同比**的对比期 = 本期日期整体减一年（2026-09-01~09-17 → 2025-09-01~09-17）。
   引擎会额外按 `publish_time` 取「去年同期」那一段，不会把一年半的数据全读进来；
-  上期早于 `lookback_days` 时（如 `this_quarter` 的上期）也会补取。
+  上期早于 `lookback_days` 时（如 `qtd` 的上期）也会补取。
 - 加周期：在配置里加一项，如 `{"name": "latest_14d", "label": "近14日", "type": "rolling", "days": 14}`，
   还支持 `year`（本年）。`name` 原样写进 `time_granularity`，`label` 只是中文名，不落表。
 
@@ -519,18 +519,18 @@ all 行 = 各渠道补齐后相加。往前最多找几天按周期查 §9 的�
 
 | 周期 | 借用的档位 | 默认最多往前找 |
 |---|---|---|
-| `today` / `latest_1d` | 1 日 | 5 天 |
-| `latest_7d` / `this_week` | 7 日 | 10 天 |
-| `latest_30d` / `this_month` | 30 日 | 20 天 |
+| `td` / `latest_1d` | 1 日 | 5 天 |
+| `latest_7d` / `wtd` | 7 日 | 10 天 |
+| `latest_30d` / `mtd` | 30 日 | 20 天 |
 | `latest_60d` | 60 日 | 30 天 |
-| `latest_90d` / `this_quarter` | 90 日 | 60 天 |
+| `latest_90d` / `qtd` | 90 日 | 60 天 |
 
 例：同程本周（周一 9/14 ~ 周四 9/17）一条都没有 → 这 4 天各自复制 9/13 的明细。
 
 因为与 core/platform 是同一套补齐规则，近 N 日的计数逐行对得上（`tests/test_macro.py` 在触发了补齐的日子上对账）：
 ```
 macro latest_7d 某渠道 comment_total == platform.comment_cnt_7d
-macro today 的 all 行 comment_total   == core.comment_count
+macro td 的 all 行 comment_total   == core.comment_count
 ```
 词云 / 维度 / 热力也来自同一份补齐后的明细 —— 同一行的数字同源。
 取数时每段区间都会往前多取「这个周期最多往前找几天」，区间第一天没评论也补得出来。

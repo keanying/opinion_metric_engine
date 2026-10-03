@@ -8,7 +8,7 @@
 
 为什么不用 rolling_windows 直接滚
 --------------------------------
-这张表的周期不全是「近 N 日」：this_week / this_month / this_quarter 是日历周期，上期是「上周期的同样几天」，
+这张表的周期不全是「近 N 日」：wtd / mtd / qtd 是日历周期，上期是「上周期的同样几天」，
 同比要去年同期 —— 都不是固定宽度的滑窗。所以这里把每个周期翻译成**日期区间**，
 再对日粒度事实做区间求和（按日期排好序，searchsorted 切片 + bincount）。
 
@@ -25,7 +25,7 @@
 与 core / platform 同一套补齐规则、同一个上限表，所以：
 
     macro latest_7d 某渠道 comment_total == platform.comment_cnt_7d
-    macro today 的 all 行 comment_total   == core.comment_count
+    macro td 的 all 行 comment_total   == core.comment_count
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ _CNT_KEYS = ["pos", "neu", "neg"]
 def macro_data_ranges(ctx: RunContext) -> List[Tuple[str, str]]:
     """本表需要的源数据日期段（yyyyMMdd 闭区间，已合并），含 [fill_start, load_end]。
 
-    上期可能早于 load_start（如 this_quarter 的上期），同比要去年同期 —— 这两段都要额外取；
+    上期可能早于 load_start（如 qtd 的上期），同比要去年同期 —— 这两段都要额外取；
     每段再往前多取「这个周期最多往前找几天」，区间第一天没评论时才补得出来。
     """
     spans = [(pd.to_datetime(ctx.fill_start, format=D.DATE_FMT),
