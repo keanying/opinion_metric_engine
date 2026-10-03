@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pandas as pd
 import pytest
 
-from engin_cli.pusher import (DEFAULT_PUSH_PK, build_payload, push_all,
+from engin_cli.pusher import (DEFAULT_PUSH_PK, PushReport, build_payload, push_all,
                               push_table)
 from engin_cli.settings import EtlSettings
 
@@ -66,6 +66,9 @@ def _settings(srv, **kw):
     st.push_headers = {"Authorization": "Bearer sk_deduehdueh"}
     st.push_retries = 0
     st.push_retry_backoff = 0.01
+    # pkId 有问题时会把请求 JSON 写到 output_dir/push_debug/，别写进项目目录
+    import tempfile
+    st.output_dir = tempfile.mkdtemp()
     for k, v in kw.items():
         setattr(st, k, v)
     return st
@@ -665,7 +668,7 @@ def test_diagnose_ok_path(server):
 
 
 # ══════════════════════════════════════════════════════════════════
-# 发送前校验 pkId：下游按 pkId 先查再更新，重复的行会互相覆盖，所以一行都不发
+# 发送前检查 pkId：只提醒、照常发送（下游按 pkId 自己查），并留下问题行的请求 JSON
 # ══════════════════════════════════════════════════════════════════
 PLATFORM = "ads_trf_social_opinion_comment_platform_di"
 
@@ -676,36 +679,40 @@ def _platform_df():
                          for i, ch in enumerate(["douyin", "weibo", "ctrip"])])
 
 
-def test_duplicate_pk_is_refused_before_sending(server):
+def test_duplicate_pk_is_sent_with_a_warning_and_request_json(server, tmp_path):
     srv, rec = server
-    st = _settings(srv, push_pk={PLATFORM: ["scenic_spot_code", "publish_time", "travel_date"]})
+    st = _settings(srv, push_pk={PLATFORM: ["scenic_spot_code", "publish_time", "travel_date"]},
+                   output_dir=str(tmp_path))
     res = push_table(PLATFORM, _platform_df(), settings=st)
-    assert not res.ok and rec.requests == []
-    assert "不能唯一定位一行" in res.error and "丢掉 2 行" in res.error
-    assert "platform_code" in res.error                     # 给出默认 pkId 作为建议
+    assert res.ok and res.rows == 3 and len(rec.requests) == 1     # 照常发送
+    assert "不能唯一定位一行" in res.warning and "已照常发送" in res.warning
+    assert "platform_code" in res.warning                          # 给出默认 pkId 作为参考
+    # 示例请求：一组 pkId 相同的行，格式与真实请求一样
+    sample = json.loads(res.pk_sample)
+    assert sample["tableName"] == PLATFORM
+    assert sample["pkId"] == ["scenic_spot_code", "publish_time", "travel_date"]
+    assert len(sample["data"]) == 3
+    # 完整文件写在 output_dir/push_debug/ 下
+    dump = json.loads(open(res.pk_dump, encoding="utf-8").read())
+    assert res.pk_dump.startswith(str(tmp_path)) and len(dump["data"]) == 3
+    assert any("pkId" in n for n in PushReport(results=[res]).notes())
 
 
-def test_default_pk_passes(server):
+def test_default_pk_passes_without_warning(server):
     srv, rec = server
-    assert push_table(PLATFORM, _platform_df(), settings=_settings(srv)).ok
+    res = push_table(PLATFORM, _platform_df(), settings=_settings(srv))
+    assert res.ok and not res.warning and not res.pk_sample
     assert len(rec.requests) == 1
 
 
-def test_null_pk_is_refused_but_empty_string_is_fine(server):
+def test_null_pk_is_sent_with_a_warning_but_empty_string_is_fine(server, tmp_path):
     srv, rec = server
     dim = "ads_trf_social_opinion_comment_dimension_score_di"
     df = pd.DataFrame([{"scenic_spot_code": "S1", "travel_date": 20260909,
                         "dimension_level1": "游玩体验", "dimension_level2": "排队时长",
                         "dimension_level3": ""}])
-    assert push_table(dim, df, settings=_settings(srv)).ok      # 空串是合法取值
+    res = push_table(dim, df, settings=_settings(srv, output_dir=str(tmp_path)))
+    assert res.ok and not res.warning                              # 空串是合法取值
     df.loc[0, "dimension_level3"] = None
-    res = push_table(dim, df, settings=_settings(srv))
-    assert not res.ok and "为空" in res.error
-
-
-def test_one_bad_table_does_not_block_the_others(server):
-    srv, rec = server
-    st = _settings(srv, push_pk={PLATFORM: ["scenic_spot_code", "publish_time", "travel_date"]})
-    rep = push_all({PLATFORM: _platform_df(), CORE: _core_df(1)}, settings=st)
-    bad, good = rep.results
-    assert not bad.ok and good.ok and len(rec.requests) == 1
+    res = push_table(dim, df, settings=_settings(srv, output_dir=str(tmp_path)))
+    assert res.ok and "为空" in res.warning and len(rec.requests) == 2

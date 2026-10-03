@@ -92,6 +92,10 @@ class PushResult:
     unreachable: bool = False   # 推送地址连不上（拒绝连接 / 域名解析失败），后面的表不再推
     error: str = ""
     elapsed: float = 0.0
+    # pkId 有重复 / 空值时的提示（照常发送，只是提醒），以及示例请求和完整请求文件
+    warning: str = ""
+    pk_sample: str = ""         # 一组重复行组成的请求 JSON（单行，可直接拿去推）
+    pk_dump: str = ""           # 全部重复行组成的请求 JSON 文件路径
 
     @property
     def ok(self) -> bool:
@@ -118,6 +122,8 @@ class PushReport:
             state = "成功" if r.ok else f"失败（{r.error}）"
             out.append(f"推送 {r.table}：{r.rows:,} 行 / {r.batches} 批，"
                        f"{r.elapsed:.1f}s，{state}")
+            if r.warning:
+                out.append(f"⚠ {r.table}：{r.warning}")
         return out
 
 
@@ -489,33 +495,78 @@ def _post_with_retry(url: str, body: Dict[str, Any], headers: Dict[str, str],
     raise RuntimeError(last or "未知错误")
 
 
-def check_pk(table: str, df: pd.DataFrame, pk: Sequence[str]) -> str:
-    """发送前校验 pkId：必须能唯一定位一行、且不能为空。有问题返回说明，没问题返回空串。
+def pk_issue_rows(df: pd.DataFrame, pk: Sequence[str]) -> pd.DataFrame:
+    """pkId 有问题的行：pkId 有空值的行 + pkId 重复的行（重复的每一行都算）。"""
+    if df.empty or not pk:
+        return df.iloc[:0]
+    keys = df[list(pk)]
+    bad = keys.isna().any(axis=1) | keys.duplicated(keep=False)
+    return df[bad]
 
-    下游网关按 pkId「先查询、再更新」：pkId 重复的行会互相覆盖，最后只剩一行，
-    而且下游不报错 —— 数据悄悄变少。所以一行都不发，直接报错让人改配置。
+
+def check_pk(table: str, df: pd.DataFrame, pk: Sequence[str]) -> str:
+    """发送前检查 pkId：能不能唯一定位一行、有没有空值。有问题返回说明，没问题返回空串。
+
+    **只提醒，不拦截**：照常发送，下游按 pkId 自己查重。
+    下游网关按 pkId「先查询、再更新」，pkId 重复的行到下游会互相覆盖、只剩一行，
+    所以要提醒出来，并把这些行的请求 JSON 留下来方便对照（见 push_table）。
     空串不算空值（例如维度表没有三级维度时 dimension_level3 就是空串，是合法取值）。
     """
     if df.empty or not pk:
         return ""
     keys = df[list(pk)]
+    msgs = []
     nulls = int(keys.isna().any(axis=1).sum())
     if nulls:
         cols = [c for c in pk if keys[c].isna().any()]
-        return (f"pkId {list(pk)} 有 {nulls:,} 行为空（字段 {cols}），一行都没有发送。"
-                f"请检查 push_pk 配置")
+        msgs.append(f"pkId {list(pk)} 有 {nulls:,} 行为空（字段 {cols}）")
     dup = keys.duplicated(keep=False)
     if dup.any():
         n_rows = int(dup.sum())
         n_lost = int(keys.duplicated().sum())
         sample = keys[dup].head(3).astype(str).agg(" / ".join, axis=1).tolist()
-        hint = DEFAULT_PUSH_PK.get(table)
-        return (f"pkId {list(pk)} 不能唯一定位一行：{n_rows:,} 行的 pkId 有重复"
-                f"（例如 {'；'.join(sample)}）。下游按 pkId 先查再更新，这些行会互相覆盖、"
-                f"丢掉 {n_lost:,} 行，所以一行都没有发送。"
-                + (f"请把 push_pk 改成能唯一定位一行的字段，例如默认值 {hint}" if hint else
-                   "请把 push_pk 改成能唯一定位一行的字段"))
-    return ""
+        msgs.append(f"pkId {list(pk)} 不能唯一定位一行：{n_rows:,} 行的 pkId 有重复"
+                    f"（例如 {'；'.join(sample)}），下游按 pkId 先查再更新时最多会互相覆盖掉 "
+                    f"{n_lost:,} 行")
+    if not msgs:
+        return ""
+    hint = DEFAULT_PUSH_PK.get(table)
+    if hint and list(pk) != list(hint):
+        msgs.append(f"能唯一定位一行的默认 pkId 是 {hint}")
+    return "；".join(msgs) + "。已照常发送"
+
+
+def _dump_pk_issue(table: str, rows: pd.DataFrame, pk: Sequence[str], settings,
+                   cfg: Dict[str, Any]) -> tuple:
+    """pkId 有问题的行 → (单行示例请求 JSON, 完整请求 JSON 文件路径)。
+
+    示例 = 第一组重复的行（或第一行空值行）组成的一个请求，格式与真实请求完全一样，
+    拿去 curl 就能在下游复现；文件里是全部有问题的行，写在 <output_dir>/push_debug/ 下。
+    """
+    import os
+    from datetime import datetime
+
+    def _body(part):
+        return build_payload(table, part, pk,
+                             body_fields=getattr(settings, "push_body_fields", None),
+                             table_name=cfg["name"],
+                             extra=getattr(settings, "push_extra_fields", None))
+
+    keys = rows[list(pk)].astype(str)
+    first = keys.iloc[0].tolist()
+    group = rows[(keys == first).all(axis=1)]
+    sample = json.dumps(_body(group), ensure_ascii=False, separators=(",", ":"))
+    path = ""
+    try:
+        d = os.path.join(getattr(settings, "output_dir", "output") or "output", "push_debug")
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, f"{table}_pkId_{datetime.now():%Y%m%d_%H%M%S}.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(_body(rows), fh, ensure_ascii=False, indent=2)
+    except OSError as e:                         # 写不了文件不影响推送
+        log.warning("pkId 问题行的请求 JSON 写文件失败：%s", e)
+        path = ""
+    return sample, path
 
 
 def push_table(table: str, df: pd.DataFrame, *, settings, progress=None) -> PushResult:
@@ -537,14 +588,13 @@ def push_table(table: str, df: pd.DataFrame, *, settings, progress=None) -> Push
         res.error = f"主键字段不在表里：{missing}（检查 push_pk 配置）"
         res.elapsed = time.time() - t0
         return res
-    bad = check_pk(table, df, pk)
-    if bad:
-        res.error = bad
-        res.failed_batches = (len(df) + max(int(getattr(settings, "push_batch_size", 500)), 1) - 1) \
-            // max(int(getattr(settings, "push_batch_size", 500)), 1)
-        res.elapsed = time.time() - t0
-        log.error("推送 %s 未发送：%s", table, bad)
-        return res
+    warn = check_pk(table, df, pk)
+    if warn:
+        # 只提醒、照常发送（下游按 pkId 自己查）；把有问题的行的请求 JSON 留下来方便对照
+        res.warning = warn
+        res.pk_sample, res.pk_dump = _dump_pk_issue(table, pk_issue_rows(df, pk), pk,
+                                                    settings, cfg)
+        log.debug("推送 %s：%s", table, warn)        # CLI 会连同请求 JSON 一起打印
 
     size = max(int(getattr(settings, "push_batch_size", 500)), 1)
     url = settings.push_url

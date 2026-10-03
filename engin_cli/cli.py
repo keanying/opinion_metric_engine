@@ -101,6 +101,18 @@ def _parse_scenic(text: Optional[str]) -> Optional[List[str]]:
     return out or None
 
 
+def _print_pk_warning(r) -> None:
+    """pkId 有重复 / 空值：照常发送，但把提示和请求 JSON 打出来，方便拿去下游对照。"""
+    if not getattr(r, "warning", ""):
+        return
+    print(f"    ⚠ {r.warning}")
+    if r.pk_sample:
+        print("    其中一组 pkId 相同的行，请求 JSON 如下（可直接拿去推送复现）：")
+        print(f"    {r.pk_sample}")
+    if r.pk_dump:
+        print(f"    全部 pkId 有问题的行（同样的请求格式）已写到：{r.pk_dump}")
+
+
 def _parse_lookback(text: str) -> dict:
     """解析 --backfill-lookback "1:5,7:10,30:20" → {1: 5, 7: 10, 30: 20}。
 
@@ -235,6 +247,7 @@ def _run_one_scenic(st, scenic: str, dates: List[str], db, comments_df, works_df
                 continue
             print(f"  推送 {r.table:<48} {r.rows:>8,} 行  [{r.batches} 批 {r.elapsed:.1f}s]"
                   + ("" if r.ok else f"  ✗ {r.error}"))
+            _print_pk_warning(r)
         push_note = "推送 ✓" if res.push.ok else f"推送 ✗（{len(res.push.errors)} 张表失败，可用 push 补推）"
         if any(r.unreachable for r in res.push.results):
             # 地址连不上，后面的景区推也是白等：只算、只落库，事后用 push 补推
@@ -602,6 +615,7 @@ def cmd_push(args) -> int:
             if factory is None or r.skipped:     # 有进度条时每张表已经打过结果行了
                 print(f"  {r.table:<52} {r.rows:>8,} 行  [{r.batches} 批 {r.elapsed:.1f}s]"
                       + ("" if r.ok else f"  ✗ {r.error}"))
+            _print_pk_warning(r)
         failed += [f"{sc} · {e}" for e in rep.errors]
         if any(r.unreachable for r in rep.results):
             print(f"\n✗ 推送地址连不上或没有响应：{st.push_url}\n"
