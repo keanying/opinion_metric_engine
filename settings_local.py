@@ -115,11 +115,11 @@ ETL = {
         # 下钻表：下游没有 detail_uk，改用这组字段。
         # ⚠ comment_id 只在「同一渠道、同一作品」内唯一（源表唯一键是 景区+渠道+作品+评论ID），
         #   不同平台的评论 ID 撞号时会互相覆盖。下游允许的话建议加上 platform_code、work_id。
-        "ads_trf_social_opinion_drill_analysis_di": ["scenic_id", "emotion_word", "comment_id", "publish_time", "travel_date"],
+        "ads_trf_social_opinion_drill_analysis_di": ["scenic_id", "emotion_word", "emotion_type", "platform_code", "work_id", "comment_id", "publish_time", "travel_date"],
         "ads_trf_social_opinion_macro_gran_metric_di": ["scenic_id", "channel", "time_granularity", "publish_time", "travel_date"],
         "ads_trf_social_opinion_comment_core_di": ["scenic_spot_code", "publish_time", "travel_date"],
         "ads_trf_social_opinion_comment_platform_di": ["scenic_spot_code", "platform_code", "publish_time", "travel_date"],
-        "ads_trf_social_opinion_comment_dimension_score_di": ["scenic_spot_code", "dimension_level1", "dimension_level2", "dimension_level2", "publish_time", "travel_date"],
+        "ads_trf_social_opinion_comment_dimension_score_di": ["scenic_spot_code", "dimension_level1", "dimension_level2", "dimension_level3", "publish_time", "travel_date"],
         "ads_trf_social_opinion_comment_content_di": ["scenic_spot_code", "emotion_type", "emotion_word", "publish_time", "travel_date"],
     },
 
