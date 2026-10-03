@@ -2,7 +2,8 @@
 """多窗口滚动聚合。
 
 四张表一共有近百个 `_7d / _30d / _365d` 字段，如果每张表各写一套循环，
-口径迟早会漂。这里提供**唯一一份**滚动实现，四个 builder 全部复用。
+口径迟早会漂。这里提供**唯一一份**滚动实现（含「先补明细再滚动」的缺数回补，
+domain §1.8），各 builder 全部复用。
 
 核心约定
 --------
@@ -43,10 +44,13 @@ def rolling_windows(
     with_prev: bool = True,
     output_dates: Sequence[str] | None = None,
     calendar: tuple[str, str] | None = None,
-    shift_lookback: dict | None = None,
+    fill_lookback: dict | None = None,
+    fill_by: Sequence[str] | None = None,
+    presence: pd.DataFrame | None = None,
+    fill_from: str | None = None,
     presence_col: str | None = None,
 ) -> pd.DataFrame:
-    """把日粒度事实表滚成多窗口累计值。
+    """把日粒度事实滚成多窗口累计值（可先把每日明细补齐，再滚）。
 
     参数
     ----
@@ -57,53 +61,69 @@ def rolling_windows(
     windows : 窗口天数，如 (1, 7, 30, 60, 90, 365)
     with_prev : 是否同时产出上一周期累计（列名 `<col>_prev_<N>d`），用于环比
     output_dates : 只保留这些日期的结果；None 表示全部
-    shift_lookback : 缺数回补（整窗前移）。{窗口天数: 最大前移天数}。
-               某个窗口当期没数据时，把整个窗口整体往前挪，挪到有数据为止，
-               用**那一个窗口**的值（不是累计）。挪满上限还没有就取 0。
-               口径与上限见 domain §1.8。传 None = 不回补。
-    presence_col : 判断「这个窗口有没有数据」看哪一列（> 0 即有）。
-               开启 shift_lookback 时必填。
     calendar : **权威**日历范围 (start, end)。不传就取数据自己的最小/最大日期 ——
                但那样「最后几天一条数据都没有」时，这几天根本不会出现在结果里。
                需要为空白日期也产出行时（见 domain §1.7 行存在规则），必须显式传。
                传了就以它为准：区间外的数据会被丢弃，**不会**把面板撑大 ——
                源表里混进一条 2013 年的评论就能让日历从 400 天变成 4700 天，
                词表一大，面板直接爆掉。
+    fill_lookback : 明细补齐（domain §1.8）。{窗口天数: 最多往前找几天}。
+               窗口 N 先用「最多往前找 L_N 天」补齐每日明细，再逐日相加；
+               上一周期同样来自这份补齐后的明细。传 None / {} = 不补。
+    fill_by : 补齐的判断粒度（domain §1.9：渠道），必须是 key_cols 的子集，
+               如 ["scenic_spot_code", "platform_code"]。开启补齐时必填。
+    presence : 「这个渠道当天有没有评论」：fill_by + [date_col] + present_cnt
+               （domain.daily_channel_presence 的产物）。不传就用 presence_col 在
+               fill_by 粒度上的合计判断（core / platform 本身就是评论计数，两者等价）。
+    fill_from : 补齐时可以往前取明细的最早日期（早于 calendar 起点的那一段只当「来源」，
+               不进窗口合计）。不传 = calendar 起点。
+    presence_col : 行存在规则看的计数列。开启补齐时额外产出 `raw_<presence_col>_<N>d`
+               （**补齐之前**的真实窗口值，见 domain.has_window_data）。
 
     返回
     ----
     key_cols + [date_col] + `<col>_<N>d` (+ `<col>_prev_<N>d`)
-    开启回补时额外返回 `shift_<N>d`：该窗口实际往前挪了几天（0 = 没挪）。
+    开启补齐且给了 presence_col 时额外返回 `raw_<presence_col>_<N>d`。
     """
-    if shift_lookback and not presence_col:
-        raise ValueError("开启 shift_lookback 时必须指定 presence_col")
     key_cols = list(key_cols)
     value_cols = list(value_cols)
     windows = sorted({int(w) for w in windows})
-    if daily.empty:
+    lookback = {w: int((fill_lookback or {}).get(w, 0)) for w in windows}
+    filling = any(v > 0 for v in lookback.values())
+    if filling:
+        fill_by = list(fill_by or [])
+        if not fill_by or not set(fill_by) <= set(key_cols):
+            raise ValueError("开启明细补齐时 fill_by 必须是 key_cols 的非空子集")
+
+    def _empty() -> pd.DataFrame:
         cols = key_cols + [date_col]
         for w in windows:
             for c in value_cols:
                 cols.append(f"{c}_{w}d")
                 if with_prev:
                     cols.append(f"{c}_prev_{w}d")
+            if filling and presence_col:
+                cols.append(f"raw_{presence_col}_{w}d")
         return pd.DataFrame(columns=cols)
+
+    if daily.empty:
+        return _empty()
 
     df = daily[key_cols + [date_col] + value_cols].copy()
     df[_DT] = to_dt(df[date_col])
     if calendar:
-        # 区间外的行直接丢掉：日历由 calendar 说了算，不能被离群日期撑大
-        lo_c = pd.to_datetime(str(calendar[0]), format="%Y%m%d")
-        hi_c = pd.to_datetime(str(calendar[1]), format="%Y%m%d")
-        df = df[(df[_DT] >= lo_c) & (df[_DT] <= hi_c)]
-        if df.empty:
-            cols = key_cols + [date_col]
-            for w in windows:
-                for c in value_cols:
-                    cols.append(f"{c}_{w}d")
-                    if with_prev:
-                        cols.append(f"{c}_prev_{w}d")
-            return pd.DataFrame(columns=cols)
+        lo = pd.to_datetime(str(calendar[0]), format="%Y%m%d")
+        hi = pd.to_datetime(str(calendar[1]), format="%Y%m%d")
+    else:
+        lo, hi = df[_DT].min(), df[_DT].max()
+    # 补齐要用到日历起点之前的明细（只当来源）：面板从 fill_from 开始铺
+    src_lo = lo
+    if filling and fill_from:
+        src_lo = min(lo, pd.to_datetime(str(fill_from), format="%Y%m%d"))
+    # 区间外的行直接丢掉：日历由 calendar 说了算，不能被离群日期撑大
+    df = df[(df[_DT] >= src_lo) & (df[_DT] <= hi)]
+    if df.empty:
+        return _empty()
 
     keys = df[key_cols].drop_duplicates().reset_index(drop=True)
     keys[_KID] = np.arange(len(keys), dtype="int64")
@@ -120,32 +140,42 @@ def rolling_windows(
                                                   names=[None, _KID])
 
     # 补齐连续日历：缺采日必须以 0 参与窗口，否则 rolling 会跨过它多取历史
-    if calendar:
-        lo = pd.to_datetime(str(calendar[0]), format="%Y%m%d")
-        hi = pd.to_datetime(str(calendar[1]), format="%Y%m%d")
-    else:
-        lo, hi = wide.index.min(), wide.index.max()
-    full = pd.date_range(lo, hi, freq="D")
+    full = pd.date_range(src_lo, hi, freq="D")
     wide = wide.reindex(full, fill_value=0.0).sort_index()
+    in_cal = np.asarray(full >= lo)
+    cal_idx = full[in_cal]
 
     # 只要输出这几天，就在**展开成长表之前**先把行裁掉。
     # 否则「11000 个词 × 4700 天 × 6 个窗口」会先物化成几千万行再丢掉 99.99%。
     keep = None
     if output_dates is not None:
-        keep = full.isin(pd.to_datetime(sorted(set(output_dates)), format="%Y%m%d"))
+        keep = cal_idx.isin(pd.to_datetime(sorted(set(output_dates)), format="%Y%m%d"))
+
+    base = wide[in_cal]
+    src_by_lb = {}
+    if filling:
+        src_by_lb = _fill_sources(wide, keys, fill_by, date_col, presence, presence_col,
+                                  sorted({v for v in lookback.values() if v > 0}), in_cal)
 
     parts: List[pd.DataFrame] = []
+    filled_cache = {}
     for w in windows:
-        roll = wide.rolling(w, min_periods=1).sum()
-        prev = roll.shift(w).fillna(0.0) if with_prev else None
-
-        lb = int((shift_lookback or {}).get(w, 0))
+        lb = lookback[w]
         if lb > 0:
-            # 整窗前移：为每个 (输出日期, 实体) 找到最近一个「有数据」的窗口
-            roll, prev, shift_days = _shift_to_nearest_data(
-                roll, prev, w, presence_col, lb, keep, full)
-            parts.append(shift_days)
-        elif keep is not None:
+            if lb not in filled_cache:
+                filled_cache[lb] = _gather_filled(wide, src_by_lb[lb], in_cal)
+            data = filled_cache[lb]
+        else:
+            data = base
+        roll = data.rolling(w, min_periods=1).sum()
+        prev = roll.shift(w).fillna(0.0) if with_prev else None
+        if filling and presence_col:
+            raw = base[[presence_col]].rolling(w, min_periods=1).sum()
+            if keep is not None:
+                raw = raw[keep]
+            parts.append(_to_long(raw, [presence_col], suffix=f"_{w}d",
+                                  prefix="raw_"))
+        if keep is not None:
             roll = roll[keep]
             if prev is not None:
                 prev = prev[keep]
@@ -166,79 +196,103 @@ def rolling_windows(
     return out[ordered].reset_index(drop=True)
 
 
-def _shift_to_nearest_data(roll, prev, window, presence_col, lookback, keep, full):
-    """把每个 (输出日期, 实体) 的窗口整体往前挪到「有数据」的那一天。
+def fill_source_index(present: np.ndarray, lookback: int) -> np.ndarray:
+    """明细补齐的「来源日」（domain §1.8）。
 
-    做法：对每个输出日期行，按 s = 0, 1, 2 … 逐步往前试，第一个满足
-    `presence_col > 0` 的 s 就是答案；挪满 lookback 还没有就留在原位（值全 0）。
-
-    **不是累计**：挪到 s 天前就只用那一个窗口的值，不把中间几天加进来 ——
-    这是业务方定的口径（domain §1.8）。
-
-    只对**输出日期**做这件事：输出一天时就是 (lookback+1) × 实体数 次布尔运算；
-    对着整段历史做就是几千万次，没有必要。
-
-    返回 (挪好的 roll, 挪好的 prev, 附加列的长表)
-
-    附加列：
-      shift_<N>d          实际往前挪了几天（0 = 没挪）
-      raw_<presence>_<N>d **没挪之前**的真实窗口值。行存在规则要看它 ——
-                          看挪完的值会让「近 30 日出现过的词」被回补悄悄放大成
-                          「近 50 日出现过的词」，内容表会跟着膨胀。
+    入参：present (天数 × 渠道) 布尔矩阵，True = 这个渠道当天有评论；lookback 最多往前找几天
+    出参：同形状的整数矩阵：当天有数据 → 自己的行号；没有 → 往前 lookback 天内
+          最近一个有数据的行号；找不到 → -1（这一天就是空的）
     """
-    kids = roll.columns.get_level_values(_KID).to_numpy()
-    n_keys = int(kids.max()) + 1 if len(kids) else 0
-
-    pres = roll[presence_col].to_numpy() > 0                  # (n_dates, n_keys)
-    rows = np.arange(len(full)) if keep is None else np.where(keep)[0]
-
-    src = np.full((len(rows), n_keys), -1, dtype="int64")
-    todo = np.ones((len(rows), n_keys), dtype=bool)
-    for s in range(lookback + 1):
-        cand = rows - s
-        ok = cand >= 0
-        hit = todo & ok[:, None] & pres[np.clip(cand, 0, None)]
-        src = np.where(hit, cand[:, None], src)
-        todo &= ~hit
-        if not todo.any():
-            break
-    src = np.where(src >= 0, src, rows[:, None])              # 找不到 → 原位（全 0）
-
-    def _gather(df, offset=0):
-        """按 src 逐列取值。列的第二层就是 kid，直接拿它当索引。"""
-        if df is None:
-            return None
-        idx = np.clip(src - offset, 0, len(full) - 1)
-        arr = df.to_numpy()
-        out = np.empty((len(rows), arr.shape[1]), dtype="float64")
-        for j, k in enumerate(kids):
-            out[:, j] = arr[idx[:, int(k)], j]
-        return pd.DataFrame(out, index=full[rows], columns=df.columns)
-
-    roll2 = _gather(roll)
-    # 上一周期跟着一起挪：比的是「实际用的那个窗口」与它之前一个周期，口径才自洽。
-    # prev 本身已经是 roll.shift(window)，所以这里用同一个 src 取即可。
-    prev2 = _gather(prev)
-
-    days = (rows[:, None] - src).astype("int64")
-    sd = pd.DataFrame(days, index=full[rows],
-                      columns=pd.Index(np.arange(n_keys), name=_KID))
-    sd = sd.stack().to_frame(f"shift_{window}d")
-    sd.index = sd.index.set_names([_DT, _KID])
-
-    raw = pd.DataFrame(roll[presence_col].to_numpy()[rows], index=full[rows],
-                       columns=pd.Index(np.arange(n_keys), name=_KID))
-    raw = raw.stack().to_frame(f"raw_{presence_col}_{window}d")
-    raw.index = raw.index.set_names([_DT, _KID])
-    return roll2, prev2, pd.concat([sd, raw], axis=1)
+    n = present.shape[0]
+    rows = np.arange(n)[:, None]
+    last = np.maximum.accumulate(np.where(present, rows, -1), axis=0)
+    ok = (last >= 0) & (rows - last <= int(lookback))
+    return np.where(ok, last, -1)
 
 
-def _to_long(wide: pd.DataFrame, value_cols: Sequence[str], suffix: str) -> pd.DataFrame:
+def _fill_sources(wide, keys, fill_by, date_col, presence, presence_col, lookbacks, in_cal):
+    """每个上限 L → (日历内天数 × 实体) 的来源行号矩阵（-1 = 补不到）。"""
+    groups = keys[fill_by].drop_duplicates().reset_index(drop=True)
+    groups["_gid"] = np.arange(len(groups), dtype="int64")
+    kid_gid = keys.merge(groups, on=fill_by, how="left").sort_values(_KID)["_gid"].to_numpy()
+    full = wide.index
+    pres = np.zeros((len(full), len(groups)), dtype=bool)
+
+    # 「当天有评论」：优先用传进来的评论口径；再并上数据自己的计数，防止两边口径不齐时丢数
+    if presence is not None and not presence.empty:
+        p = presence[fill_by + [date_col]].copy()
+        p["_n"] = pd.to_numeric(presence.get("present_cnt", 1), errors="coerce").fillna(0)
+        p = p[p["_n"] > 0].merge(groups, on=fill_by, how="inner")
+        if not p.empty:
+            pos = full.get_indexer(to_dt(p[date_col]))
+            ok = pos >= 0
+            pres[pos[ok], p["_gid"].to_numpy()[ok]] = True
+    col = presence_col if presence_col in wide.columns.get_level_values(0) \
+        else wide.columns.get_level_values(0)[0]
+    own = wide[col].to_numpy() > 0                                  # (天数 × 实体)
+    if own.size:
+        hit = np.zeros_like(pres)
+        r, k = np.nonzero(own)
+        kids = wide[col].columns.to_numpy()
+        hit[r, kid_gid[kids[k]]] = True
+        pres |= hit
+
+    out = {}
+    for lb in lookbacks:
+        src = fill_source_index(pres, lb)[in_cal]                    # (日历天数 × 渠道)
+        out[lb] = src[:, kid_gid]                                    # (日历天数 × 实体)
+    return out
+
+
+def _gather_filled(wide, src_kid, in_cal):
+    """按来源行号把每个实体的整列明细搬过来：补齐后的日历内面板。"""
+    kids = wide.columns.get_level_values(_KID).to_numpy()
+    idx = src_kid[:, kids]                                           # (日历天数 × 列)
+    arr = wide.to_numpy()
+    out = np.take_along_axis(arr, np.maximum(idx, 0), axis=0)
+    out[idx < 0] = 0.0
+    return pd.DataFrame(out, index=wide.index[in_cal], columns=wide.columns)
+
+
+def fill_source_dates(presence: pd.DataFrame, by: Sequence[str], date_col: str,
+                      target_dates: Sequence[str], lookback: int) -> pd.DataFrame:
+    """事实明细层面的补齐映射（下钻表 / 跑批报告用，口径同 rolling_windows 的补齐）。
+
+    入参：presence 有评论的 (by…, date_col) 行（domain.daily_channel_presence）；
+          target_dates 要看的日期；lookback 最多往前找几天
+    出参：by + [date_col, "src_date"]，只列「当天没评论、往前找到了」的组合；
+          另带 found 列：False = 往前 lookback 天内也没有（这一天就是空的）
+    """
+    by = list(by)
+    cols = by + [date_col, "src_date", "found"]
+    if presence.empty or not target_dates or int(lookback) <= 0:
+        return pd.DataFrame(columns=cols)
+    p = presence[by + [date_col]].drop_duplicates().copy()
+    p[date_col] = p[date_col].astype(str)
+    have = set(map(tuple, p[by + [date_col]].to_numpy().tolist()))
+    groups = p[by].drop_duplicates()
+    t = groups.merge(pd.DataFrame({date_col: sorted(set(map(str, target_dates)))}),
+                     how="cross")
+    t = t[[tuple(r) not in have for r in t[by + [date_col]].to_numpy().tolist()]]
+    if t.empty:
+        return pd.DataFrame(columns=cols)
+    left = t.assign(_dt=to_dt(t[date_col])).sort_values("_dt")
+    right = p.assign(_dt=to_dt(p[date_col]), src_date=p[date_col])[by + ["_dt", "src_date"]]
+    right = right.sort_values("_dt")
+    m = pd.merge_asof(left, right, on="_dt", by=by, direction="backward",
+                      allow_exact_matches=False,
+                      tolerance=pd.Timedelta(days=int(lookback)))
+    m["found"] = m["src_date"].notna()
+    return m[cols].reset_index(drop=True)
+
+
+def _to_long(wide: pd.DataFrame, value_cols: Sequence[str], suffix: str,
+             prefix: str = "") -> pd.DataFrame:
     """(date × [metric, kid]) 宽表 → (date, kid) 索引的长表，列名加窗口后缀。"""
     long = wide.stack(level=_KID)
     long.index = long.index.set_names([_DT, _KID])
     long = long[list(value_cols)]
-    long.columns = [f"{c}{suffix}" for c in value_cols]
+    long.columns = [f"{prefix}{c}{suffix}" for c in value_cols]
     return long
 
 

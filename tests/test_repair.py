@@ -159,108 +159,102 @@ def pipeline_out():
 
 
 def _raw_daily(comments):
-    """源表 → 当天真实日计数（未经回补），这才是 recompute_core_scores 要的入参。"""
+    """源表 → 渠道粒度的当天真实日计数（未经补齐），与 repair_core 喂的入参一致。"""
     from engin_cli.normalize import build_comment_facts
     import engin_cli.metric_calc_domain as D
-    return D.daily_core_facts(build_comment_facts(comments))
+    return D.daily_core_facts_by_platform(build_comment_facts(comments))
 
 
 def test_repair_after_run_changes_nothing_core(pipeline_out):
     """core：跑批写的分数 == 修正重算的分数，一行都不该变。
 
-    整窗前移口径下重算必须回源表拿**当天真实计数** —— core 表里存的
-    comment_count 已经是回补后的值，再滚一次窗口等于把回补叠加两遍。
+    补齐明细口径下重算必须回源表拿**当天真实计数** —— core 表里存的
+    comment_count 已经是补齐后的值，再滚一次窗口口径就错了。
     """
+    from engin_cli.repair import fill_start
     st, comments, r, targets, cal = pipeline_out
     core = r.tables["ads_trf_social_opinion_comment_core_di"]
     new = recompute_core_scores(_raw_daily(comments), output_dates=targets,
-                                formula=st.score_formula, settings=st, calendar=cal)
+                                formula=st.score_formula, settings=st, calendar=cal,
+                                fill_from=fill_start(st, cal[0]))
     changed = diff_scores(core, new, CORE_KEYS, CORE_SCORE_FIELDS)
     assert changed.empty, f"repair 与 run 不一致，{len(changed)} 行有差异"
 
 
 def test_repair_after_run_changes_nothing_dimension(pipeline_out):
-    """dimension：同上，维度粒度自己做整窗前移，不依赖 core。"""
+    """dimension：同上，按渠道补齐维度明细再滚动，不依赖 core。"""
+    import engin_cli.metric_calc_domain as D
     from engin_cli.normalize import build_comment_facts, build_dimension_facts
+    from engin_cli.repair import fill_start
     st, comments, r, targets, cal = pipeline_out
     dim = r.tables["ads_trf_social_opinion_comment_dimension_score_di"]
     dim = dim[dim.travel_date.astype(str).isin(targets)]
 
-    dim_facts = build_dimension_facts(build_comment_facts(comments),
-                                      st.unknown_dimension_policy)
+    cf = build_comment_facts(comments)
+    dim_facts = build_dimension_facts(cf, st.unknown_dimension_policy)
     new = recompute_dimension_scores(dim_facts, targets, formula=st.score_formula,
-                                     settings=st, calendar=cal)
+                                     settings=st, calendar=cal,
+                                     presence=D.daily_channel_presence(cf),
+                                     fill_from=fill_start(st, cal[0]))
     changed = diff_scores(dim, new, DIM_KEYS, DIM_SCORE_FIELDS)
     assert changed.empty, f"repair 与 run 不一致，{len(changed)} 行有差异"
 
 
 def test_feeding_backfilled_counts_back_in_is_wrong():
-    """反面用例：把**回补后**的计数当输入喂回去，结果就错了。
+    """反面用例：把**补齐后**的计数当输入喂回去，结果就错了。
 
     这条测试存在的意义是把这个坑钉死：重算 core 必须回源表拿当天真实计数，
     不能图省事直接读 core 自己的计数列（模块注释里写的就是这件事）。
 
-    造一段刻意稀疏的历史：8/01~8/05 每天 10 条，8/06~8/08 一条都没有。
-      · 真实计数下 8/08 的 1 日窗口要一路前移到 8/05，取到 10 条
-      · 喂回补后的值进去，8/07 自己就「有数据」了 → 只挪 1 天，窗口口径全错位
+    造一段刻意稀疏的历史：8/01 有 10 条，之后一直到 8/16 一条都没有。
+      · 真实明细下，7 日档（最多找 10 天）在 8/16 的窗口 [8/10, 8/16] 里
+        只有 8/10、8/11 能找到 8/01 → 20 条
+      · 喂 core 表存的值进去：1 日档已经把 8/02~8/06 补成了 10 条，
+        这几天自己就「有数据」了 → 8/10~8/16 全都能找到 8/06 → 70 条，口径全错
     """
     from engin_cli.settings import EtlSettings
     import engin_cli.metric_calc_domain as D
 
     st = EtlSettings()
-    st.lookback_days = 10
-    cal = ("20260801", "20260808")
-    rows = []
-    for d in range(1, 6):                       # 8/01~8/05 有数据
-        rows.append({"scenic_spot_code": "S1", "travel_date": f"202608{d:02d}",
-                     "comment_count": 10, "positive_count": 6,
-                     "neutral_count": 2, "negative_count": 2})
-    raw = pd.DataFrame(rows)
-    targets = ["20260806", "20260807", "20260808"]
-    # 库里这三天是有行的（行存在规则），只是当天真实计数为 0
-    raw = pd.concat([raw, pd.DataFrame(
-        [{"scenic_spot_code": "S1", "travel_date": t, "comment_count": 0,
-          "positive_count": 0, "neutral_count": 0, "negative_count": 0}
-         for t in targets])], ignore_index=True)
+    st.lookback_days = 16
+    cal = ("20260801", "20260816")
+    days = [d.strftime("%Y%m%d") for d in pd.date_range("2026-08-01", "2026-08-16")]
+    raw = pd.DataFrame([{"scenic_spot_code": "S1", "platform_code": "douyin",
+                         "travel_date": t, "comment_count": 10 if t == "20260801" else 0,
+                         "positive_count": 6 if t == "20260801" else 0,
+                         "neutral_count": 2 if t == "20260801" else 0,
+                         "negative_count": 2 if t == "20260801" else 0} for t in days])
+    targets = ["20260814", "20260815", "20260816"]
 
     right = recompute_core_scores(raw, output_dates=targets,
                                   formula=st.score_formula, settings=st, calendar=cal)
     assert len(right) == 3
-    # 回补确实触发了：三天都借到了 8/05 的样本，分数不是空的
-    assert right["emotional_score"].notna().all()
-    assert (right["emotional_score"] > 0).all()
 
-    # 模拟「core 表存的是回补后的值」：这三天的计数被写成了 10
+    # 模拟「core 表存的是补齐后的值」：1 日档把 8/02~8/06 补成了 10 条
     backfilled = raw.copy()
-    m = backfilled.travel_date.isin(targets)
+    m = backfilled.travel_date.between("20260802", "20260806")
     backfilled.loc[m, D.CORE_COUNT_FIELDS] = [10, 6, 2, 2]
-    wrong = recompute_core_scores(backfilled, output_dates=targets,
-                                  formula=st.score_formula, settings=st, calendar=cal)
-    assert len(wrong) == 3
 
-    # 分数本身可能因为好/中/差的比例恰好相同而相等 —— 真正错位的是**窗口样本量**：
-    # 真实口径下 8/08 的 7 日窗整体前移到有数据的那一段；
-    # 喂回补值进去，8/07 自己就「有数据」了，窗口里混进三天凭空多出来的 30 条。
     w = _window_counts(raw, backfilled, targets, st, cal)
-    assert w["raw_7d"] != w["bf_7d"], (
-        "喂回补后的计数进去，7 日窗口的样本量应该跟真实口径不同", w)
+    assert w["raw_7d"] == 20, w
+    assert w["bf_7d"] == 70, ("喂补齐后的计数进去，7 日窗口的样本量应该跟真实口径不同", w)
 
 
 def _window_counts(raw, backfilled, targets, st, cal):
-    """把两种输入下 7 日窗口的评论数捞出来对比（给上面那条反面用例用）。"""
+    """把两种输入下 8/16 的 7 日窗口评论数捞出来对比（给上面那条反面用例用）。"""
     import engin_cli.metric_calc_domain as D
     from engin_cli.repair import _lookback
-    from engin_cli.windows import dense_grid, rolling_windows
+    from engin_cli.windows import rolling_windows
+
+    keys = ["scenic_spot_code", "platform_code"]
 
     def cnt(daily):
         d = daily.copy()
         d["travel_date"] = d["travel_date"].astype(str)
-        d = dense_grid(d, ["scenic_spot_code"], "travel_date", D.CORE_COUNT_FIELDS,
-                       start=cal[0], end=cal[1])
-        w = rolling_windows(d, ["scenic_spot_code"], "travel_date",
+        w = rolling_windows(d, keys, "travel_date",
                             D.CORE_COUNT_FIELDS, windows=[7], with_prev=False,
-                            output_dates=targets, calendar=cal,
-                            shift_lookback=_lookback(st, [7]),
+                            output_dates=[targets[-1]], calendar=cal,
+                            fill_lookback=_lookback(st, [7]), fill_by=keys,
                             presence_col="comment_count")
         return int(w["comment_count_7d"].sum())
 

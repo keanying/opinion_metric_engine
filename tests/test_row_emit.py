@@ -65,7 +65,7 @@ def result(sparse):
     st = EtlSettings()
     st.write_db = st.write_csv = False
     st.lookback_days = 60
-    st.backfill_mode = "off"            # 关掉整窗前移，好判断值到底来自哪
+    st.backfill_mode = "off"            # 关掉明细补齐，好判断值到底来自哪
     return run(st, ["20260830", "20260831"], comments_df=sparse)
 
 
@@ -113,7 +113,7 @@ def test_platform_sum_still_equals_core(result):
 
     开不开回补都成立：回补的原子粒度是渠道（domain §1.9），core 吃的就是渠道
     粒度的事实，在渠道上挪完再按景区相加，两边同源。
-    开着回补的版本见 test_shift_backfill.py。
+    开着回补的版本见 test_fill_backfill.py。
     """
     core, p = result.tables[CORE], result.tables[PLATFORM]
     agg = p.groupby(["scenic_spot_code", "travel_date"])["comment_cnt"].sum()
@@ -249,10 +249,10 @@ def test_bdc_every_channel_present_both_days(bdc):
 
 
 def test_bdc_weibo_zero_day_backfills_from_previous_day(bdc):
-    """微博 0910 当日 0 条 → 1 日窗口前移一天，取 0909 那一天的 1 条。
+    """微博 0910 当日 0 条 → 复制 0909 那一天的明细，就是 1 条。
 
-    `bdc` 用的是默认口径（整窗前移）。所以 comment_cnt 不再是「当天真实条数」，
-    而是「最近一个有数据的 1 日窗口的条数」—— 0909 正好只有 1 条。
+    `bdc` 用的是默认口径（先补明细）。所以 comment_cnt 不再是「当天真实条数」，
+    而是「补齐当天明细后的条数」—— 0909 正好只有 1 条。
     """
     p = bdc.tables[PLATFORM]
     w = p[(p.travel_date == 20260910) & (p.platform_code == "weibo")].iloc[0]
@@ -261,7 +261,7 @@ def test_bdc_weibo_zero_day_backfills_from_previous_day(bdc):
 
 
 def test_bdc_kuaishou_zero_day_backfills_from_previous_day(bdc):
-    """快手 0909 当日 0 条 → 前移一天取 0908 的量（1~30 条），不是 0 也不是累计。"""
+    """快手 0909 当日 0 条 → 复制 0908 的明细（1~30 条），不是 0 也不是累计。"""
     p = bdc.tables[PLATFORM]
     k = p[(p.travel_date == 20260909) & (p.platform_code == "kuaishou")].iloc[0]
     raw = _bdc_comments()

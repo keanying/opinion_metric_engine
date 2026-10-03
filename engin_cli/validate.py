@@ -15,7 +15,7 @@ from typing import List
 import numpy as np
 import pandas as pd
 
-from .metric_calc_domain import (BACKFILL_MODE_SHIFT, CORE_SUFFIX, CORE_WINDOWS,
+from .metric_calc_domain import (BACKFILL_MODE_FILL, CORE_SUFFIX, CORE_WINDOWS,
                                  DEFAULT_SCORE_FORMULA, MACRO_CHANNEL_ALL, MACRO_KEYS,
                                  MACRO_SENTIMENT_PREFIX, PLATFORM_WINDOWS, PLAT_POS,
                                  PLAT_TOT_POS, SCORE_FORMULA_V1, SCORE_MAX, SCORE_MIN,
@@ -54,7 +54,7 @@ def validate_core(core: pd.DataFrame, formula: str = DEFAULT_SCORE_FORMULA,
           "core: daily_rating 越界 [1,5]")
 
     # 1 日档得分必须**严格等于**把表里存的计数代进公式的结果。
-    # 整窗前移之后计数本身也是回补后的值，分子分母同源，所以这里可以逐行对拍，
+    # 补齐明细之后计数本身也是补齐后的值，分子分母同源，所以这里可以逐行对拍，
     # 不再需要宽松容差 —— 对不上就是公式接错或字段错位。
     calc = sentiment_score_from_counts(core.positive_count, core.neutral_count,
                                        core.negative_count, core.comment_count,
@@ -70,7 +70,7 @@ def validate_core(core: pd.DataFrame, formula: str = DEFAULT_SCORE_FORMULA,
 
 def validate_platform(platform: pd.DataFrame, core: pd.DataFrame,
                       codes: List[str] | None = None,
-                      backfill_mode: str = BACKFILL_MODE_SHIFT) -> List[str]:
+                      backfill_mode: str = BACKFILL_MODE_FILL) -> List[str]:
     errs: List[str] = []
     if platform.empty:
         return ["platform 表为空"]
@@ -78,7 +78,7 @@ def validate_platform(platform: pd.DataFrame, core: pd.DataFrame,
     # 平台合计 == core 总数。**开不开回补都必须恒成立。**
     # 因为回补的原子粒度是渠道（domain §1.9）：core 吃的就是渠道粒度的事实，
     # 在渠道上挪完再按景区相加，两边同源。这条一旦破了，说明 core 和 platform
-    # 用了不同的渠道范围、不同的日历或不同的前移上限 —— 同一天两个总数，对不上账。
+    # 用了不同的渠道范围、不同的日历或不同的补齐上限 —— 同一天两个总数，对不上账。
     agg = platform.groupby(["scenic_spot_code", "travel_date"], as_index=False)[
         "comment_cnt"].sum()
     m = agg.merge(core[["scenic_spot_code", "travel_date", "comment_count"]],
@@ -181,8 +181,8 @@ def validate_content(content: pd.DataFrame, core: pd.DataFrame) -> List[str]:
         v = content[c]
         _fail(errs, bool((v >= 0).all()), f"content: {c} 出现负值")
 
-    # 词频不该离谱地超过评论数。整窗前移下词和景区各自平移，
-    # 严格的「≤ 评论数」不再恒成立，所以放宽到 3 倍：抓量级错误（比如同一条评论
+    # 词频不该离谱地超过评论数（词和评论数同一份补齐后的明细，
+    # 但一条评论可以命中多个词，所以放宽到 3 倍）：抓量级错误（比如同一条评论
     # 里同词被重复计数），而不是卡个位数的口径差。
     m = content.merge(core[["scenic_spot_code", "travel_date", "comment_count"]],
                       on=["scenic_spot_code", "travel_date"], how="left")
@@ -204,7 +204,7 @@ def validate_all(tables: dict) -> List[str]:
     errs += validate_core(core, formula, tables.get("score_weights"))
     errs += validate_platform(tables.get("platform", pd.DataFrame()), core,
                               tables.get("platform_codes"),
-                              tables.get("backfill_mode", BACKFILL_MODE_SHIFT))
+                              tables.get("backfill_mode", BACKFILL_MODE_FILL))
     errs += validate_dimension(tables.get("dimension", pd.DataFrame()))
     errs += validate_content(tables.get("content", pd.DataFrame()), core)
     if "macro" in tables:

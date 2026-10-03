@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import pandas as pd
 
@@ -25,8 +25,6 @@ class RunContext:
     etl_time: datetime = field(default_factory=datetime.now)
     # 跑批过程中累积的告警，最后统一打印，不要散在各处 print
     warnings: List[str] = field(default_factory=list)
-    # 整窗前移回补的实际发生情况：{表名: {窗口: (挪了几行, 总行数, 最大前移天数)}}
-    shift_stats: Dict[str, dict] = field(default_factory=dict)
 
     @property
     def publish_time_format(self) -> str:
@@ -57,47 +55,29 @@ class RunContext:
         from . import metric_calc_domain as D
         return D.macro_granularities(getattr(self.settings, "macro_granularities", None))
 
-    def backfill_lookback(self, windows) -> dict:
-        """本次跑批用的「整窗前移」上限：{窗口天数: 最大前移天数}。
+    def backfill_lookback(self, windows=None) -> dict:
+        """本次跑批的明细补齐上限：{窗口天数: 最多往前找几天}（domain §1.8）。
 
-        口径默认值在 domain §1.8，settings.backfill_lookback 可逐档覆盖。
-        backfill_mode != "shift" 时返回空字典 = 不做前移回补。
+        口径默认值在 domain.BACKFILL_LOOKBACK，settings.backfill_lookback 可逐档覆盖。
+        backfill_mode = "off" 时返回空字典 = 不补。windows=None 返回全部档位。
         """
         from . import metric_calc_domain as D
-        mode = getattr(self.settings, "backfill_mode", D.DEFAULT_BACKFILL_MODE)
-        if mode != D.BACKFILL_MODE_SHIFT:
-            return {}
-        table = dict(D.BACKFILL_LOOKBACK)
-        table.update(getattr(self.settings, "backfill_lookback", None) or {})
-        return {int(w): int(table[int(w)]) for w in windows if int(w) in table}
+        return D.resolve_backfill_lookback(
+            getattr(self.settings, "backfill_mode", D.DEFAULT_BACKFILL_MODE),
+            getattr(self.settings, "backfill_lookback", None), windows)
 
-    def note_shift(self, label: str, win: pd.DataFrame) -> None:
-        """记录某张表的整窗前移实际发生了多少 —— 回补是「看不见的手」，
-        不统计出来就没人知道今天有多少指标其实是借来的。
+    @property
+    def fill_start(self) -> str:
+        """补齐明细最早要用到哪一天：load_start 再往前「最大上限」天。
 
-        入参：label 表名（报告里显示）；win rolling_windows 的产出
-              （带 shift_<N>d 列，没有这些列就什么都不记）
+        这一段只当补齐的来源，不进任何窗口合计 —— 否则取数区间第一天如果恰好没评论，
+        它就补不出来，和逐日跑的结果对不上。
         """
-        stat = {}
-        for c in win.columns:
-            if not (isinstance(c, str) and c.startswith("shift_") and c.endswith("d")):
-                continue
-            v = pd.to_numeric(win[c], errors="coerce").fillna(0)
-            moved = v > 0
-            if not moved.any():
-                continue
-            stat[c[len("shift_"):-1]] = (int(moved.sum()), len(v), int(v.max()))
-        if stat:
-            self.shift_stats[label] = stat
-
-    def shift_report(self) -> List[str]:
-        """把 note_shift 攒下来的统计渲染成报告行。"""
-        out = []
-        for label, stat in self.shift_stats.items():
-            parts = [f"{w}日 {n:,}/{tot:,} 行(最多前移 {mx} 天)"
-                     for w, (n, tot, mx) in sorted(stat.items(), key=lambda x: int(x[0]))]
-            out.append(f"{label} 触发整窗前移：" + "，".join(parts))
-        return out
+        lb = max(self.backfill_lookback().values(), default=0)
+        if lb <= 0:
+            return self.load_start
+        return (pd.to_datetime(self.load_start, format="%Y%m%d")
+                - pd.Timedelta(days=int(lb))).strftime("%Y%m%d")
 
     def warn(self, msg: str) -> None:
         self.warnings.append(msg)

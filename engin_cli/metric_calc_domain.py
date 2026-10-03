@@ -9,7 +9,7 @@
 其余模块的分工（它们只做搬运，不做口径判断）：
 
     normalize.py   解析 JSON、把评论炸成明细        → 调用本文件的 judge_sentiment
-    windows.py     日粒度事实 → 多窗口累计 + 整窗前移回补 → 纯机械，上限来自 §1.8
+    windows.py     日粒度事实 → 明细补齐 + 多窗口累计 → 纯机械，上限来自 §1.8
     builders/*.py  分组 → 滚动 → **调用本文件算指标** → 拼 travel_date 等时间字段
     validate.py    自检                              → 断言用的公式也来自本文件
     analytics.py   看板取数                          → 字段名映射来自本文件
@@ -53,7 +53,7 @@ import pandas as pd
 #     避免单条差评把分数击穿）
 #   · 三个占比之和恒为 1，所以 S 天然落在 [5×0.5, 5×1.0] = [2.5, 5]，
 #     再做一次 clip 只是防浮点/回补带来的边界毛刺
-#   · **没有置信度权重**：样本量小的问题由缺数回补（§1.8 整窗前移）解决，
+#   · **没有置信度权重**：样本量小的问题由缺数回补（§1.8 先补明细）解决，
 #     不再在公式里对小样本打折
 #
 # 【v1 · 历史口径】净值 + 置信度，值域 [0, 10]，中性 = 5
@@ -172,70 +172,93 @@ CORE_ROW_WINDOW = 365
 # 配置的渠道全集。settings.platform_codes 可覆盖（比如某景区只接了三个平台）。
 PLATFORM_CODES = list(CHANNEL_NAME)
 
-# ---- 1.8 缺数回补：整窗前移，取到为止 ----
+# ---- 1.8 缺数回补：先补明细，再算指标 ----
 #
-# 规则（业务方定义）：某个窗口当期没有数据时，**把整个窗口整体往前平移**，
-# 一天一天挪，挪到那一天的窗口有数据就停，用**那一个窗口**的值。
+# 规则（业务方定义，2.0 版）：**回补补的是「每日明细」，不是窗口结果。**
 #
-#   2026-09-11 没有快手 → 往前挪一天到 09-10，那天有 1 条 → 09-11 的 1 日值就是 1
+#   某渠道某一天一条评论都没有 → 往前找最近一个「这个渠道有评论」的日子，
+#   把**那一天的全部评论明细**原样复制过来，当作这一天的明细；找到就停。
 #
-# 关键：**不是累计**。挪到 09-10 就用 09-10 这一天的数，不是 09-10 + 09-11 相加。
-# 7 日档同理：[09-05, 09-11] 没数据就整体挪成 [09-04, 09-10]，再没有就继续挪。
+#     快手 09-10 有 3 条，09-11 / 09-12 / 09-13 都没有
+#       → 09-11、09-12、09-13 各自复制 09-10 的 3 条（每天都是 3 条）
+#       → 近 7 日（截至 09-13）= 09-07~09-13 补齐后逐日相加，含 09-10 起的 4 天 × 3 条
 #
-# 每个窗口的最大平移天数不同（挪过头就失去时效性了）：
+# 明细补齐之后，**所有指标都在补齐后的明细上照常计算**：窗口合计、好/中/差、得分、
+# 占比、环比、同比、词频、维度、地域……窗口里有就有，没有就没有，不再整窗挪动。
+# 上一周期（环比分母）与去年同期（同比分母）同样用补齐后的明细。
+#
+# 往前最多找几天，**按指标窗口分档**（挪过头就失去时效性了）：
+# 窗口 N 的指标用「最多往前找 L_N 天」补出来的那一份明细，再逐日相加。
+#   当日 / 近 1 日 → 最多往前找 5 天；近 7 日 → 10 天；…… 近 365 日 → 90 天
+# 所以同一天的明细，在 1 日档和 30 日档里可能不一样：09-01 有数据、09-07 没有时，
+# 1 日档往前找 5 天找不到（09-07 为空），30 日档往前找 20 天能找到 09-01。
 BACKFILL_LOOKBACK = {
-    1: 5,        # 近 1 日：最多往前找 5 天
-    7: 10,       # 近 7 日：最多往前挪 10 天
+    1: 5,        # 当日 / 近 1 日：最多往前找 5 天
+    7: 10,       # 近 7 日：最多往前找 10 天
     14: 15,
     30: 20,
     60: 30,
     90: 60,
     365: 90,     # 业务方未指定，按递增趋势暂定 90，可配置
 }
-# 挪满上限仍然没有数据 → 该窗口取 0（而不是继续往前找）。
+# 找满上限仍然没有 → 这一天这个渠道就是空的（0 条），不再继续往前找。
+# 表里没有的窗口天数不补。
 
 # 回补口径开关（settings.backfill_mode）：
-#   shift  整窗前移取到为止（现行口径，业务方定义，默认）
-#   off    不回补，当期没数据就是 0（用来对拍「回补到底影响了多少」）
+#   fill   先补明细再算指标（现行口径，默认）
+#   shift  旧配置写法，等同 fill（保留只为老的 settings_local.py 不报错）
+#   off    不回补，当天没评论就是 0（用来对拍「回补到底影响了多少」）
+BACKFILL_MODE_FILL = "fill"
 BACKFILL_MODE_SHIFT = "shift"
 BACKFILL_MODE_OFF = "off"
-BACKFILL_MODES = (BACKFILL_MODE_SHIFT, BACKFILL_MODE_OFF)
-DEFAULT_BACKFILL_MODE = BACKFILL_MODE_SHIFT
+BACKFILL_MODES = (BACKFILL_MODE_FILL, BACKFILL_MODE_SHIFT, BACKFILL_MODE_OFF)
+DEFAULT_BACKFILL_MODE = BACKFILL_MODE_FILL
 
-# 回补之后，**所有指标都用补齐后的数据算**，包括评论总数本身 ——
-# 业务方明确要求「总数需要对数据补齐后再计算，其他指标同理，每一张表都是」。
+
+def backfill_enabled(mode: str) -> bool:
+    """backfill_mode 是否开启明细补齐（fill，以及旧写法 shift）。"""
+    return str(mode or "").strip().lower() in (BACKFILL_MODE_FILL, BACKFILL_MODE_SHIFT)
+
+
+def resolve_backfill_lookback(mode: str, overrides: dict | None = None,
+                              windows=None) -> Dict[int, int]:
+    """本次运行用的回补上限 {窗口天数: 最多往前找几天}。
+
+    入参：mode backfill_mode；overrides settings.backfill_lookback（逐档覆盖默认表）；
+          windows 只要这几档（None = 全部档位）
+    出参：关闭回补时返回空字典
+    """
+    if not backfill_enabled(mode):
+        return {}
+    table = dict(BACKFILL_LOOKBACK)
+    table.update({int(k): int(v) for k, v in (overrides or {}).items()})
+    if windows is None:
+        return table
+    return {int(w): int(table[int(w)]) for w in windows if int(w) in table}
 
 
 # ---- 1.9 回补的原子粒度：渠道 ----
 #
-# 缺的是「快手」这一个**渠道**，不是整个景区，所以补也只能补在渠道上。
-# 由此定下一条口径：
-#
-#   **景区粒度的计数 = 各渠道补齐后的值相加**，不是在景区粒度上另算一份。
-#
-# 拿业务方给的例子说：
+# 「当天有没有数据」看的是**这个渠道当天有没有评论**（景区 × 渠道 × 日），
+# 补也只补这个渠道：缺的是「快手」，就只复制快手那一天的明细。
 #
 #     09-10  抖音15 小红书22 微博2 携程4 快手3      合计 46
 #     09-11  抖音10 小红书20 微博5 携程3 （无快手）  原始合计 38
-#            ↓ 快手前移 1 天补 3
+#            ↓ 快手复制 09-10 的 3 条
 #     09-11  抖音10 小红书20 微博5 携程3 快手3      合计 41
 #
-# core.comment_count(09-11) = **41**，不是 38。
-# 如果 core 自己在景区粒度上判断「09-11 有 38 条，不算缺数，不用挪」，
-# 就会出现 core=38 而各渠道之和=41 的劈叉 —— 同一天两个总数，对不上账。
-#
-# 所以 build_core 吃的是**渠道粒度**的日事实（daily_core_facts_by_platform），
-# 在渠道粒度上做整窗前移，再按景区汇总。好处是这两条恒等式重新硬成立：
+# core.comment_count(09-11) = **41**。景区粒度的数 = 各渠道补齐后的明细相加，所以
 #
 #     core.comment_count            == Σ 各渠道 comment_cnt
 #     platform 的 total_ 全平台字段  == Σ 各渠道对应字段
+#     macro 的 all 行               == Σ 各渠道行
 #
-# 代价（要知道）：好/中/差的拆分也跟着渠道走 —— 快手补进来的 3 条带着
-# 09-10 快手自己的情感分布，而不是 09-11 全景区的分布。这是对的：
-# 补的就是那一天那个渠道的样本。
+# 维度表、内容表、大盘表的词云 / 维度 / 地域、下钻表也一样：复制的是那一天那个渠道的
+# **整条评论明细**（连同它的维度标签、关键词、地域），所以它们和评论数始终同源。
+# 「这个渠道当天有评论」以评论明细为准：当天有评论但一个维度都没提到，维度就是真的没有，
+# 不会去复制前一天的维度。
 #
-# 维度表与内容表各自在**自己的粒度**上回补（维度路径 / 词），不跟随渠道，
-# 因为一条评论会命中多个维度和多个词，按渠道拆没有意义。
+# 行存在规则（§1.7）仍然看**真实明细**：补出来的数据不会让「景区接入之前」凭空多出行。
 
 
 # ---- 1.10 macro 大盘表的周期粒度（需求 2.0，表 ads_trf_social_opinion_macro_gran_metric_di）----
@@ -247,15 +270,15 @@ DEFAULT_BACKFILL_MODE = BACKFILL_MODE_SHIFT
 #
 #   time_granularity  中文名   类型
 #   ────────────────  ──────  ─────────────────────
-#   today             今日     rolling 1 天
+#   td                今日     rolling 1 天
 #   latest_1d         近一日   rolling 1 天，offset 1
 #   latest_7d         近7日    rolling 7 天
-#   this_week         本周     week
+#   wtd               本周     week
 #   latest_30d        近30日   rolling 30 天
-#   this_month        本月     month
+#   mtd               本月     month
 #   latest_60d        近60日   rolling 60 天
 #   latest_90d        近90日   rolling 90 天
-#   this_quarter      本季度   quarter
+#   qtd               本季度   quarter
 #
 # 各类型的本期 / 上期：
 #
@@ -270,29 +293,24 @@ DEFAULT_BACKFILL_MODE = BACKFILL_MODE_SHIFT
 #
 #   同比（yoy）的对比期 = **本期日期整体减一年**（2026-09-01~09-17 → 2025-09-01~09-17）。
 #
-# 「今日 today / 近一日 latest_1d」的区分（业务确认）：
-#   today     = travel_date 当天（定时任务按当天跑时是不完整的一天）
+# 「今日 td / 近一日 latest_1d」的区分（业务确认）：
+#   td        = travel_date 当天（定时任务按当天跑时是不完整的一天）
 #   latest_1d = travel_date 的前一天（最近一个完整日）
 #
 # 缺数回补（业务确认：**所有指标都在补齐数据之后再算**，不能有指标因为当期没数据而没有值）
 #
-#   规则同 §1.8 / §1.9：在**渠道粒度**上整窗前移，一天一天往前挪，挪到窗口里有数据为止，
-#   用那一个窗口的值（不是累计）；挪满上限仍没有数据才取 0。all 行 = 各渠道补齐后相加。
-#   本期、上期、去年同期三个窗口**各自**检查、各自补：
+#   规则同 §1.8 / §1.9：先在**渠道粒度**上把每日明细补齐（当天没评论 → 复制往前最近一天的
+#   全部明细），再在补齐后的明细上按日期区间求和、算指标。all 行 = 各渠道补齐后的明细相加。
+#   本期、上期（环比）、去年同期（同比）**都用补齐后的明细**，区间本身不挪：
+#   区间里有就有，没有就没有（源表只留了半年时，去年同期补不出来，同比照旧是 0）。
 #
-#   · 本期    当期没数据 → 整窗前移 s 天。rolling 周期的 s 直接取 windows.rolling_windows
-#             （与 core/platform 同一个实现），所以 latest_7d 某渠道的 comment_total
-#             == platform 表该渠道的 comment_cnt_7d。日历周期（本周/本月/本季度）同样前移，
-#             窗口长度 = 本期已过的天数（周三的 this_week 就是 3 天的窗口）。
-#   · 上期    先跟着本期挪 s 天；挪完的上期窗口还是没数据 → 再独立往前挪 p 天。
-#   · 去年同期 = 实际使用的本期窗口减一年；没数据 → 再独立往前挪 y 天。
-#             （源表如果只留了半年，去年同期根本没数据，挪到上限也补不出来，同比仍是 0。）
-#
-#   上限（最大前移天数）按窗口档位查 §1.8 的表，settings.backfill_lookback 改了也跟着生效：
-#     rolling N 日 → N 日档（表里没有的天数不回补）
+#   往前最多找几天按窗口档位查 §1.8 的表，settings.backfill_lookback 改了也跟着生效：
+#     td / latest_1d → 1 日档（5 天）   rolling N 日 → N 日档（表里没有的天数不补）
 #     本周 → 7 日档（10 天）  本月 → 30 日档（20 天）  本季度 → 90 日档（60 天）  本年 → 365 日档（90 天）
-#   上期、去年同期的上限与本期相同。词云 / 维度 / 热力都取补齐后实际使用的那个窗口。
-#   backfill_mode = "off" 时三个窗口都不回补。
+#   上期、去年同期与本期用同一档。词云 / 维度 / 热力也来自同一份补齐后的明细。
+#   因为与 core/platform 是同一套补齐规则，latest_7d 某渠道的 comment_total
+#   == platform 表该渠道的 comment_cnt_7d，td 的 all 行 == core.comment_count。
+#   backfill_mode = "off" 时不补。
 MACRO_PERIOD_ROLLING = "rolling"
 MACRO_PERIOD_WEEK = "week"
 MACRO_PERIOD_MONTH = "month"
@@ -305,15 +323,15 @@ MACRO_CALENDAR_BACKFILL_WINDOW = {MACRO_PERIOD_WEEK: 7, MACRO_PERIOD_MONTH: 30,
                                   MACRO_PERIOD_QUARTER: 90, MACRO_PERIOD_YEAR: 365}
 
 MACRO_GRANULARITIES: List[Dict[str, Any]] = [
-    {"name": "today", "label": "今日", "type": MACRO_PERIOD_ROLLING, "days": 1},
+    {"name": "td", "label": "今日", "type": MACRO_PERIOD_ROLLING, "days": 1},
     {"name": "latest_1d", "label": "近一日", "type": MACRO_PERIOD_ROLLING, "days": 1, "offset": 1},
     {"name": "latest_7d", "label": "近7日", "type": MACRO_PERIOD_ROLLING, "days": 7},
-    {"name": "this_week", "label": "本周", "type": MACRO_PERIOD_WEEK},
+    {"name": "wtd", "label": "本周", "type": MACRO_PERIOD_WEEK},
     {"name": "latest_30d", "label": "近30日", "type": MACRO_PERIOD_ROLLING, "days": 30},
-    {"name": "this_month", "label": "本月", "type": MACRO_PERIOD_MONTH},
+    {"name": "mtd", "label": "本月", "type": MACRO_PERIOD_MONTH},
     {"name": "latest_60d", "label": "近60日", "type": MACRO_PERIOD_ROLLING, "days": 60},
     {"name": "latest_90d", "label": "近90日", "type": MACRO_PERIOD_ROLLING, "days": 90},
-    {"name": "this_quarter", "label": "本季度", "type": MACRO_PERIOD_QUARTER},
+    {"name": "qtd",          "label": "本季度", "type": MACRO_PERIOD_QUARTER},
 ]
 
 # 渠道 = 配置的渠道全集（同 platform 表，见 §1.7）+ 一条「整体」
@@ -434,7 +452,7 @@ def weighted_score_from_counts(pos, neu, neg, total, decimals: int = SCORE_DECIM
         没有评论不等于评价很差，返回 0 会让空数据景区在榜单垫底。
       · 维度得分用**同一个函数**，只把分子分母换成该维度的正/中/负/总提及数。
       · 与 v1 不同：**没有置信度权重**，小样本不再被拉向中性，
-        样本量问题交给缺数回补（§1.8 整窗前移）。
+        样本量问题交给缺数回补（§1.8 先补明细）。
     """
     pos = np.asarray(pos, dtype="float64")
     neu = np.asarray(neu, dtype="float64")
@@ -642,8 +660,8 @@ def has_window_data(w: pd.DataFrame, field: str, window: int) -> pd.Series:
     入参：w 滚动后的宽表；field 计数字段名（如 comment_count / word_cnt）；window 窗口天数
     出参：bool Series。True = 当天要出行，哪怕当日计数是 0。
 
-    口径要点：开了整窗前移回补时，优先看 `raw_<field>_<N>d`（**回补之前**的真实值）。
-    看回补后的值会让铺行范围被悄悄放大 —— 「近 30 日出现过的词」变成
+    口径要点：开了明细补齐时，优先看 `raw_<field>_<N>d`（**补齐之前**的真实值）。
+    看补齐后的值会让铺行范围被悄悄放大 —— 「近 30 日出现过的词」变成
     「近 30+20 日出现过的词」，内容表按词数×天数线性膨胀。
     """
     n = int(window)
@@ -707,6 +725,24 @@ def daily_core_facts_by_platform(comment_facts: pd.DataFrame) -> pd.DataFrame:
                  positive_count=("is_positive", "sum"),
                  neutral_count=("is_neutral", "sum"),
                  negative_count=("is_negative", "sum")))[cols]
+
+
+def daily_channel_presence(comment_facts: pd.DataFrame) -> pd.DataFrame:
+    """景区 × 渠道 × 日：这个渠道当天有没有评论（明细补齐的判断依据，§1.8 / §1.9）。
+
+    口径：当天有 ≥1 条评论 = 有数据，不用补；0 条 = 往前找最近一个有评论的日子复制明细。
+          维度表 / 内容表也用这一份判断 —— 当天有评论但一个维度都没提到，
+          维度就是真的没有，不会去复制前一天的维度。
+
+    入参：comment_facts（评论粒度明细）
+    出参：scenic_spot_code, platform_code, travel_date, present_cnt（当天评论条数）
+    """
+    cols = ["scenic_spot_code", "platform_code", "travel_date", "present_cnt"]
+    if comment_facts.empty:
+        return pd.DataFrame(columns=cols)
+    return (comment_facts
+            .groupby(["scenic_spot_code", "platform_code", "travel_date"], as_index=False)
+            .size().rename(columns={"size": "present_cnt"}))[cols]
 
 
 def daily_platform_facts(comment_facts: pd.DataFrame) -> pd.DataFrame:
@@ -975,8 +1011,8 @@ def core_metrics(w: pd.DataFrame,
       formula              得分口径，默认 weighted_v2，来自 settings.score_formula
       weights              得分权重，来自 settings.score_weights（None = 默认 1.0/0.9/0.5）
 
-      **入参已经是回补后的值**（整窗前移，domain §1.8）：`comment_count_1d` 不是
-      「当天真实收到多少条」，而是「最近一个有数据的 1 日窗口的条数」。
+      **入参已经是补齐明细后的值**（domain §1.8）：`comment_count_1d` 不是
+      「当天真实收到多少条」，而是「各渠道补齐当天明细后的条数之和」。
       业务方要求总数也用补齐后的数据算，所以这里不再区分「真实计数」与「回补计数」。
 
     出参
@@ -987,8 +1023,7 @@ def core_metrics(w: pd.DataFrame,
     口径要点
     ----
       · **所有字段都用回补后的数据算**，包括计数本身（业务方要求）。
-      · 环比比的是「实际用的那个窗口」与它之前一个周期 —— 窗口挪了，
-        上一周期跟着一起挪，否则拿 09-10 的本期去比 09-04 的上期，口径就错位了。
+      · 上一周期（环比分母）同样来自补齐后的明细，区间不挪：有就有，没有就没有。
     """
     out = pd.DataFrame(index=w.index)
 
@@ -1043,7 +1078,7 @@ def platform_metrics(w: pd.DataFrame) -> pd.DataFrame:
       day_total_cnt                            各渠道**回补后**的 1 日值之和（占比的分母）
       N ∈ PLATFORM_WINDOWS
 
-      入参已是回补后的值（整窗前移，domain §1.8）。
+      入参已是补齐明细后的值（domain §1.8）。
 
     出参
     ----
@@ -1105,7 +1140,7 @@ def dimension_metrics(w: pd.DataFrame,
       formula 得分口径，默认 weighted_v2
       weights 得分权重，来自 settings.score_weights
 
-      入参已是回补后的值（整窗前移，domain §1.8），每条维度路径各自平移。
+      入参已是补齐明细后的值（domain §1.8）：渠道缺评论的日子复制了前一天的整条明细，维度跟着评论走。
 
     出参
     ----
@@ -1116,7 +1151,7 @@ def dimension_metrics(w: pd.DataFrame,
       · 三层各自独立按公式算，口径自洽：同一个 dim1 下所有行的 dimension_1_score
         必然相同，BI 下钻能对上账（validate 里有这条断言）。
       · v2 口径下不再有置信度权重，小样本维度不会被压向中性 ——
-        提及数少时得分波动更大，这部分由缺数回补（整窗前移）来平滑。
+        提及数少时得分波动更大，这部分由缺数回补（先补明细）来平滑。
       · DDL 里 90d/365d 的注释写成「维度TOP1/TOP2/TOP3得分」，与短窗口的
         层级语义矛盾，本实现统一按层级口径。要改成 Top-N 需要单开开关。
     """
@@ -1381,8 +1416,7 @@ def macro_backfill_window(spec: Dict[str, Any]) -> int:
     return MACRO_CALENDAR_BACKFILL_WINDOW[spec["type"]]
 
 
-def macro_period_ranges(spec: Dict[str, Any], travel_date, shift: int = 0,
-                        prev_shift: int = 0, yoy_shift: int = 0) -> Dict[str, tuple]:
+def macro_period_ranges(spec: Dict[str, Any], travel_date) -> Dict[str, tuple]:
     """周期 → 本期 / 上期 / 去年同期 三段日期区间（闭区间）。
 
     公式（规则见 §1.10）
@@ -1393,13 +1427,9 @@ def macro_period_ranges(spec: Dict[str, Any], travel_date, shift: int = 0,
                上期 [上周期首日, min(上周期首日 + 已过天数, 上周期末日)]
       同比     去年同期 = 本期两端各减一年（2 月 29 日落到 2 月 28 日）
 
-      整窗前移（缺数回补）：
-        本期      整体往前挪 shift 天
-        上期      跟着本期挪 shift 天，再独立往前挪 prev_shift 天
-        去年同期  = 挪过的本期减一年，再独立往前挪 yoy_shift 天
+      缺数回补不改区间：三段区间都在**补齐后的每日明细**上求和（§1.8）。
 
-    入参：spec macro_granularities() 的一项；travel_date yyyyMMdd 或 Timestamp；
-          shift / prev_shift / yoy_shift 前移天数（由 builder 按「挪到有数据为止」找出来）
+    入参：spec macro_granularities() 的一项；travel_date yyyyMMdd 或 Timestamp
     出参：{"cur": (lo, hi), "prev": (lo, hi), "yoy": (lo, hi)}，值为 Timestamp
     """
     t = (pd.to_datetime(str(travel_date), format=DATE_FMT)
@@ -1415,14 +1445,7 @@ def macro_period_ranges(spec: Dict[str, Any], travel_date, shift: int = 0,
         prev_end = start - pd.Timedelta(days=1)
         cur = (start, t)
         prev = (prev_start, min(prev_start + (t - start), prev_end))
-
-    def _move(rng, days):
-        d = pd.Timedelta(days=int(days))
-        return (rng[0] - d, rng[1] - d)
-
-    cur = _move(cur, shift)
-    prev = _move(prev, int(shift) + int(prev_shift))
-    yoy = _move((cur[0] - _ONE_YEAR, cur[1] - _ONE_YEAR), yoy_shift)
+    yoy = (cur[0] - _ONE_YEAR, cur[1] - _ONE_YEAR)
     return {"cur": cur, "prev": prev, "yoy": yoy}
 
 
