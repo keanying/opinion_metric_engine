@@ -34,14 +34,15 @@ from .db import MySQL
 from .drill_analysis import build_drill_analysis
 from .loader import (TABLE_CONTENT, TABLE_CORE, TABLE_DIMENSION, TABLE_DRILL_ANALYSIS,
                      TABLE_MACRO, TABLE_PLATFORM, load_all)
-from .metric_calc_domain import CORE_WINDOWS, daily_core_facts
+from .metric_calc_domain import (CORE_WINDOWS, daily_channel_presence,
+                                 daily_core_facts_by_platform)
 from .metric_calc_domain import PLATFORM_WINDOWS as D_PLATFORM_WINDOWS
 from .normalize import (build_comment_facts, build_dimension_facts, build_keyword_facts)
 from .pusher import PushReport, push_all
 from .settings import EtlSettings
 from .source import fetch_comments, fetch_works
 from .validate import validate_all
-from .windows import window_dates
+from .windows import fill_source_dates
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +59,19 @@ class PipelineResult:
     @property
     def ok(self) -> bool:
         return not self.errors
+
+
+def _fill_report(presence: pd.DataFrame, ctx: RunContext, lookback: dict) -> str:
+    """输出日期上「当日」档（1 日档上限）补了多少：复制了几组、几组往前也找不到。"""
+    if 1 not in lookback:
+        return "1 日档未配置回补上限，当日不补"
+    m = fill_source_dates(presence, ["scenic_spot_code", "platform_code"], "travel_date",
+                          ctx.output_dates, lookback[1])
+    if m.empty:
+        return "输出日期上每个渠道当天都有评论，没有触发补齐"
+    hit = int(m["found"].sum())
+    return (f"输出日期上有 {len(m):,} 个「景区·渠道·日」当天没评论：{hit:,} 个已复制往前最近一天的明细"
+            f"（1 日档最多找 {lookback[1]} 天），{len(m) - hit:,} 个往前也没找到、保持为 0")
 
 
 def compute_load_range(output_dates: List[str], settings: EtlSettings) -> tuple:
@@ -101,9 +115,11 @@ def run(settings: EtlSettings,
 
     # macro 大盘表还要「上期」与「去年同期」的数据（需求 2.0 的环比/同比），
     # 这两段可能落在 [load_start, load_end] 之外，单独多取；其余四张表只用取数区间。
+    # 明细补齐要往前多取一段（domain §1.8：最多往前找几天），只当补齐的来源。
+    fill_start = ctx.fill_start
     ranges = macro_data_ranges(ctx) if settings.enable_macro_metric \
-        else [(load_start, load_end)]
-    extra = [r for r in ranges if r != (load_start, load_end)]
+        else [(fill_start, load_end)]
+    extra = [r for r in ranges if r != (fill_start, load_end)]
     if extra:
         log.info("macro 表额外取数：%s", "、".join(f"{a}~{b}" for a, b in ranges))
 
@@ -132,16 +148,16 @@ def run(settings: EtlSettings,
     if len(cf_all) < n_all:
         res.notes.append(f"取数区间外的评论已剔除 {n_all - len(cf_all):,} 条"
                          f"（区间 {'、'.join(f'{a}~{b}' for a, b in ranges)}）")
-    # 四张既有表只看 [load_start, load_end]，与加 macro 之前逐字节一致
-    cf = cf_all[cf_all["travel_date"].between(load_start, load_end)]
-    if cf.empty:
+    # 四张既有表看 [fill_start, load_end]：取数区间 + 往前补齐要用的那一段
+    cf = cf_all[cf_all["travel_date"].between(fill_start, load_end)]
+    if not cf["travel_date"].between(load_start, load_end).any():
         res.errors.append(f"取数区间 {load_start}~{load_end} 内没有评论数据")
         res.elapsed = time.time() - t0
         return res
     dim_all = build_dimension_facts(cf_all, settings.unknown_dimension_policy)
     kw_all = build_keyword_facts(cf_all)
-    dim_facts = dim_all[dim_all["travel_date"].between(load_start, load_end)]
-    kw_facts = kw_all[kw_all["travel_date"].between(load_start, load_end)]
+    dim_facts = dim_all[dim_all["travel_date"].between(fill_start, load_end)]
+    kw_facts = kw_all[kw_all["travel_date"].between(fill_start, load_end)]
     res.notes.append(f"评论明细 {len(cf):,} 行 | 维度明细 {len(dim_facts):,} 行 | "
                      f"关键词明细 {len(kw_facts):,} 行")
 
@@ -149,9 +165,10 @@ def run(settings: EtlSettings,
     core = build_core(cf, ctx)
     platform = build_platform(cf, ctx)
 
-    core_daily = daily_core_facts(cf)
-    dimension = build_dimension(dim_facts, ctx)
-    content = build_content(kw_facts, core_daily, ctx)
+    # 「渠道当天有没有评论」：维度 / 内容表补齐明细时都看这一份（domain §1.9）
+    presence = daily_channel_presence(cf)
+    dimension = build_dimension(dim_facts, ctx, presence)
+    content = build_content(kw_facts, daily_core_facts_by_platform(cf), ctx, presence)
 
     res.tables = {TABLE_CORE: core, TABLE_PLATFORM: platform,
                   TABLE_DIMENSION: dimension, TABLE_CONTENT: content}
@@ -160,7 +177,7 @@ def run(settings: EtlSettings,
     if settings.enable_drill_analysis:
         if works_df is None and db is not None:
             work_ids = cf.get("work_id")
-            works_df = fetch_works(db, load_start, load_end, scenic_codes,
+            works_df = fetch_works(db, fill_start, load_end, scenic_codes,
                                    work_ids.dropna().unique().tolist()
                                    if work_ids is not None else None)
         drill = build_drill_analysis(
@@ -190,15 +207,15 @@ def run(settings: EtlSettings,
         checks["macro_granularities"] = [g["name"] for g in ctx.macro_granularities]
     res.errors = validate_all(checks)
 
-    # 回补可见化：整窗前移到底挪了多少行、挪了几天
+    # 回补可见化：输出日期里有多少「景区·渠道·日」是复制来的明细
     lb = ctx.backfill_lookback(D_PLATFORM_WINDOWS)
     if lb:
         res.notes.append(
-            "缺数回补=整窗前移（取到为止，不是累计），各窗口最大前移天数 "
-            + " / ".join(f"{w}日→{d}天" for w, d in sorted(lb.items())))
-        res.notes.extend(ctx.shift_report() or ["本次没有任何窗口触发前移（每天都有数据）"])
+            "缺数回补=先补明细再算指标（渠道当天没评论 → 复制往前最近一天的明细），"
+            "各窗口最多往前找 " + " / ".join(f"{w}日→{d}天" for w, d in sorted(lb.items())))
+        res.notes.append(_fill_report(presence, ctx, lb))
     else:
-        res.notes.append("缺数回补已关闭（backfill_mode=off），当期没数据即为 0")
+        res.notes.append("缺数回补已关闭（backfill_mode=off），当天没评论即为 0")
     # 行存在规则的产出可见化：补了多少条「当天没数据但窗口有值」的行
     if not platform.empty:
         zero = int((platform["comment_cnt"] == 0).sum())

@@ -349,7 +349,7 @@ def cmd_repair(args) -> int:
                                        formula=formula, dry_run=args.dry_run,
                                        batch_size=st.batch_size, settings=st))
         if "dimension" in tables:
-            # 维度表回源重算：整窗前移的回补在维度粒度上自己做，不依赖 core
+            # 维度表回源重算：按渠道补齐明细后再滚动，不依赖 core 表
             results.append(repair_dimension(
                 db, args.start_date, args.end_date, scenic, formula=formula,
                 dry_run=args.dry_run, batch_size=st.batch_size,
@@ -636,9 +636,9 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--skip-csv", action="store_true", help="不出 CSV")
     r.add_argument("--dry-run", action="store_true", help="连库但不真正写入")
     r.add_argument("--no-backfill", action="store_true",
-                   help="关闭缺数回补（backfill_mode=off），当期没数据就是 0")
+                   help="关闭缺数回补（backfill_mode=off），渠道当天没评论就是 0")
     r.add_argument("--backfill-lookback",
-                   help="覆盖各窗口最大前移天数，形如 1:5,7:10,30:20；只写要改的档")
+                   help="覆盖各窗口补明细时最多往前找几天，形如 1:5,7:10,30:20；只写要改的档")
     r.add_argument("--no-drill-analysis", action="store_true", help="不产出 5.2 下钻明细表")
     r.add_argument("--no-macro", action="store_true",
                    help="不产出 2.0 大盘 KPI 表（也就不会为同比多取去年同期的数据）")

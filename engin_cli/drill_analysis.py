@@ -9,8 +9,13 @@
 一行 = 一个词 × 一条评论。同一条评论命中 3 个词就有 3 行。
 `work_url` 直接来自 `src_opinion_social_work_di`，前端拿到就能跳转。
 
-需求六.1 提到「5.2 历史已经计算了可以直接搜索历史的应该就行」——
-所以这张表按 `travel_date` 幂等重写当期分区即可，不需要回补逻辑。
+缺数回补（domain §1.8，业务确认「包含」）
+--------------------------------------
+与指标表同一套「先补明细」：某渠道在输出日期当天一条评论都没有 → 复制往前最近一个
+有评论那天（当日档，最多找 5 天）的全部评论明细，作为这一天的下钻明细。
+复制出来的行：travel_date = 这一天；publish_time 挪到这一天（时分秒不变），
+这样「按 publish_time 先删后插」重跑时能删干净；detail_uk 带上这一天，不和原评论撞键。
+看板点内容表里补出来的词，也能列出对应的评论。
 
 `content_snippet` 掩码
 ---------------------
@@ -35,8 +40,9 @@ import pandas as pd
 
 from .context import RunContext
 from .metric_calc_domain import (DRILL_MASK_SCOPE_WORD, SENTIMENT_TYPE,
-                                 mask_content)
+                                 daily_channel_presence, mask_content)
 from .normalize import parse_json_array
+from .windows import fill_source_dates
 
 # ⚠ 这张表的景区字段跟另外四张 ADS 表**不一样**：
 #   下钻表    scenic_id / scenic_name       （与源表 src_opinion_social_work_di 同名）
@@ -69,7 +75,10 @@ def build_drill_analysis(comment_facts: pd.DataFrame, works: pd.DataFrame,
         return pd.DataFrame(columns=COLUMNS)
 
     out_dates = set(ctx.output_dates)
-    df = comment_facts[comment_facts["travel_date"].isin(out_dates)]
+    df = comment_facts[comment_facts["travel_date"].isin(out_dates)].assign(fill_copy=False)
+    copies = _filled_copies(comment_facts, ctx)
+    if not copies.empty:
+        df = pd.concat([df, copies], ignore_index=True)
     if df.empty:
         return pd.DataFrame(columns=COLUMNS)
 
@@ -148,8 +157,11 @@ def build_drill_analysis(comment_facts: pd.DataFrame, works: pd.DataFrame,
                 "entity_tags": entities,
                 "publish_time": r.publish_dt,
                 "travel_date": int(r.travel_date),
-                "detail_uk": _uk(r.scenic_spot_code, word, r.platform_code,
-                                 work_id, comment_id),
+                # 复制来的明细带上这一天，否则与原评论那一行撞 detail_uk
+                "detail_uk": (_uk(r.scenic_spot_code, word, r.platform_code, work_id,
+                                  comment_id, "fill", r.travel_date) if r.fill_copy
+                              else _uk(r.scenic_spot_code, word, r.platform_code,
+                                       work_id, comment_id)),
             })
 
     if not rows:
@@ -188,6 +200,30 @@ def build_drill_analysis(comment_facts: pd.DataFrame, works: pd.DataFrame,
                     if n_no_match else "，关键词全部命中"))
     return out[COLUMNS].sort_values(
         ["scenic_id", "travel_date", "emotion_word"]).reset_index(drop=True)
+
+
+def _filled_copies(comment_facts: pd.DataFrame, ctx: RunContext) -> pd.DataFrame:
+    """输出日期上「渠道当天没评论」的那几天，复制往前最近一天的评论明细（domain §1.8）。
+
+    上限用当日档（1 日档）。复制行改 travel_date / publish_dt，带 fill_copy=True。
+    """
+    lb = ctx.backfill_lookback([1]).get(1, 0)
+    if lb <= 0 or comment_facts.empty:
+        return pd.DataFrame()
+    by = ["scenic_spot_code", "platform_code"]
+    m = fill_source_dates(daily_channel_presence(comment_facts), by, "travel_date",
+                          ctx.output_dates, lb)
+    m = m[m["found"]]
+    if m.empty:
+        return pd.DataFrame()
+    m = m.rename(columns={"travel_date": "_target"})[by + ["_target", "src_date"]]
+    c = comment_facts.merge(m, left_on=by + ["travel_date"],
+                            right_on=by + ["src_date"], how="inner")
+    gap = (pd.to_datetime(c["_target"], format="%Y%m%d")
+           - pd.to_datetime(c["src_date"], format="%Y%m%d"))
+    c["publish_dt"] = pd.to_datetime(c["publish_dt"]) + gap
+    c["travel_date"] = c["_target"]
+    return c.drop(columns=["_target", "src_date"]).assign(fill_copy=True)
 
 
 def _mask_config(ctx: RunContext):

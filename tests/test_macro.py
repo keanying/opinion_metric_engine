@@ -3,7 +3,7 @@
 
 盯三件事：
 1. 周期 → 日期区间的口径（本周/本月/本季度的上期、同比、今日/近一日）；
-2. 数字跟独立重算的结果、跟 core/platform 表对得上（含整窗前移回补）；
+2. 数字跟独立重算的结果、跟 core/platform 表对得上（含「先补明细」的缺数回补）；
 3. 可配置项（得分权重、周期粒度）真的生效。
 """
 
@@ -31,7 +31,7 @@ DRILL = "ads_trf_social_opinion_drill_analysis_di"
 
 END = "20260917"
 DAYS = 420                      # 够算「近90日」的去年同期
-# 样例数据每 37 天造一个「当天只有 2 条评论」的日子 —— 多数渠道当天为空，会触发整窗前移
+# 样例数据每 37 天造一个「当天只有 2 条评论」的日子 —— 多数渠道当天为空，会触发补齐明细
 START = pd.Timestamp(END) - pd.Timedelta(days=DAYS - 1)
 SPARSE_DAY = (START + pd.Timedelta(days=37 * ((DAYS - 1) // 37))).strftime("%Y%m%d")
 DATES = sorted({SPARSE_DAY, "20260915", "20260916", END})
@@ -87,6 +87,34 @@ def _count(cf, scenic, lo, hi, channel=None):
     return int(s.is_positive.sum()), int(s.is_neutral.sum()), int(s.is_negative.sum())
 
 
+def _filled(df, cf, scenic, lo, hi, lookback, channel=None):
+    """独立实现的「先补明细」（domain §1.8），不经过 builder：
+
+    区间里每一天、每个渠道：当天有评论就用当天的明细，没有就往前 lookback 天内
+    找最近一个有评论的日子，用那一天的明细。df 可以是评论 / 维度 / 关键词明细。
+    """
+    pres = {ch: set(g) for ch, g in
+            cf[cf.scenic_spot_code == scenic].groupby("platform_code")["travel_date"]}
+    parts = []
+    for d in pd.date_range(pd.Timestamp(lo), pd.Timestamp(hi)):
+        for ch, days in pres.items():
+            if channel and ch != channel:
+                continue
+            for k in range(lookback + 1):
+                src = (d - pd.Timedelta(days=k)).strftime("%Y%m%d")
+                if src in days:
+                    parts.append(df[(df.scenic_spot_code == scenic)
+                                    & (df.platform_code == ch) & (df.travel_date == src)])
+                    break
+    return pd.concat(parts) if parts else df.iloc[:0]
+
+
+def _fcount(cf, scenic, lo, hi, lookback, channel=None):
+    """补齐后的 (好, 中, 差)。"""
+    s = _filled(cf, cf, scenic, lo, hi, lookback, channel)
+    return int(s.is_positive.sum()), int(s.is_neutral.sum()), int(s.is_negative.sum())
+
+
 # ══════════════════════════════════════════════════════════════════
 # 周期 → 日期区间
 # ══════════════════════════════════════════════════════════════════
@@ -126,12 +154,6 @@ def test_rolling_window_and_previous_period():
     assert r["cur"] == ("20260911", "20260917")
     assert r["prev"] == ("20260904", "20260910")
     assert r["yoy"] == ("20250911", "20250917")
-
-
-def test_shift_moves_current_and_previous_together():
-    r = _fmt(D.macro_period_ranges(_spec("latest_7d"), "20260917", shift=2))
-    assert r["cur"] == ("20260909", "20260915")
-    assert r["prev"] == ("20260902", "20260908")
 
 
 def test_week_is_to_date_and_previous_week_is_the_same_days():
@@ -175,10 +197,10 @@ def test_fetch_ranges_cover_previous_periods_and_last_year():
     ctx = RunContext(settings=st, output_dates=[END], load_start="20260322", load_end=END)
     ranges = macro_data_ranges(ctx)
     assert ranges[-1][1] == END
-    # 去年同期：近90日最多前移 60 天 → 最早到 2025-04-21
+    # 去年同期：近90日的去年同期从 2025-06-20 起，再往前多取补齐上限 60 天 → 2025-04-21
     assert ranges[0][0] <= "20250421"
     assert any(lo <= "20250917" <= hi for lo, hi in ranges)
-    # 去年同期（到 2025-09-17）与今年上期最早可能用到的日期（本季度上期挪满上限，约 2025-12）
+    # 去年同期（到 2025-09-17）与今年上期最早用到的日期（本季度上期再往前 60 天，约 2026-01）
     # 之间那段不需要，不该整段多取
     assert not any(lo <= "20251101" <= hi for lo, hi in ranges)
 
@@ -230,14 +252,15 @@ def test_one_row_per_scenic_date_granularity_channel(macro, result):
 
 
 def test_backfill_actually_happened(result):
-    """样例里那个稀疏日要真的触发 macro 的整窗前移，否则下面的对账测不到回补。"""
-    assert any(n.startswith("macro 触发整窗前移") for n in result.notes), result.notes
+    """样例里那个稀疏日要真的触发补齐明细，否则下面的对账测不到回补。"""
+    note = next(n for n in result.notes if n.startswith("输出日期上有"))
+    assert "已复制往前最近一天的明细" in note and not note.startswith("输出日期上有 0 ")
 
 
 @pytest.mark.parametrize("gran,days", [("today", 1), ("latest_7d", 7), ("latest_30d", 30),
                                        ("latest_60d", 60), ("latest_90d", 90)])
 def test_rolling_channel_rows_equal_platform_table(macro, result, gran, days):
-    """近 N 日的渠道行 == platform 表同渠道的 N 日计数（回补后），逐行对账。"""
+    """近 N 日的渠道行 == platform 表同渠道的 N 日计数（补齐后），逐行对账。"""
     plat = result.tables[PLATFORM]
     m = macro[(macro.time_granularity == gran) & (macro.channel != "all")]
     j = m.merge(plat, left_on=["scenic_id", "travel_date", "channel"],
@@ -274,12 +297,13 @@ def test_comment_rate(macro):
 
 
 def test_calendar_month_against_independent_count(macro, facts):
-    """本月：本期 = 9/1~9/17，上期 = 8/1~8/17，同比 = 2025-09-01~09-17，都不回补。"""
+    """本月：本期 = 9/1~9/17，上期 = 8/1~8/17，同比 = 2025-09-01~09-17，
+    三段都在补齐后的明细上求和（本月 → 30 日档，最多往前找 20 天）。"""
     sc = "PFTSCA01002434"
     r = _row(macro, sc, END, "this_month")
-    cur = _count(facts, sc, "20260901", END)
-    prev = _count(facts, sc, "20260801", "20260817")
-    yoy = _count(facts, sc, "20250901", "20250917")
+    cur = _fcount(facts, sc, "20260901", END, 20)
+    prev = _fcount(facts, sc, "20260801", "20260817", 20)
+    yoy = _fcount(facts, sc, "20250901", "20250917", 20)
     assert (r.positive_comment_cnt, r.neutral_comment_cnt, r.negative_comment_cnt) == cur
     assert r.comment_total_mom == pytest.approx(
         float(D.pct_growth(sum(cur), sum(prev))), abs=1e-6)
@@ -295,8 +319,8 @@ def test_calendar_month_against_independent_count(macro, facts):
 def test_channel_yoy_against_independent_count(macro, facts):
     sc, ch = "PFT_S_00001", "douyin"
     r = _row(macro, sc, END, "this_week", ch)
-    cur = _count(facts, sc, "20260914", END, ch)
-    yoy = _count(facts, sc, "20250914", "20250917", ch)
+    cur = _fcount(facts, sc, "20260914", END, 10, ch)
+    yoy = _fcount(facts, sc, "20250914", "20250917", 10, ch)
     assert r.comment_total == sum(cur)
     assert r.negative_comment_yoy == pytest.approx(
         float(D.pct_growth(cur[2], yoy[2])), abs=1e-6)
@@ -310,11 +334,12 @@ def test_dimension_breakdown(macro, sample):
     assert all(i["dimension1"] == i["preDimension1"] for i in items)
     assert set(items[0]) == {"dimension1", "dimension1Score", "preDimension1",
                              "preDimension1Score"}
-    # 独立重算一个维度
+    # 独立重算一个维度（补齐后的维度明细，本月 → 最多往前找 20 天）
     from engin_cli.normalize import build_dimension_facts
-    df = build_dimension_facts(build_comment_facts(sample[0]), "keep")
-    d = df[(df.scenic_spot_code == sc) & df.travel_date.between("20260901", END)
-           & (df.dimension_level1 == "交通接驳")]
+    cf = build_comment_facts(sample[0])
+    df = build_dimension_facts(cf, "keep")
+    d = _filled(df, cf, sc, "20260901", END, 20)
+    d = d[d.dimension_level1 == "交通接驳"]
     want = D.weighted_score_from_counts(d.is_positive.sum(), d.is_neutral.sum(),
                                         d.is_negative.sum(), len(d), decimals=6)
     got = next(i for i in items if i["dimension1"] == "交通接驳")["dimension1Score"]
@@ -330,9 +355,9 @@ def test_wordcloud(macro, facts):
         assert len(group) <= 30
         rates = [x["rate"] for x in group]
         assert rates == sorted(rates, reverse=True)
-    # 占比 = 该词次数 × 100 / 周期内全部关键词次数（近30日这一天没触发回补）
+    # 占比 = 该词次数 × 100 / 周期内全部关键词次数（补齐后的关键词明细，近30日 → 最多找 20 天）
     kw = build_keyword_facts(facts)
-    k = kw[(kw.scenic_spot_code == sc) & kw.travel_date.between("20260819", END)]
+    k = _filled(kw, facts, sc, "20260819", END, 20)
     top = wc["positiveWord"][0]
     n = ((k.emotion_word == top["word"]) & (k.sentiment == D.POSITIVE)).sum()
     assert top["rate"] == pytest.approx(n * 100 / len(k), abs=1e-6)
@@ -347,7 +372,7 @@ def test_heatmap_uses_normalized_regions(macro, facts):
     assert "" not in regions
     heats = [x["heat"] for x in hm]
     assert heats == sorted(heats, reverse=True)
-    f = facts[(facts.scenic_spot_code == sc) & facts.travel_date.between("20260911", END)]
+    f = _filled(facts, facts, sc, "20260911", END, 10)
     assert dict((x["region"], x["heat"]) for x in hm)["广东"] == int((f.region == "广东").sum())
 
 
@@ -424,7 +449,7 @@ def test_drill_has_region_and_entity_tags(result):
 
 
 # ══════════════════════════════════════════════════════════════════
-# 所有指标都在补齐数据之后再算（业务确认）：日历周期、上期、去年同期都要整窗前移
+# 所有指标都在补齐明细之后再算（业务确认）：本期、上期、去年同期都用补齐后的明细
 # ══════════════════════════════════════════════════════════════════
 GAP_SCENIC = "PFTSCA01002434"
 
@@ -441,52 +466,60 @@ def gap_comments(sample):
 
 
 @pytest.fixture(scope="module")
-def gap_macro(gap_comments, sample):
+def gap_run(gap_comments, sample):
     res = run(_settings(enable_drill_analysis=False), [END], comments_df=gap_comments,
               works_df=sample[1])
     assert res.ok, res.errors
-    return res.tables[MACRO], build_comment_facts(gap_comments)
+    return res
 
 
-def test_calendar_period_is_backfilled_not_zero(gap_macro):
-    """本周（9/14 周一 ~ 9/17）同程一条都没有 → 4 天的窗口整体往前挪到有数据为止。
+@pytest.fixture(scope="module")
+def gap_macro(gap_run, gap_comments):
+    return gap_run.tables[MACRO], build_comment_facts(gap_comments)
 
-    挪 1 天是 9/13~9/16，里面 9/13 有数据，就停在这里（挪到有数据为止，不是挪到整窗都有数据）。
-    """
+
+def test_calendar_period_is_filled_day_by_day(gap_macro):
+    """本周（9/14 周一 ~ 9/17）同程一条都没有 → 每一天各自复制 9/13 的明细（本周 → 最多找 10 天）。"""
     macro, cf = gap_macro
     r = _row(macro, GAP_SCENIC, END, "this_week", "tongcheng")
-    assert r.comment_total > 0
-    want = _count(cf, GAP_SCENIC, "20260913", "20260916", "tongcheng")
-    assert (r.positive_comment_cnt, r.neutral_comment_cnt, r.negative_comment_cnt) == want
-    # 上期跟着挪 1 天：9/6~9/9
-    prev = _count(cf, GAP_SCENIC, "20260906", "20260909", "tongcheng")
-    assert r.comment_total_mom == pytest.approx(float(D.pct_growth(sum(want), sum(prev))), abs=1e-6)
+    day = _count(cf, GAP_SCENIC, "20260913", "20260913", "tongcheng")
+    assert sum(day) > 0
+    assert (r.positive_comment_cnt, r.neutral_comment_cnt, r.negative_comment_cnt) == \
+        tuple(4 * x for x in day)
+    # 上期 9/7~9/10 不挪，同样在补齐后的明细上算
+    prev = _fcount(cf, GAP_SCENIC, "20260907", "20260910", 10, "tongcheng")
+    assert r.comment_total_mom == pytest.approx(
+        float(D.pct_growth(4 * sum(day), sum(prev))), abs=1e-6)
 
 
-def test_year_ago_window_is_backfilled_independently(gap_macro):
-    """抖音去年 9/14~9/17 没数据 → 去年同期独立往前挪，同比不再是 0 / -100。"""
+def test_year_ago_period_uses_filled_detail(gap_macro):
+    """抖音去年 9/14~9/17 没数据 → 去年同期每天复制 2025-09-13 的明细，同比不再是 0 / -100。"""
     macro, cf = gap_macro
     r = _row(macro, GAP_SCENIC, END, "this_week", "douyin")
-    cur = _count(cf, GAP_SCENIC, "20260914", END, "douyin")
-    yoy = _count(cf, GAP_SCENIC, "20250913", "20250916", "douyin")    # 挪 1 天就碰到 9/13 的数据
-    assert sum(yoy) > 0
-    assert r.comment_total_yoy == pytest.approx(float(D.pct_growth(sum(cur), sum(yoy))), abs=1e-6)
+    cur = _fcount(cf, GAP_SCENIC, "20260914", END, 10, "douyin")
+    day = _count(cf, GAP_SCENIC, "20250913", "20250913", "douyin")
+    assert sum(day) > 0
+    assert _fcount(cf, GAP_SCENIC, "20250914", "20250917", 10, "douyin") == \
+        tuple(4 * x for x in day)
+    assert r.comment_total_yoy == pytest.approx(
+        float(D.pct_growth(sum(cur), 4 * sum(day))), abs=1e-6)
 
 
-def test_previous_window_is_backfilled_independently(gap_comments, sample):
-    """本期有数据、上期没数据 → 上期独立往前挪，环比不因上期缺数而变成 0。"""
+def test_previous_period_uses_filled_detail(gap_comments, sample):
+    """上期没数据 → 上期每天复制往前最近一天的明细，环比不因上期缺数而变成 0。"""
     c = gap_comments
     d = pd.to_datetime(c.publish_time, errors="coerce").dt.strftime("%Y%m%d")
-    # 抖音去掉 8/1~8/17（本月的上期）
+    # 抖音去掉 8/1~8/17（本月的上期）：8/1~8/17 都复制 7/31（8/17 距 7/31 是 17 天 ≤ 20）
     c = c[~((c.scenic_id == GAP_SCENIC) & (c.channel == "douyin") & d.between("20260801", "20260817"))]
     res = run(_settings(enable_drill_analysis=False), [END], comments_df=c, works_df=sample[1])
     assert res.ok, res.errors
     r = _row(res.tables[MACRO], GAP_SCENIC, END, "this_month", "douyin")
     cf = build_comment_facts(c)
-    cur = _count(cf, GAP_SCENIC, "20260901", END, "douyin")
-    prev = _count(cf, GAP_SCENIC, "20260731", "20260816", "douyin")    # 上期挪 1 天
-    assert sum(prev) > 0
-    assert r.comment_total_mom == pytest.approx(float(D.pct_growth(sum(cur), sum(prev))), abs=1e-6)
+    cur = _fcount(cf, GAP_SCENIC, "20260901", END, 20, "douyin")
+    day = sum(_count(cf, GAP_SCENIC, "20260731", "20260731", "douyin"))
+    assert day > 0
+    assert r.comment_total_mom == pytest.approx(
+        float(D.pct_growth(sum(cur), 17 * day)), abs=1e-6)
 
 
 def test_backfill_off_keeps_raw_counts(gap_comments, sample):
@@ -496,8 +529,7 @@ def test_backfill_off_keeps_raw_counts(gap_comments, sample):
     assert r.comment_total == 0
 
 
-def test_backfill_report_mentions_calendar_periods(gap_comments, sample):
-    res = run(_settings(enable_drill_analysis=False), [END], comments_df=gap_comments,
-              works_df=sample[1])
-    note = next(n for n in res.notes if n.startswith("macro 各周期回补"))
-    assert "this_week 本期" in note and "去年同期" in note
+def test_fill_report_counts_the_gap(gap_run):
+    """同程 9/17 没评论 → 报告里算进「已复制」的组合。"""
+    note = next(n for n in gap_run.notes if n.startswith("输出日期上有"))
+    assert "已复制往前最近一天的明细" in note

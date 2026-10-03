@@ -15,18 +15,17 @@
 重刷整行既慢又会把 etl_time 冲掉，出问题时也分不清是口径改的还是重算错的。
 
 **不变量：修正的结果 == 用新口径重跑一遍的结果。**
-所以修正时同样要铺网格、同样要做整窗前移回补，动作与 builders 逐步对齐。
+所以修正时同样要铺网格、同样要先补明细再滚动，动作与 builders 逐步对齐。
 这条不变量破了的话，repair 和 run 会互相把对方的值改回去，来回打架
 （`tests/test_repair.py` 里 `test_repair_after_run_changes_nothing_*` 盯着它）。
 
 数据从哪里读（跟 backfill_mode 有关，这是个坑）
 --------------------------------------------
-backfill_mode = "shift"（默认）
+backfill_mode = "fill"（默认；旧写法 "shift" 等同）
     **两张表都必须回源表重算。**
-    原因：整窗前移之后 core 表里存的 comment_count 已经**不是当天真实条数**了，
-    而是「最近一个有数据的 1 日窗口的条数」（domain §1.8）。拿它再滚一次窗口，
-    等于把回补叠加第二遍 —— 09-11 借了 09-10 的 1 条，再重算时 09-11 自己
-    「有数据」了，窗口就不再前移，分母分子全错位。
+    原因：补齐明细之后 core 表里存的 comment_count 已经**不是当天真实条数**了，
+    而是「当日档补齐后的条数」（domain §1.8）；而且 7 日、30 日档各用各的上限补齐，
+    不是 1 日值简单相加。拿表里的计数再滚一次窗口，口径就错了。
     所以可修正范围受源表保留期限制，改不到源表已经清掉的日期。
 
 backfill_mode = "off"
@@ -90,15 +89,15 @@ class RepairResult:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# core：shift 口径回源表重算；off 口径可直接用 core 表自身的计数列
+# core：补齐口径回源表重算；off 口径可直接用 core 表自身的计数列
 # ══════════════════════════════════════════════════════════════════════
 def read_core_counts(db: MySQL, start: str, end: str,
                      scenic_codes: Optional[Sequence[str]] = None,
                      warmup_days: int = 365) -> pd.DataFrame:
     """读 core 表的计数列（含窗口预热区间）。
 
-    ⚠ 只在 backfill_mode="off" 时可用作重算输入：shift 口径下这些计数
-    本身就是回补后的值，再滚一次窗口会把回补叠加两遍（见模块注释）。
+    ⚠ 只在 backfill_mode="off" 时可用作重算输入：补齐口径下这些计数
+    本身就是补齐后的值，再滚一次窗口口径就错了（见模块注释）。
     """
     warmup = (pd.to_datetime(start, format="%Y%m%d")
               - pd.Timedelta(days=max(int(warmup_days), 1) - 1)).strftime("%Y%m%d")
@@ -112,15 +111,20 @@ def read_core_counts(db: MySQL, start: str, end: str,
     return db.query_df(sql, params)
 
 
-def _lookback(settings: Optional[EtlSettings], windows) -> dict:
-    """本次修正用的「整窗前移」上限，与跑批同一套（domain §1.8）。"""
-    mode = getattr(settings, "backfill_mode", D.DEFAULT_BACKFILL_MODE) if settings \
-        else D.BACKFILL_MODE_OFF
-    if mode != D.BACKFILL_MODE_SHIFT:
+def _lookback(settings: Optional[EtlSettings], windows=None) -> dict:
+    """本次修正用的明细补齐上限，与跑批同一套（domain §1.8）。不传 settings = 不补。"""
+    if settings is None:
         return {}
-    table = dict(D.BACKFILL_LOOKBACK)
-    table.update(getattr(settings, "backfill_lookback", None) or {})
-    return {int(w): int(table[int(w)]) for w in windows if int(w) in table}
+    return D.resolve_backfill_lookback(
+        getattr(settings, "backfill_mode", D.DEFAULT_BACKFILL_MODE),
+        getattr(settings, "backfill_lookback", None), windows)
+
+
+def fill_start(settings: Optional[EtlSettings], start: str) -> str:
+    """补齐来源最早要读到哪天：start 再往前「最大上限」天（与 RunContext.fill_start 一致）。"""
+    lb = max(_lookback(settings).values(), default=0)
+    return (pd.to_datetime(start, format="%Y%m%d")
+            - pd.Timedelta(days=int(lb))).strftime("%Y%m%d")
 
 
 def _weights(settings: Optional[EtlSettings]):
@@ -132,19 +136,21 @@ def recompute_core_scores(core_rows: pd.DataFrame,
                           output_dates: Optional[Sequence[str]] = None,
                           formula: str = D.DEFAULT_SCORE_FORMULA,
                           settings: Optional[EtlSettings] = None,
-                          calendar: Optional[tuple] = None) -> pd.DataFrame:
+                          calendar: Optional[tuple] = None,
+                          fill_from: Optional[str] = None) -> pd.DataFrame:
     """**当天真实**的日计数 → 新口径的 6 个 emotional_score。
 
     入参：core_rows 至少含 scenic_spot_code / travel_date / comment_count /
           positive_count / neutral_count / negative_count。
-          ⚠ 这里要的是**未经回补的原始日计数**。带 platform_code 列时按渠道粒度
-          回补再汇总（与跑批一致，domain §1.9）；不带则退化成景区粒度，
-          只在 backfill_mode="off" 下等价。喂回补后的值进来会叠加两遍；
+          ⚠ 这里要的是**未经补齐的原始日计数**。带 platform_code 列时按渠道粒度
+          补齐再汇总（与跑批一致，domain §1.9）；不带则退化成景区粒度，
+          只在 backfill_mode="off" 下等价；
+          calendar 窗口日历；fill_from 补齐来源最早日期（早于 calendar 的那段只当来源）；
           output_dates 只输出这些日期（更早的行只作为窗口历史参与累计）；
           settings 提供回补口径与上限，不传则不回补
     出参：CORE_KEYS + CORE_SCORE_FIELDS
 
-    **动作与 builders/core.py 逐步一致**：铺网格 → 滚动(含整窗前移回补)。
+    **动作与 builders/core.py 逐步一致**：铺网格 → 补齐每日明细并滚动 → 按景区相加。
     这样「修正历史」和「用新口径重跑一遍」结果相同，
     否则 repair 和 run 会互相把对方的值改回去，来回打架。
 
@@ -154,16 +160,18 @@ def recompute_core_scores(core_rows: pd.DataFrame,
     if core_rows.empty:
         return pd.DataFrame(columns=CORE_KEYS + CORE_SCORE_FIELDS)
 
-    # 入参带 platform_code → 按渠道粒度回补再汇总，与 builders/core.py 完全一致
-    # （domain §1.9：回补的原子粒度是渠道）。不带就退化成景区粒度 ——
-    # 这只在 backfill_mode="off" 下等价，因为不回补时「先滚后加」与「先加后滚」结果相同。
+    # 入参带 platform_code → 按渠道粒度补齐再汇总，与 builders/core.py 完全一致
+    # （domain §1.9：补齐的原子粒度是渠道）。不带就退化成景区粒度 ——
+    # 这只在 backfill_mode="off" 下等价，因为不补齐时「先滚后加」与「先加后滚」结果相同。
     by_plat = "platform_code" in core_rows.columns
     keys = ["scenic_spot_code", "platform_code"] if by_plat else ["scenic_spot_code"]
 
     daily = core_rows[keys + ["travel_date"] + D.CORE_COUNT_FIELDS].copy()
     daily["travel_date"] = daily["travel_date"].astype(str)
-    have = daily[CORE_KEYS].drop_duplicates()
     cal = calendar or (daily["travel_date"].min(), daily["travel_date"].max())
+    have = daily[CORE_KEYS].drop_duplicates()
+    lookback = _lookback(settings, D.CORE_WINDOWS) if by_plat else {}
+    src_lo = min(fill_from, cal[0]) if (fill_from and lookback) else cal[0]
 
     grid = None
     if by_plat:
@@ -177,18 +185,19 @@ def recompute_core_scores(core_rows: pd.DataFrame,
             names=keys).to_frame(index=False)
 
     daily = dense_grid(daily, keys, "travel_date", D.CORE_COUNT_FIELDS,
-                       keys=grid, start=cal[0], end=cal[1])
+                       keys=grid, start=src_lo, end=cal[1])
     win = rolling_windows(daily, keys, "travel_date",
                           D.CORE_COUNT_FIELDS, windows=D.CORE_WINDOWS,
                           with_prev=False, output_dates=output_dates, calendar=cal,
-                          shift_lookback=_lookback(settings, D.CORE_WINDOWS),
+                          fill_lookback=lookback, fill_by=keys, fill_from=src_lo,
                           presence_col="comment_count")
     if by_plat:
-        num = [c for c in win.columns
-               if c not in keys + ["travel_date"] and not str(c).startswith("shift_")]
+        num = [c for c in win.columns if c not in keys + ["travel_date"]]
         win = win.groupby(CORE_KEYS, as_index=False)[num].sum()
-    # 只保留库里真有那一行的记录：修正动作不新增行，只改分数
-    df = win.merge(have, on=CORE_KEYS, how="inner")
+    # 只保留库里真有那一行的记录：修正动作不新增行，只改分数。
+    # 源表口径（带渠道）下由 diff_scores 跟库里的旧行对齐，这里不按源表日子过滤 ——
+    # 当天没评论、靠补齐出的那一行也要能修。
+    df = win if by_plat else win.merge(have, on=CORE_KEYS, how="inner")
     if df.empty:
         return pd.DataFrame(columns=CORE_KEYS + CORE_SCORE_FIELDS)
 
@@ -208,30 +217,29 @@ def recompute_dimension_scores(dim_facts: pd.DataFrame,
                                output_dates: Sequence[str],
                                formula: str = D.DEFAULT_SCORE_FORMULA,
                                settings: Optional[EtlSettings] = None,
-                               calendar: Optional[tuple] = None) -> pd.DataFrame:
+                               calendar: Optional[tuple] = None,
+                               presence: Optional[pd.DataFrame] = None,
+                               fill_from: Optional[str] = None) -> pd.DataFrame:
     """维度明细 → 新口径的 21 个 dimension_N_score。
 
     入参：dim_facts（normalize.build_dimension_facts 的产物，需覆盖窗口所需历史）；
-          output_dates 要修正的日期
+          output_dates 要修正的日期；presence 渠道当天有没有评论
+          （domain.daily_channel_presence）；fill_from 补齐来源最早日期
     出参：DIM_KEYS + DIM_SCORE_FIELDS
 
-    settings 传入时按与跑批相同的口径做整窗前移回补，保证「修正历史」与
-    「用新口径重跑一遍」结果一致；不传则不回补。
+    settings 传入时按与跑批相同的口径先补明细再滚动（同一个 dimension_windows），
+    保证「修正历史」与「用新口径重跑一遍」结果一致；不传则不补。
     """
+    from .builders.dimension import dimension_windows
     if dim_facts.empty:
         return pd.DataFrame(columns=DIM_KEYS + DIM_SCORE_FIELDS)
 
     cal = calendar or (dim_facts["travel_date"].min(), dim_facts["travel_date"].max())
+    lookback = _lookback(settings, D.DIMENSION_WINDOWS)
     frames = {}
     for lvl, keys in D.DIM_LEVEL_KEYS.items():
-        daily = D.daily_dimension_facts(dim_facts, keys)
-        daily = dense_grid(daily, keys, "travel_date", D.DIM_VALUE_FIELDS,
-                           start=cal[0], end=cal[1])
-        win = rolling_windows(daily, keys, "travel_date", D.DIM_VALUE_FIELDS,
-                              windows=D.DIMENSION_WINDOWS, with_prev=False,
-                              output_dates=output_dates, calendar=cal,
-                              shift_lookback=_lookback(settings, D.DIMENSION_WINDOWS),
-                              presence_col="mention_cnt")
+        win = dimension_windows(dim_facts, keys, output_dates, cal, lookback,
+                                fill_from or cal[0], presence)
         frames[lvl] = win.rename(columns={c: f"L{lvl}_{c}" for c in win.columns
                                           if c not in keys + ["travel_date"]})
 
@@ -311,8 +319,8 @@ def repair_core(db: MySQL, start: str, end: str,
     """修正 core 表的 6 个 emotional_score 字段。
 
     计数从哪来取决于 backfill_mode（见模块注释）：
-      shift → 回源表拿**当天真实计数**（core 表里存的已经是回补后的值，
-              拿它再滚一次窗口会把回补叠加两遍）
+      fill  → 回源表拿**当天真实计数**（core 表里存的已经是补齐后的值，
+              拿它再滚一次窗口口径就错了）
       off   → 直接用 core 表自己的计数列，不需要源表
     """
     res = RepairResult(table=TABLE_CORE, keys=CORE_KEYS, fields=CORE_SCORE_FIELDS)
@@ -323,11 +331,11 @@ def repair_core(db: MySQL, start: str, end: str,
     lookback = settings.lookback_days if settings is not None else max(D.CORE_WINDOWS)
     warmup = (pd.to_datetime(start, format="%Y%m%d")
               - pd.Timedelta(days=lookback - 1)).strftime("%Y%m%d")
-    shift = bool(_lookback(settings, D.CORE_WINDOWS))
+    fill = bool(_lookback(settings, D.CORE_WINDOWS))
     res.note = (f"窗口预热从 {warmup} 开始读（{lookback} 天，与跑批的 lookback_days 一致；"
                 f"不修改预热区间的行）；计数来源="
-                + ("源表（整窗前移口径下 core 表的计数已是回补值，不能二次滚动）"
-                   if shift else "core 表自身计数列"))
+                + ("源表（补齐明细口径下 core 表的计数已是补齐后的值，不能二次滚动）"
+                   if fill else "core 表自身计数列"))
 
     # 旧分数：只读目标区间，这是要被对比和回写的行
     cols = ",".join(f"`{c}`" for c in CORE_KEYS + D.CORE_COUNT_FIELDS + CORE_SCORE_FIELDS)
@@ -346,13 +354,14 @@ def repair_core(db: MySQL, start: str, end: str,
               pd.date_range(pd.to_datetime(start, format="%Y%m%d"),
                             pd.to_datetime(end, format="%Y%m%d"), freq="D")]
 
-    if shift:
+    if fill:
         if comments_df is None:
-            comments_df = fetch_comments(db, warmup, end, scenic_codes)
+            # 往前多读一段当补齐来源，与跑批的 fill_start 一致
+            comments_df = fetch_comments(db, fill_start(settings, warmup), end, scenic_codes)
         if comments_df is None or comments_df.empty:
-            res.note = "源表在该区间没有评论数据，core 分数无法按整窗前移口径修正"
+            res.note = "源表在该区间没有评论数据，core 分数无法按补齐明细口径修正"
             return res
-        # 渠道粒度：回补在渠道上做，再按景区汇总（domain §1.9），与跑批一致
+        # 渠道粒度：补齐在渠道上做，再按景区汇总（domain §1.9），与跑批一致
         daily = D.daily_core_facts_by_platform(build_comment_facts(comments_df))
         daily = daily[["scenic_spot_code", "platform_code", "travel_date"]
                       + D.CORE_COUNT_FIELDS]
@@ -361,7 +370,8 @@ def repair_core(db: MySQL, start: str, end: str,
         daily = rows
 
     new = recompute_core_scores(daily, output_dates=target, formula=formula,
-                                settings=settings, calendar=(warmup, end))
+                                settings=settings, calendar=(warmup, end),
+                                fill_from=fill_start(settings, warmup))
     old = rows[rows["travel_date"].astype(str).isin(set(target))]
     res.scanned = len(old)
 
@@ -394,8 +404,9 @@ def repair_dimension(db: MySQL, start: str, end: str,
     res.note = (f"回源表重算，窗口预热从 {warmup} 开始；"
                 f"源表已清理的日期无法修正")
 
+    src_lo = fill_start(settings, warmup)
     if comments_df is None:
-        comments_df = fetch_comments(db, warmup, end, scenic_codes)
+        comments_df = fetch_comments(db, src_lo, end, scenic_codes)
     if comments_df is None or comments_df.empty:
         res.note = "源表在该区间没有评论数据，维度分数无法修正"
         return res
@@ -406,7 +417,9 @@ def repair_dimension(db: MySQL, start: str, end: str,
               pd.date_range(pd.to_datetime(start, format="%Y%m%d"),
                             pd.to_datetime(end, format="%Y%m%d"), freq="D")]
     new = recompute_dimension_scores(dim_facts, target, formula=formula,
-                                     settings=settings, calendar=(warmup, end))
+                                     settings=settings, calendar=(warmup, end),
+                                     presence=D.daily_channel_presence(cf),
+                                     fill_from=src_lo)
     if new.empty:
         res.note = "重算结果为空，检查源表维度标签"
         return res

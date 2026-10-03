@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
-"""缺数回补 = 整窗前移，取到为止（domain §1.8）。
+"""缺数回补 = 先补明细，再算指标（domain §1.8 / §1.9）。
 
-业务方原话：
+业务方原话（2.0 版）：
 
-    2026-09-11 没有 kuaishou 这个渠道，那么就往前取，在 2026-09-10 有一条，
-    那么 2026-09-11 也是一条。1 日的往前最大 5 日，取到为止，
-    **记住这个不是 5 日的累计**，是在那一日取到了就使用这一日的数据。
-    最大向前：1日→5  7日→10  14日→15  30日→20  60日→30  90日→60
-    以上向前跨度最好能进行配置化。
-    总数需要对数据补齐后再计算，其他指标也一样，每一张表都是。
+    每日的社媒评论内容，应该是先补数据 …… 按 {1: 5, 7: 10, 14: 15, 30: 20, 60: 30,
+    90: 60, 365: 90} 进行补数 …… 然后再进行计算各种指标，包括同比 / 环比 / 率等，
+    这个时候已经是补数据的明细了，这些指标计算如果有就有，没有就没有了。
+
+    快手 9/10 有 3 条，9/11 ~ 9/13 都没有 → 9/11、9/12、9/13 各复制 9/10 的明细。
+    唯一区别是：当日、近 1 日最大向前找 5 日，到那一天找到截止，其他类似。
 
 这个文件把这段话逐条钉成断言。
 """
@@ -26,6 +26,7 @@ CORE = "ads_trf_social_opinion_comment_core_di"
 PLATFORM = "ads_trf_social_opinion_comment_platform_di"
 DIMENSION = "ads_trf_social_opinion_comment_dimension_score_di"
 CONTENT = "ads_trf_social_opinion_comment_content_di"
+DRILL = "ads_trf_social_opinion_drill_analysis_di"
 
 
 def _comment(ds, channel, cid, sentiment=1, word="好玩"):
@@ -68,37 +69,94 @@ def kuaishou_case():
     return run(_settings(), ["20260911"], comments_df=pd.DataFrame(rows))
 
 
-def test_kuaishou_takes_previous_days_value_not_a_sum(kuaishou_case):
-    """09-11 没有快手 → 前移到 09-10，**就是那一天的 1 条**。"""
+def test_kuaishou_copies_previous_days_detail(kuaishou_case):
+    """09-11 没有快手 → 复制 09-10 的明细，**就是那一天的 1 条**。"""
     p = kuaishou_case.tables[PLATFORM]
     ks = p[(p.travel_date == 20260911) & (p.platform_code == "kuaishou")]
     assert len(ks) == 1
-    assert ks.comment_cnt.iloc[0] == 1          # 不是 0（没回补），也不是 2（累计）
+    assert ks.comment_cnt.iloc[0] == 1          # 不是 0（没补），也不是 2（累计）
 
 
-def test_douyin_with_data_today_does_not_shift(kuaishou_case):
-    """当期有数据的渠道一天都不挪 —— 回补只在没数据时才发生。"""
+def test_douyin_with_data_today_is_not_filled(kuaishou_case):
+    """当天有数据的渠道不补 —— 补齐只在渠道当天没评论时才发生。"""
     p = kuaishou_case.tables[PLATFORM]
     dy = p[(p.travel_date == 20260911) & (p.platform_code == "douyin")].iloc[0]
     assert dy.comment_cnt == 20                 # 09-11 真实就是 20 条
+    assert dy.comment_cnt_7d == 140
 
 
-def test_shift_is_not_cumulative_across_windows(kuaishou_case):
-    """7 日档同理：整窗挪到 [09-04, 09-10]，里面只有 09-10 那 1 条。
+def test_window_sums_the_filled_daily_detail(kuaishou_case):
+    """窗口 = 补齐后的每日明细逐日相加：09-10 真实 1 条 + 09-11 复制 1 条 = 2。
 
-    如果实现成「累计」，7 日档会把前移路径上的天数一起加进来，值就 > 1。
+    （旧口径「整窗前移」这里是 1 —— 那是把整个窗口挪到 [09-04, 09-10]。）
     """
     p = kuaishou_case.tables[PLATFORM]
     ks = p[(p.travel_date == 20260911) & (p.platform_code == "kuaishou")].iloc[0]
     for n in (7, 14, 30, 60, 90):
-        assert ks[f"comment_cnt_{n}d"] == 1, f"{n} 日档应该只有 09-10 那 1 条"
+        assert ks[f"comment_cnt_{n}d"] == 2, f"{n} 日档应该是 09-10 + 09-11（复制）= 2"
 
 
 # ══════════════════════════════════════════════════════════════════
-# 前移上限：挪满了还没数据就取 0，不再往前找
+# 业务方的例子：快手 9/10 有 3 条，9/11 ~ 9/13 都没有
+# ══════════════════════════════════════════════════════════════════
+@pytest.fixture(scope="module")
+def three_day_gap():
+    rows = []
+    for d in pd.date_range("2026-08-20", "2026-09-13"):
+        ds = d.strftime("%Y%m%d")
+        for i in range(5):
+            rows.append(_comment(ds, "douyin", f"dy{ds}{i}"))
+    rows += [_comment("20260910", "kuaishou", f"ks{i}", 1 if i else -1, "排队")
+             for i in range(3)]
+    return run(_settings(), ["20260911", "20260912", "20260913"],
+               comments_df=pd.DataFrame(rows))
+
+
+def test_each_gap_day_copies_the_nearest_day(three_day_gap):
+    """9/11、9/12、9/13 每天都是 9/10 的 3 条（每天各自往前找，找到 9/10 截止）。"""
+    p = three_day_gap.tables[PLATFORM]
+    ks = p[p.platform_code == "kuaishou"].set_index("travel_date")
+    assert ks.loc[[20260911, 20260912, 20260913], "comment_cnt"].tolist() == [3, 3, 3]
+    # 近 7 日（截至 9/13）= 9/10 真实 3 + 9/11~9/13 复制 3×3
+    assert ks.loc[20260913, "comment_cnt_7d"] == 12
+    assert ks.loc[20260912, "comment_cnt_7d"] == 9
+
+
+def test_growth_uses_filled_detail(three_day_gap):
+    """环比也在补齐后的明细上算：9/12 的 1 日环比 = (3 - 3) / 3 = 0。"""
+    core = three_day_gap.tables[CORE].set_index("travel_date")
+    # 抖音 5 + 快手 3（复制）
+    assert core.loc[[20260911, 20260912, 20260913], "comment_count"].tolist() == [8, 8, 8]
+    assert core.loc[20260912, "comment_count_dod"] == 0
+
+
+def test_copied_detail_carries_sentiment_and_words(three_day_gap):
+    """复制的是整条明细：好/中/差、关键词都跟着来（2 好 1 差）。"""
+    p = three_day_gap.tables[PLATFORM]
+    ks = p[(p.platform_code == "kuaishou") & (p.travel_date == 20260912)].iloc[0]
+    assert ks.plat_positive_count == 2
+    ct = three_day_gap.tables[CONTENT]
+    day = ct[(ct.travel_date == 20260912) & (ct.emotion_word == "排队")]
+    assert int(day.emotion_value.iloc[0]) == 3
+
+
+def test_drill_includes_copied_comments(three_day_gap):
+    """下钻表也包含复制来的评论（业务确认「包含」）：publish_time 挪到这一天，主键不撞。"""
+    dr = three_day_gap.tables[DRILL]
+    ks = dr[dr.platform_code == "kuaishou"]
+    assert sorted(ks.travel_date.unique()) == [20260911, 20260912, 20260913]
+    assert (ks.groupby("travel_date").size() == 3).all()
+    day = ks[ks.travel_date == 20260912]
+    assert pd.to_datetime(day.publish_time).dt.strftime("%Y%m%d").eq("20260912").all()
+    assert ks.detail_uk.is_unique
+    assert set(ks.comment_id) == {"ks0", "ks1", "ks2"}
+
+
+# ══════════════════════════════════════════════════════════════════
+# 往前找的上限按窗口分档：找满了还没有，这一天就是空的
 # ══════════════════════════════════════════════════════════════════
 def test_lookback_limit_is_respected():
-    """1 日档最多往前 5 天：第 6 天之外的数据借不到。"""
+    """当日档最多往前 5 天：第 6 天之外的数据借不到；7 日档（10 天）借得到。"""
     rows = [_comment("20260901", "kuaishou", "ks1")]
     for d in pd.date_range("2026-08-20", "2026-09-11"):    # 抖音撑住日历
         ds = d.strftime("%Y%m%d")
@@ -111,11 +169,27 @@ def test_lookback_limit_is_respected():
     assert p[(p.travel_date == 20260906)
              & (p.platform_code == "kuaishou")].comment_cnt.iloc[0] == 1
 
-    # 09-07 距离 09-01 是 6 天 → 超过 1 日档上限 5，取 0
+    # 09-07 距离 09-01 是 6 天 → 超过当日档上限 5，当日为 0；
+    # 但 7 日档最多找 10 天：09-01 真实 1 + 09-02~09-07 各复制 1 = 7
     r = run(_settings(), ["20260907"], comments_df=df)
     p = r.tables[PLATFORM]
-    assert p[(p.travel_date == 20260907)
-             & (p.platform_code == "kuaishou")].comment_cnt.iloc[0] == 0
+    ks = p[(p.travel_date == 20260907) & (p.platform_code == "kuaishou")].iloc[0]
+    assert ks.comment_cnt == 0
+    assert ks.comment_cnt_7d == 7
+
+
+def test_fill_can_reach_before_the_load_range():
+    """取数区间第一天没评论，也能从区间之前补（多取的那一段只当来源，不进窗口）。"""
+    rows = [_comment("20260910", "kuaishou", "ks1")]
+    for d in pd.date_range("2026-08-20", "2026-09-11"):
+        ds = d.strftime("%Y%m%d")
+        rows.append(_comment(ds, "douyin", f"dy{ds}"))
+    r = run(_settings(lookback_days=1), ["20260911"], comments_df=pd.DataFrame(rows))
+    assert r.errors == []
+    p = r.tables[PLATFORM]
+    ks = p[(p.travel_date == 20260911) & (p.platform_code == "kuaishou")].iloc[0]
+    assert ks.comment_cnt == 1
+    assert ks.comment_cnt_7d == 1             # 09-10 在取数区间外，只当来源，不进窗口
 
 
 def test_lookback_table_matches_the_spec():
@@ -144,11 +218,12 @@ def test_lookback_is_configurable_per_window():
     p = r.tables[PLATFORM]
     ks = p[(p.travel_date == 20260906) & (p.platform_code == "kuaishou")].iloc[0]
     assert ks.comment_cnt == 0
-    assert ks.comment_cnt_7d == 1          # 7 日档没被覆盖，仍用默认 10 天，照样借得到
+    # 7 日档没被覆盖，仍用默认 10 天：09-01 真实 1 + 09-02~09-06 各复制 1
+    assert ks.comment_cnt_7d == 6
 
 
-def test_backfill_mode_off_disables_shifting():
-    """backfill_mode="off" → 当期没数据就是 0，一天都不挪。"""
+def test_backfill_mode_off_disables_fill():
+    """backfill_mode="off" → 渠道当天没评论就是 0，不补。"""
     rows = [_comment("20260910", "kuaishou", "ks1")]
     for d in pd.date_range("2026-08-20", "2026-09-11"):
         ds = d.strftime("%Y%m%d")
@@ -173,6 +248,15 @@ def test_context_merges_defaults_with_overrides():
                      output_dates=["20260911"],
                      load_start="20260801", load_end="20260911")
     assert off.backfill_lookback([1, 7, 30]) == {}
+    # 往前多取的来源段 = 最大上限（365 日档 90 天）
+    assert ctx.fill_start == "20260503"
+    assert off.fill_start == "20260801"
+
+
+def test_legacy_shift_mode_means_fill():
+    """老配置写的 backfill_mode="shift" 等同 fill，不报错也不退回旧口径。"""
+    assert D.backfill_enabled("shift") and D.backfill_enabled("fill")
+    assert not D.backfill_enabled("off")
 
 
 def test_cli_parses_lookback_overrides():
@@ -234,9 +318,10 @@ def test_content_word_counts_use_backfilled_data(gap_day):
     assert int(day[day.emotion_word == "太差"].emotion_value.iloc[0]) == 10
 
 
-def test_validation_passes_under_shift(gap_day, kuaishou_case):
+def test_validation_passes_under_fill(gap_day, kuaishou_case, three_day_gap):
     assert gap_day.errors == []
     assert kuaishou_case.errors == []
+    assert three_day_gap.errors == []
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -257,14 +342,14 @@ def multi_channel_case():
 
 
 def test_only_the_missing_channel_is_backfilled(multi_channel_case):
-    """有数据的渠道一天都不挪，只有缺的那个往前借。"""
+    """有数据的渠道不补，只有缺的那个复制前一天的明细。"""
     p = multi_channel_case.tables[PLATFORM]
     day = p[p.travel_date == 20260911].set_index("platform_code")["comment_cnt"]
     assert day["douyin"] == 10           # 原样
     assert day["xiaohongshu"] == 20      # 原样
     assert day["weibo"] == 5             # 原样
     assert day["ctrip"] == 3             # 原样
-    assert day["kuaishou"] == 3          # 09-11 没有 → 前移 1 天补 09-10 的 3
+    assert day["kuaishou"] == 3          # 09-11 没有 → 复制 09-10 的 3 条
     assert day["tongcheng"] == 0         # 从来没有过数据 → 全 0 行
 
 
@@ -282,7 +367,7 @@ def test_core_total_equals_sum_of_backfilled_channels(multi_channel_case):
     assert got != sum(RAW_CASE["20260911"].values())        # 原始 38
     assert got == int(p[p.travel_date == 20260911].comment_cnt.sum())
 
-    # 没触发回补的那天两边本来就相等
+    # 没触发补齐的那天两边本来就相等
     d10 = int(core[core.travel_date == 20260910].comment_count.iloc[0])
     assert d10 == 46 == int(p[p.travel_date == 20260910].comment_cnt.sum())
 

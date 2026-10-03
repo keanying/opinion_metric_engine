@@ -87,3 +87,50 @@ def test_output_dates_filter_does_not_change_values():
                            output_dates=["20260810"])
     ref = full[full.ds == "20260810"].reset_index(drop=True)
     pd.testing.assert_frame_equal(part.reset_index(drop=True), ref)
+
+
+# ══════════════════════════════════════════════════════════════════
+# 先补明细，再滚动（domain §1.8）
+# ══════════════════════════════════════════════════════════════════
+def test_fill_source_index_stops_at_the_nearest_day_and_respects_lookback():
+    import numpy as np
+    from engin_cli.windows import fill_source_index
+    present = np.array([[True], [False], [False], [False], [True], [False]])
+    assert fill_source_index(present, 2)[:, 0].tolist() == [0, 0, 0, -1, 4, 4]
+    assert fill_source_index(present, 0)[:, 0].tolist() == [0, -1, -1, -1, 4, -1]
+
+
+def test_rolling_windows_fills_each_day_then_sums():
+    """快手 9/10 有 3 条、9/11~9/13 没有 → 每天复制 9/10；近 7 日 = 3 + 3×3。"""
+    import pandas as pd
+    from engin_cli.windows import rolling_windows
+    keys = ["scenic_spot_code", "platform_code"]
+    daily = pd.DataFrame({"scenic_spot_code": ["S1"], "platform_code": ["kuaishou"],
+                          "travel_date": ["20260910"], "n": [3]})
+    out = rolling_windows(daily, keys, "travel_date", ["n"], windows=[1, 7],
+                          calendar=("20260901", "20260913"),
+                          fill_lookback={1: 5, 7: 10}, fill_by=keys, presence_col="n")
+    out = out.set_index("travel_date")
+    assert out.loc[["20260911", "20260912", "20260913"], "n_1d"].tolist() == [3, 3, 3]
+    assert out.loc["20260913", "n_7d"] == 12
+    assert out.loc["20260913", "raw_n_7d"] == 3          # 行存在规则看补齐前的真实值
+    assert out.loc["20260912", "n_prev_1d"] == 3         # 上一周期也来自补齐后的明细
+    assert out.loc["20260909", "n_1d"] == 0              # 9/10 之前没有来源，补不出来
+
+
+def test_rolling_windows_fill_uses_presence_not_own_value():
+    """渠道当天有评论但这个词没出现 → 词就是 0，不去复制前一天的词。"""
+    import pandas as pd
+    from engin_cli.windows import rolling_windows
+    keys = ["scenic_spot_code", "platform_code", "word"]
+    by = ["scenic_spot_code", "platform_code"]
+    daily = pd.DataFrame({"scenic_spot_code": ["S1"], "platform_code": ["douyin"],
+                          "word": ["排队"], "travel_date": ["20260910"], "c": [2]})
+    presence = pd.DataFrame({"scenic_spot_code": ["S1", "S1"],
+                             "platform_code": ["douyin", "douyin"],
+                             "travel_date": ["20260910", "20260911"], "present_cnt": [5, 4]})
+    out = rolling_windows(daily, keys, "travel_date", ["c"], windows=[1],
+                          calendar=("20260910", "20260912"), fill_lookback={1: 5},
+                          fill_by=by, presence=presence, with_prev=False)
+    got = dict(zip(out.travel_date, out.c_1d))
+    assert got == {"20260910": 2, "20260911": 0, "20260912": 0}
