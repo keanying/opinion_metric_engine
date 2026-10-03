@@ -489,6 +489,35 @@ def _post_with_retry(url: str, body: Dict[str, Any], headers: Dict[str, str],
     raise RuntimeError(last or "未知错误")
 
 
+def check_pk(table: str, df: pd.DataFrame, pk: Sequence[str]) -> str:
+    """发送前校验 pkId：必须能唯一定位一行、且不能为空。有问题返回说明，没问题返回空串。
+
+    下游网关按 pkId「先查询、再更新」：pkId 重复的行会互相覆盖，最后只剩一行，
+    而且下游不报错 —— 数据悄悄变少。所以一行都不发，直接报错让人改配置。
+    空串不算空值（例如维度表没有三级维度时 dimension_level3 就是空串，是合法取值）。
+    """
+    if df.empty or not pk:
+        return ""
+    keys = df[list(pk)]
+    nulls = int(keys.isna().any(axis=1).sum())
+    if nulls:
+        cols = [c for c in pk if keys[c].isna().any()]
+        return (f"pkId {list(pk)} 有 {nulls:,} 行为空（字段 {cols}），一行都没有发送。"
+                f"请检查 push_pk 配置")
+    dup = keys.duplicated(keep=False)
+    if dup.any():
+        n_rows = int(dup.sum())
+        n_lost = int(keys.duplicated().sum())
+        sample = keys[dup].head(3).astype(str).agg(" / ".join, axis=1).tolist()
+        hint = DEFAULT_PUSH_PK.get(table)
+        return (f"pkId {list(pk)} 不能唯一定位一行：{n_rows:,} 行的 pkId 有重复"
+                f"（例如 {'；'.join(sample)}）。下游按 pkId 先查再更新，这些行会互相覆盖、"
+                f"丢掉 {n_lost:,} 行，所以一行都没有发送。"
+                + (f"请把 push_pk 改成能唯一定位一行的字段，例如默认值 {hint}" if hint else
+                   "请把 push_pk 改成能唯一定位一行的字段"))
+    return ""
+
+
 def push_table(table: str, df: pd.DataFrame, *, settings, progress=None) -> PushResult:
     """推一张表。分批发，任何一批失败都记下来但不中断其余批次。
 
@@ -507,6 +536,14 @@ def push_table(table: str, df: pd.DataFrame, *, settings, progress=None) -> Push
     if missing:
         res.error = f"主键字段不在表里：{missing}（检查 push_pk 配置）"
         res.elapsed = time.time() - t0
+        return res
+    bad = check_pk(table, df, pk)
+    if bad:
+        res.error = bad
+        res.failed_batches = (len(df) + max(int(getattr(settings, "push_batch_size", 500)), 1) - 1) \
+            // max(int(getattr(settings, "push_batch_size", 500)), 1)
+        res.elapsed = time.time() - t0
+        log.error("推送 %s 未发送：%s", table, bad)
         return res
 
     size = max(int(getattr(settings, "push_batch_size", 500)), 1)
