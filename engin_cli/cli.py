@@ -248,6 +248,9 @@ def _run_one_scenic(st, scenic: str, dates: List[str], db, comments_df, works_df
             print(f"  推送 {r.table:<48} {r.rows:>8,} 行  [{r.batches} 批 {r.elapsed:.1f}s]"
                   + ("" if r.ok else f"  ✗ {r.error}"))
             _print_pk_warning(r)
+        for n in res.notes:
+            if n.startswith("推送成功，已删除本地 CSV") and not verbose:
+                print(f"  {n}")
         push_note = "推送 ✓" if res.push.ok else f"推送 ✗（{len(res.push.errors)} 张表失败，可用 push 补推）"
         if any(r.unreachable for r in res.push.results):
             # 地址连不上，后面的景区推也是白等：只算、只落库，事后用 push 补推
@@ -455,6 +458,8 @@ def _apply_push_args(st, args) -> None:
         st.push_enabled = True
     if getattr(args, "push_strict", False):
         st.push_strict = True
+    if getattr(args, "keep_local", False):
+        st.push_cleanup_local = False
 
 
 # 补推读 CSV 时，这些列一律按字符串读：它们进了 pkId（下游的查重键），
@@ -504,6 +509,27 @@ def _push_sources(base: str, scenics: Optional[List[str]]) -> List[tuple]:
     return out
 
 
+def _cleanup_pushed_rows(sc: str, results, origins: dict) -> None:
+    """补推成功后，把推过的行从本地 CSV 里删掉：整份都推了就删文件，只推了一部分就留下没推的行。"""
+    for r in results:
+        if r.skipped or not r.ok or (sc, r.table) not in origins:
+            continue
+        path, full, pushed = origins[(sc, r.table)]
+        rest = full.drop(index=pushed)
+        try:
+            if rest.empty:
+                os.remove(path)
+                print(f"  已删除本地 {path}（已全部推送）")
+                d = os.path.dirname(path)
+                if d and os.path.isdir(d) and not os.listdir(d):
+                    os.rmdir(d)
+            else:
+                rest.to_csv(path, index=False, encoding="utf-8-sig")
+                print(f"  已从本地 {path} 删掉推过的 {len(pushed):,} 行，剩 {len(rest):,} 行未推送")
+        except OSError as e:                     # 删不掉（被 Excel 打开等）不影响推送结果
+            print(f"  ⚠ 清理本地 {path} 失败：{e}")
+
+
 def _mask_headers(headers: dict) -> dict:
     """预览时把令牌打码：只露前 6 位。"""
     out = {}
@@ -539,13 +565,15 @@ def cmd_push(args) -> int:
 
     sources = _push_sources(base, scenics)
     batches = []                         # [(景区, {表: df})]
+    origins = {}                         # (景区, 表) → (CSV 路径, 文件全部行, 这次推的行号)
     for sc, d, skip in sources:
         tables = {}
         for name in names:
             path = os.path.join(d, f"{name}.csv")
             if not os.path.exists(path):
                 continue
-            df = _read_output_csv(path)
+            full = _read_output_csv(path)
+            df = full
             key = scenic_key(name)
             if scenics is not None and key in df.columns:
                 df = df[df[key].isin(scenics)]
@@ -555,6 +583,7 @@ def cmd_push(args) -> int:
                 df = df[df["travel_date"].isin(date_set)]
             if not df.empty:
                 tables[name] = df.reset_index(drop=True)
+                origins[(sc or "（平铺目录）", name)] = (path, full, df.index)
         if tables:
             batches.append((sc or "（平铺目录）", tables))
 
@@ -616,6 +645,8 @@ def cmd_push(args) -> int:
                 print(f"  {r.table:<52} {r.rows:>8,} 行  [{r.batches} 批 {r.elapsed:.1f}s]"
                       + ("" if r.ok else f"  ✗ {r.error}"))
             _print_pk_warning(r)
+        if st.push_cleanup_local and not st.push_dry_run:
+            _cleanup_pushed_rows(sc, rep.results, origins)
         failed += [f"{sc} · {e}" for e in rep.errors]
         if any(r.unreachable for r in rep.results):
             print(f"\n✗ 推送地址连不上或没有响应：{st.push_url}\n"
@@ -663,6 +694,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--push-url", help="推送地址，覆盖配置")
     r.add_argument("--push-dry-run", action="store_true", help="只组报文不真发，验证配置用")
     r.add_argument("--push-strict", action="store_true", help="推送失败也让退出码非 0")
+    r.add_argument("--keep-local", action="store_true",
+                   help="推送成功后保留本地 CSV（默认推送成功就删掉）")
     r.add_argument("--comments-csv", help="离线源：评论表 CSV")
     r.add_argument("--works-csv", help="离线源：作品表 CSV")
     r.add_argument("--fail-fast", action="store_true", help="某个景区失败就停，不跑后面的")
@@ -691,6 +724,8 @@ def build_parser() -> argparse.ArgumentParser:
     u.add_argument("--output-dir", help="CSV 所在目录（下面按景区分子目录）")
     u.add_argument("--push-url", help="推送地址，覆盖配置")
     u.add_argument("--push-dry-run", action="store_true", help="只组报文不真发（只统计批次）")
+    u.add_argument("--keep-local", action="store_true",
+                   help="补推成功后保留本地 CSV（默认把推过的行从 CSV 里删掉）")
     u.add_argument("--preview", action="store_true",
                    help="打印每张表第一批报文（令牌打码），不发送")
     u.add_argument("--preview-rows", type=int, metavar="N",

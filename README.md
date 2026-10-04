@@ -432,6 +432,7 @@ Content-Type: application/json
 | `push_retries` / `push_retry_backoff` | 2 / 1.0 | 重试次数与退避基数 |
 | `push_dry_run` | `False` | 只组报文不真发，验证配置用 |
 | `push_strict` | `False` | `True` 时推送失败也让跑批退出码非 0 |
+| `push_cleanup_local` | `True` | 推送成功后删掉本地 CSV（推失败的表留着补推；`push` 补推只删推过的行）。命令行 `--keep-local` 临时保留 |
 
 鉴权令牌**不要写进文件**，用环境变量：`OPINION_PUSH_TOKEN=sk_xxx` 会自动拼成
 `Authorization: Bearer sk_xxx`。`OPINION_PUSH_ENABLED` / `OPINION_PUSH_URL` 同理。

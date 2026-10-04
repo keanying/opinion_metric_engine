@@ -129,7 +129,7 @@ def test_scenic_parsing():
 # 按景区跑 + 整体推送
 # ══════════════════════════════════════════════════════════════════
 def test_run_one_scenic_and_push_all(sample, tmp_path, gateway):
-    rc = _run(sample, tmp_path, "--push", "all", "--scenic", "PFTSCA01002434",
+    rc = _run(sample, tmp_path, "--push", "all", "--keep-local", "--scenic", "PFTSCA01002434",
               "--start-date", "20260901", "--end-date", "20260911")
     assert rc == 0
     # 只算、只推这一个景区；六张表都推了
@@ -143,7 +143,7 @@ def test_run_one_scenic_and_push_all(sample, tmp_path, gateway):
 
 def test_run_all_scenics_one_by_one(sample, tmp_path, gateway):
     """不给 --scenic：源表里的每个景区逐个跑、逐个推。"""
-    rc = _run(sample, tmp_path, "--push", "all",
+    rc = _run(sample, tmp_path, "--push", "all", "--keep-local",
               "--start-date", "20260910", "--end-date", "20260911")
     assert rc == 0
     assert sorted(os.listdir(tmp_path)) == ["PFTSCA01002434", "PFT_S_00001"]
@@ -202,6 +202,43 @@ def test_push_subcommand_by_scenic_and_date(sample, tmp_path, gateway):
     assert _run(sample, tmp_path, "--push", "--start-date", "20260909",
                 "--end-date", "20260911") == 0
     assert {t: len(v) for t, v in gateway.store.items()} == n
+
+
+# ══════════════════════════════════════════════════════════════════
+# 推送成功后清理本地 CSV（本地不留存，免得越积越大）
+# ══════════════════════════════════════════════════════════════════
+def test_run_push_removes_local_csv_after_success(sample, tmp_path, gateway):
+    assert _run(sample, tmp_path, "--push", "--scenic", "PFT_S_00001", "--date", "20260911") == 0
+    assert gateway.store[CORE]
+    assert not (tmp_path / "PFT_S_00001").exists()          # 全部推成功 → CSV 和目录都删掉
+
+
+def test_run_push_keep_local(sample, tmp_path, gateway):
+    assert _run(sample, tmp_path, "--push", "--keep-local", "--scenic", "PFT_S_00001",
+                "--date", "20260911") == 0
+    assert (tmp_path / "PFT_S_00001" / f"{CORE}.csv").exists()
+
+
+def test_run_without_push_keeps_csv(sample, tmp_path, gateway):
+    """没推送就不删：CSV 是补推的来源。"""
+    assert _run(sample, tmp_path, "--scenic", "PFT_S_00001", "--date", "20260911") == 0
+    assert (tmp_path / "PFT_S_00001" / f"{CORE}.csv").exists()
+
+
+def test_push_subcommand_removes_only_the_pushed_rows(sample, tmp_path, gateway):
+    """按日期补推一部分：推过的行从 CSV 里删掉，没推的行留着；全推完文件就删掉。"""
+    assert _run(sample, tmp_path, "--scenic", "PFT_S_00001",
+                "--start-date", "20260909", "--end-date", "20260911") == 0
+    path = tmp_path / "PFT_S_00001" / f"{CORE}.csv"
+    assert cli.main(["push", "--output-dir", str(tmp_path), "--tables", "core",
+                     "--date", "20260911"]) == 0
+    left = pd.read_csv(path)
+    assert sorted(left.travel_date) == [20260909, 20260910]
+    assert (tmp_path / "PFT_S_00001" / f"{PLATFORM}.csv").exists()   # 没推的表不动
+
+    assert cli.main(["push", "--output-dir", str(tmp_path), "--tables", "core"]) == 0
+    assert not path.exists()
+    assert {r["travel_date"] for r in gateway.store[CORE].values()} == {20260909, 20260910, 20260911}
 
 
 # ══════════════════════════════════════════════════════════════════
