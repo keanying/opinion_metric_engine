@@ -541,10 +541,10 @@ def _dump_pk_issue(table: str, rows: pd.DataFrame, pk: Sequence[str], settings,
     """pkId 有问题的行 → (单行示例请求 JSON, 完整请求 JSON 文件路径)。
 
     示例 = 第一组重复的行（或第一行空值行）组成的一个请求，格式与真实请求完全一样，
-    拿去 curl 就能在下游复现；文件里是全部有问题的行，写在 <output_dir>/push_debug/ 下。
+    拿去 curl 就能在下游复现；文件里是全部有问题的行，写在 <output_dir>/push_debug/<表名>_pkId.json
+    （每张表只留最新一份）。
     """
     import os
-    from datetime import datetime
 
     def _body(part):
         return build_payload(table, part, pk,
@@ -560,7 +560,8 @@ def _dump_pk_issue(table: str, rows: pd.DataFrame, pk: Sequence[str], settings,
     try:
         d = os.path.join(getattr(settings, "output_dir", "output") or "output", "push_debug")
         os.makedirs(d, exist_ok=True)
-        path = os.path.join(d, f"{table}_pkId_{datetime.now():%Y%m%d_%H%M%S}.json")
+        # 每张表只留最新一份（覆盖写），不随跑批次数越积越多
+        path = os.path.join(d, f"{table}_pkId.json")
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(_body(rows), fh, ensure_ascii=False, indent=2)
     except OSError as e:                         # 写不了文件不影响推送
@@ -656,6 +657,31 @@ def push_table(table: str, df: pd.DataFrame, *, settings, progress=None) -> Push
         progress.finish("✓" if res.ok else "✗ 连不上或没有响应，已停止" if res.unreachable
                         else f"✗ {res.failed_batches} 批失败")
     return res
+
+
+def cleanup_pushed_csv(out_dir: str, results: Sequence["PushResult"]) -> List[str]:
+    """推送成功的表 → 删掉 out_dir 下对应的 <表名>.csv；目录删空了就把目录也删掉。
+
+    推失败 / 跳过的表不删（留着补推）。返回删掉的文件路径。
+    """
+    import os
+    removed = []
+    for r in results:
+        if r.skipped or not r.ok:
+            continue
+        path = os.path.join(out_dir, f"{r.table}.csv")
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+                removed.append(path)
+        except OSError as e:                     # 删不掉（被 Excel 打开等）不影响推送结果
+            log.warning("删除本地 CSV 失败：%s（%s）", path, e)
+    try:
+        if removed and os.path.isdir(out_dir) and not os.listdir(out_dir):
+            os.rmdir(out_dir)
+    except OSError:
+        pass
+    return removed
 
 
 def _response_fields(settings) -> Dict[str, str]:

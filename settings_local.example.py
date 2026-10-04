@@ -372,6 +372,12 @@ ETL = {
     # 【什么时候改 True】下游是强依赖，推不过去就必须告警。
     # "push_strict": False,
 
+    # 【是什么】推送成功后删掉本地 CSV（output/<景区>/<表>.csv），本地不留存。
+    #   只删推送成功的表；推失败的留着，修好后用 push 补推。
+    #   push 补推成功后同样把推过的行从 CSV 里删掉。
+    # 【什么时候改 False】想在本地留一份结果核对（命令行也可以临时加 --keep-local）。
+    # "push_cleanup_local": True,
+
     # 【是什么】网关 HTTP 恒为 200，成败写在响应体里：
     #   {"status": false, "code": 5011, "msg": "...", "trace_id": "..."}
     #   响应体是 JSON 且带 push_success_field 时，它为假就算这一批推送失败（不重试），

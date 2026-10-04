@@ -38,7 +38,7 @@ from .metric_calc_domain import (CORE_WINDOWS, daily_channel_presence,
                                  daily_core_facts_by_platform)
 from .metric_calc_domain import PLATFORM_WINDOWS as D_PLATFORM_WINDOWS
 from .normalize import (build_comment_facts, build_dimension_facts, build_keyword_facts)
-from .pusher import PushReport, push_all
+from .pusher import PushReport, cleanup_pushed_csv, push_all
 from .settings import EtlSettings
 from .source import fetch_comments, fetch_works
 from .validate import validate_all
@@ -255,6 +255,12 @@ def run(settings: EtlSettings,
     if getattr(settings, "push_enabled", False):
         res.push = push_all(res.tables, settings=settings, progress_factory=push_progress)
         res.notes.extend(res.push.notes())
+        # 推送成功的表不在本地留 CSV（数据会越积越大）；推失败的留着补推
+        if (settings.write_csv and getattr(settings, "push_cleanup_local", True)
+                and not getattr(settings, "push_dry_run", False)):
+            removed = cleanup_pushed_csv(settings.output_dir, res.push.results)
+            if removed:
+                res.notes.append(f"推送成功，已删除本地 CSV {len(removed)} 个（{settings.output_dir}）")
         if not res.push.ok:
             if getattr(settings, "push_strict", False):
                 res.errors.extend(res.push.errors)

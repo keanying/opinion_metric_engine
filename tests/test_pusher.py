@@ -716,3 +716,17 @@ def test_null_pk_is_sent_with_a_warning_but_empty_string_is_fine(server, tmp_pat
     df.loc[0, "dimension_level3"] = None
     res = push_table(dim, df, settings=_settings(srv, output_dir=str(tmp_path)))
     assert res.ok and "为空" in res.warning and len(rec.requests) == 2
+
+
+def test_cleanup_pushed_csv_only_removes_successful_tables(tmp_path):
+    from engin_cli.pusher import PushResult, cleanup_pushed_csv
+    for t in (CORE, PLATFORM, "skipped_table"):
+        (tmp_path / f"{t}.csv").write_text("a\n1\n", encoding="utf-8")
+    removed = cleanup_pushed_csv(str(tmp_path), [
+        PushResult(table=CORE, rows=1, batches=1),
+        PushResult(table=PLATFORM, failed_batches=1, error="第 1 批失败"),
+        PushResult(table="skipped_table", skipped=True)])
+    assert removed == [str(tmp_path / f"{CORE}.csv")]
+    assert not (tmp_path / f"{CORE}.csv").exists()
+    assert (tmp_path / f"{PLATFORM}.csv").exists()          # 推失败的留着补推
+    assert (tmp_path / "skipped_table.csv").exists()

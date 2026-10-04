@@ -119,6 +119,11 @@ class EtlSettings:
     push_retry_backoff: float = 1.0          # 重试退避基数，第 n 次等 backoff×2^n 秒
     push_dry_run: bool = False               # 只组报文不真发，用来验证配置
     push_strict: bool = False                # True: 推送失败也让跑批退出码非 0
+    # 推送成功后删掉本地 CSV（output/<景区>/<表>.csv），本地不留存，免得越积越大。
+    # 只删**推送成功**的表；推失败的表 CSV 留着，修好后用 push 补推。
+    # push 补推成功后同样删掉推过的行（按景区 / 日期过滤补推时，没推的行留在文件里）。
+    # 想留着本地 CSV：设 False，或命令行加 --keep-local。
+    push_cleanup_local: bool = True
     # 网关把业务失败放在响应体里：HTTP 200 + {"status": false, "code": ..., "msg": ...}。
     # 响应体是 JSON 且带 push_success_field 时，它为假就算推送失败（不重试，报文/鉴权问题）。
     # 响应体不是 JSON、或没有这个字段 → 只看 HTTP 状态码。设成 "" 关闭这项检查。
