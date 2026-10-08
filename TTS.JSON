@@ -1,0 +1,44 @@
+{
+  "tableName": "ads_trf_social_opinion_drill_analysis_di",
+  "pkId": [
+    "scenic_id",
+    "emotion_word",
+    "emotion_type",
+    "platform_code",
+    "work_id",
+    "comment_id",
+    "publish_time",
+    "travel_date"
+  ],
+  "data": [
+    {
+      "scenic_id": "PFTSCE01001721",
+      "scenic_name": "八大处公园",
+      "emotion_word": "5块钱",
+      "emotion_type": "neutral",
+      "word_source": "keyword",
+      "platform_code": "xiaohongshu",
+      "platform_name": "小红书",
+      "work_id": "6ac57f600000000015017187",
+      "work_url": "https://www.xiaohongshu.com/explore/6ac57f600000000015017187?xsec_token=ABNiQ5f9xMZkarhjeLdGkz83wllCecpkPsnPhxlEYEfME=&xsec_source=pc_search",
+      "work_title": "#外地人[话题]#初游北海公园避坑\n上午去了八大处公园，（图1:灵光寺灵佛牙琉璃塔）爬到山顶做滑车下山，排队2小时（赶时间的可以做索道下山不用等），赶到北湖公园北门入园时间15:40，购票处告知进门左走先看白塔（这就是大坑，应先走右边），白塔确实值得一看，没找到游船码头，17:10分重新倒回北门，右边不到500米就是九龙壁、西天梵净赶到时已经闭馆，没有看到最出名的琉璃阁（千佛琉璃壁全国仅2处原物遗存）和金丝楠木大殿，文创店10月新开放限定（首次开放）纪念票也没买到，实在是太遗憾！",
+      "author_name": "豆豆",
+      "comment_id": "6ac60ce3000000000702635a",
+      "root_comment_id": "6ac58a850000000011036412",
+      "comment_level": "level_2",
+      "commenter_name": "谁都不是卷卷~",
+      "content_snippet": "**坐摆渡船**5块钱",
+      "likes": 0,
+      "sentiment_score": 0,
+      "dimension_level1": "",
+      "dimension_level2": "",
+      "dimension_level3": "",
+      "region": "北京",
+      "entity_tags": "[{\"type\":\"地理位置\",\"value\":\"出入口\"},{\"type\":\"设施设备\",\"value\":\"游玩设施\"}]",
+      "publish_time": "2026-10-08 17:12:03",
+      "travel_date": 20261008,
+      "etl_time": "2026-10-08 03:48:47",
+      "detail_uk": "5d9bb3380b4871a6c91d0d1c583c530b"
+    }
+  ]
+}
