@@ -17,8 +17,8 @@ create table if not exists ads_trf_social_opinion_drill_analysis_di
     emotion_type     varchar(32)                              null comment '词的情感归属(positive/neutral/negative)，取自所属评论的 sentiment_score',
     word_source      varchar(32)     default 'keyword'        null comment '词来源：keyword=关键词数组',
 
-    platform_code    varchar(64)                              null comment '平台编码(=src.channel)',
-    platform_name    varchar(64)                              null comment '平台名称',
+    channel          varchar(64)                              null comment '平台编码(=src.channel)',
+    channel_name     varchar(64)                              null comment '平台名称',
 
     work_id          varchar(600)                             null comment '作品/帖子/笔记ID',
     work_url         varchar(600)    default ''               null comment '作品链接，前端跳转用',

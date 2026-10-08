@@ -143,7 +143,7 @@ def test_copied_detail_carries_sentiment_and_words(three_day_gap):
 def test_drill_includes_copied_comments(three_day_gap):
     """下钻表也包含复制来的评论（业务确认「包含」）：publish_time 挪到这一天，主键不撞。"""
     dr = three_day_gap.tables[DRILL]
-    ks = dr[dr.platform_code == "kuaishou"]
+    ks = dr[dr.channel == "kuaishou"]
     assert sorted(ks.travel_date.unique()) == [20260911, 20260912, 20260913]
     assert (ks.groupby("travel_date").size() == 3).all()
     day = ks[ks.travel_date == 20260912]

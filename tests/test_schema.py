@@ -103,6 +103,12 @@ def test_drill_uses_scenic_id_not_scenic_spot_code():
         assert "scenic_id" not in cols
 
 
+def test_drill_uses_channel_not_platform_code():
+    """客户改表（2026-10）：下钻表的渠道列叫 channel / channel_name，不再是 platform_code / platform_name。"""
+    assert {"channel", "channel_name"} <= set(DRILL_COLS)
+    assert not [c for c in DRILL_COLS if c.startswith("platform_")]
+
+
 def test_loader_knows_each_table_s_scenic_column():
     """delete+insert 的 WHERE 用的列名要按表取，写死一个名字会报 Unknown column。"""
     from engin_cli import loader as L

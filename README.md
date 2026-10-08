@@ -651,17 +651,19 @@ python -m engin_cli.cli repair --tables core --start-date 20260101 --end-date 20
 一行 = 一个词 × 一条评论。命中 3 个词的评论就有 3 行。带 `work_url`，前端直接跳转。
 查询见 `sql/queries.sql` 最后两段（点词看评论 / 点作品反查词）。
 
-> ⚠ **这张表的景区列名跟另外四张不一样**：
+> ⚠ **这张表的景区列名、渠道列名跟另外四张不一样**：
 >
-> | | 景区编号 | 景区名称 |
-> |---|---|---|
-> | 下钻表 | `scenic_id` | `scenic_name` |
-> | 其余四张 ADS 表 | `scenic_spot_code` | `scenic_spot_name` |
+> | | 景区编号 | 景区名称 | 渠道编码 | 渠道名称 |
+> |---|---|---|---|---|
+> | 下钻表 | `scenic_id` | `scenic_name` | `channel` | `channel_name` |
+> | 其余四张 ADS 表 | `scenic_spot_code` | `scenic_spot_name` | `platform_code` | `platform_name` |
 >
 > 下钻表跟源表 `src_opinion_social_work_di` 同名，关联作品表时少一次改名。
+> 渠道列是客户 2026-10 改的表：已经建好的表执行一次 `sql/alter_drill_analysis_channel.sql`
+> （只改列名，数据保留），下游推送目标表同样要改；`push_pk` 里下钻表写了 `platform_code` 的要换成 `channel`。
 > 引擎内部（`comment_facts` 等）统一用 `scenic_spot_code`，**只在这张表的输出边界改名**，
 > 免得为了一张表把整条链路都动一遍。两张表关联时记得对齐这两个列名。
-> `tests/test_schema.py` 把这个差异钉死了：下钻表里不许出现 `scenic_spot_*`，
+> `tests/test_schema.py` 把这个差异钉死了：下钻表里不许出现 `scenic_spot_*` / `platform_*`，
 > 另外四张里不许出现裸的 `scenic_id`。
 
 缺数回补（业务确认「包含」）：某渠道在输出日期当天没评论 → 复制往前最近一天（当日档，最多找 5 天）

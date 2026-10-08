@@ -44,15 +44,15 @@ from .metric_calc_domain import (DRILL_MASK_SCOPE_WORD, SENTIMENT_TYPE,
 from .normalize import parse_json_array
 from .windows import fill_source_dates
 
-# ⚠ 这张表的景区字段跟另外四张 ADS 表**不一样**：
-#   下钻表    scenic_id / scenic_name       （与源表 src_opinion_social_work_di 同名）
-#   其余四张  scenic_spot_code / scenic_spot_name
+# ⚠ 这张表的景区 / 渠道字段跟另外四张 ADS 表**不一样**：
+#   下钻表    scenic_id / scenic_name、channel / channel_name   （与源表同名，客户 2026-10 改表）
+#   其余四张  scenic_spot_code / scenic_spot_name、platform_code / platform_name
 # 内部管线（comment_facts 等）统一用 scenic_spot_code，只在这张表的**输出边界**改名，
 # 免得为了一张表把整条链路的列名都动一遍。
 # tests/test_schema.py 会拿这份清单跟 sql/ads_drill_analysis_ddl.sql 逐列对拍。
 COLUMNS: List[str] = [
     "scenic_id", "scenic_name", "emotion_word", "emotion_type", "word_source",
-    "platform_code", "platform_name",
+    "channel", "channel_name",
     "work_id", "work_url", "work_title", "author_name",
     "comment_id", "root_comment_id", "comment_level", "commenter_name",
     "content_snippet", "likes", "sentiment_score",
@@ -140,8 +140,8 @@ def build_drill_analysis(comment_facts: pd.DataFrame, works: pd.DataFrame,
                 "emotion_word": word,
                 "emotion_type": etype,
                 "word_source": "keyword",
-                "platform_code": r.platform_code,
-                "platform_name": r.platform_name,
+                "channel": r.platform_code,
+                "channel_name": r.platform_name,
                 "work_id": work_id,
                 "comment_id": comment_id,
                 "root_comment_id": str(getattr(r, "root_comment_id", "") or ""),
@@ -171,14 +171,14 @@ def build_drill_analysis(comment_facts: pd.DataFrame, works: pd.DataFrame,
     # 作品信息：拿 work_url 才能跳转，拿不到就留空，不要因为缺作品行丢掉评论
     if works is not None and not works.empty:
         # 源表 src_opinion_social_work_di 本来就叫 scenic_id，改名之后这里少一次 rename
-        w = works.rename(columns={"channel": "platform_code",
-                                  "title": "work_title"})[
-            ["scenic_id", "platform_code", "work_id", "work_url",
+        # 作品表的渠道列本来就叫 channel，跟这张表同名，直接关联
+        w = works.rename(columns={"title": "work_title"})[
+            ["scenic_id", "channel", "work_id", "work_url",
              "work_title", "author_name"]].copy()
-        for c in ("scenic_id", "platform_code", "work_id"):
+        for c in ("scenic_id", "channel", "work_id"):
             w[c] = w[c].astype(str)
-        w = w.drop_duplicates(subset=["scenic_id", "platform_code", "work_id"])
-        out = out.merge(w, on=["scenic_id", "platform_code", "work_id"], how="left")
+        w = w.drop_duplicates(subset=["scenic_id", "channel", "work_id"])
+        out = out.merge(w, on=["scenic_id", "channel", "work_id"], how="left")
     for c in ("work_url", "work_title", "author_name"):
         if c not in out.columns:
             out[c] = ""

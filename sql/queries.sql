@@ -104,7 +104,7 @@ limit 10;
 -- ============================================================
 -- §5.2 点词下钻：列出命中该词的评论，再点评论跳作品
 -- ============================================================
-select emotion_word, platform_name, commenter_name, content_snippet,
+select emotion_word, channel_name, commenter_name, content_snippet,
        likes, sentiment_score, publish_time,
        work_title, work_url            -- 前端跳转就用 work_url
 from ads_trf_social_opinion_drill_analysis_di
