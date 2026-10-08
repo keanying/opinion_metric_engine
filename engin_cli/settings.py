@@ -196,6 +196,13 @@ class EtlSettings:
         return asdict(self)
 
 
+def _warn_local_settings(e: BaseException) -> None:
+    """settings_local.py 存在但导入失败：打印原因（不打印文件内容，里面有密码）。"""
+    import sys
+    print(f"⚠ settings_local.py 读取失败，本次按默认配置运行：{type(e).__name__}: {e}",
+          file=sys.stderr, flush=True)
+
+
 def load_settings() -> EtlSettings:
     """加载配置：默认值 → settings_local.py → 环境变量。"""
     s = EtlSettings()
@@ -207,7 +214,14 @@ def load_settings() -> EtlSettings:
     if not _env("OPINION_IGNORE_LOCAL_SETTINGS", False, bool):
         try:
             import settings_local  # type: ignore
-        except Exception:
+        except ModuleNotFoundError as e:
+            if e.name != "settings_local":
+                _warn_local_settings(e)
+            settings_local = None
+        except Exception as e:           # noqa: BLE001
+            # 文件有语法错误等：不能悄悄退回默认值（默认连 localhost、不推送），
+            # 那样看起来像「配置没生效」，很难查。打出来，再按默认值继续。
+            _warn_local_settings(e)
             settings_local = None
 
     if settings_local is not None:
