@@ -568,6 +568,11 @@ WHERE scenic_id = 'PFTSCE01001721' AND travel_date = 20261009   -- 分渠道再�
 GROUP BY region ORDER BY cnt DESC;
 ```
 
+⚠ **不要写 `publish_time = '20261009'`**：下钻表 `publish_time` 是 datetime，MySQL 会把它当成
+`2026-10-09 00:00:00` 精确匹配，只能查到补进来的评论（补数统一记零点），当天真实采集的评论
+（带具体时分秒）全部漏掉，数就比大盘表少。按天查用 `travel_date = 20261009`，
+或者 `publish_time >= '2026-10-09' AND publish_time < '2026-10-10'`。
+
 老数据里 `region` 为空的行要用 `repair` 重跑后才会变成 `未知`。
 
 #### 得分权重可配置
