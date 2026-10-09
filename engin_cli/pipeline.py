@@ -205,6 +205,13 @@ def run(settings: EtlSettings,
     if macro is not None:
         checks["macro"] = macro
         checks["macro_granularities"] = [g["name"] for g in ctx.macro_granularities]
+        # 下钻表 ↔ 大盘表「当日」周期对账（rolling 1 天、不偏移的那个周期，默认 td）
+        day = [g["name"] for g in ctx.macro_granularities
+               if g["type"] == "rolling" and int(g.get("days", 0)) == 1
+               and not int(g.get("offset") or 0)]
+        if day and TABLE_DRILL_ANALYSIS in res.tables:
+            checks["drill"] = res.tables[TABLE_DRILL_ANALYSIS]
+            checks["macro_day_granularity"] = day[0]
     res.errors = validate_all(checks)
 
     # 回补可见化：输出日期里有多少「景区·渠道·日」是复制来的明细

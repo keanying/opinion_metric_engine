@@ -196,6 +196,40 @@ def validate_content(content: pd.DataFrame, core: pd.DataFrame) -> List[str]:
     return errs
 
 
+def validate_drill(drill: pd.DataFrame, macro: pd.DataFrame, day_granularity: str) -> List[str]:
+    """下钻表与大盘表对账（客户要求）：某天某渠道，下钻表按评论去重的条数
+    == 大盘表当日周期（td）该渠道的 comment_total；各渠道合计 == all 行。
+
+    评论按 (渠道, 作品, comment_id) 去重 —— comment_id 只在同一作品内唯一。
+    """
+    errs: List[str] = []
+    if drill is None or macro is None or macro.empty or not day_granularity:
+        return errs
+    m = macro[macro["time_granularity"] == day_granularity]
+    if m.empty:
+        return errs
+    d = (drill.drop_duplicates(["scenic_id", "travel_date", "channel", "work_id", "comment_id"])
+         .groupby(["scenic_id", "travel_date", "channel"]).size().rename("drill_cnt"))
+    d_all = d.groupby(level=[0, 1]).sum()
+    want = m.set_index(["scenic_id", "travel_date", "channel"])["comment_total"]
+    want = want.astype("int64")
+    want_ch = want[want.index.get_level_values(2) != "all"]
+    want_all = want[want.index.get_level_values(2) == "all"].droplevel(2)
+
+    j = pd.concat([want_ch, d], axis=1).fillna(0).astype("int64")
+    bad = j[j["comment_total"] != j["drill_cnt"]]
+    _fail(errs, bad.empty,
+          f"drill: 下钻表评论数 != 大盘表 {day_granularity} 的渠道 comment_total，{len(bad)} 处"
+          + (f"（例如 {bad.index[0]}：下钻 {bad.iloc[0].drill_cnt} vs 大盘 {bad.iloc[0].comment_total}）"
+             if not bad.empty else ""))
+    j = pd.concat([want_all.rename("comment_total"), d_all.rename("drill_cnt")],
+                  axis=1).fillna(0).astype("int64")
+    bad = j[j["comment_total"] != j["drill_cnt"]]
+    _fail(errs, bad.empty,
+          f"drill: 下钻表评论数合计 != 大盘表 {day_granularity} 的 all 行 comment_total，{len(bad)} 处")
+    return errs
+
+
 def validate_all(tables: dict) -> List[str]:
     """tables 额外可带 "platform_codes"：本次跑批配置的渠道全集，用于行完整性断言。"""
     core = tables.get("core", pd.DataFrame())
@@ -207,6 +241,9 @@ def validate_all(tables: dict) -> List[str]:
                               tables.get("backfill_mode", BACKFILL_MODE_FILL))
     errs += validate_dimension(tables.get("dimension", pd.DataFrame()))
     errs += validate_content(tables.get("content", pd.DataFrame()), core)
+    if "macro" in tables and "drill" in tables:
+        errs += validate_drill(tables["drill"], tables["macro"],
+                               tables.get("macro_day_granularity", ""))
     if "macro" in tables:
         errs += validate_macro(tables["macro"], core, tables.get("platform_codes"),
                                tables.get("macro_granularities"), formula)

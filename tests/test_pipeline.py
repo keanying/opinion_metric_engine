@@ -111,6 +111,8 @@ def test_drill_analysis_words_exist_in_content_table(result):
     """
     c = result.tables["ads_trf_social_opinion_comment_content_di"]
     d = result.tables["ads_trf_social_opinion_drill_analysis_di"]
+    # 没有关键词的评论那一行（空词，word_source=none）只为对账评论数，不是词
+    d = d[d.word_source == "keyword"]
     left = (d[["scenic_id", "travel_date", "emotion_word"]]
             .rename(columns={"scenic_id": "scenic_spot_code"}).drop_duplicates())
     right = c[["scenic_spot_code", "travel_date", "emotion_word"]].drop_duplicates()

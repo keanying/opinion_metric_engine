@@ -147,7 +147,8 @@ def test_drill_includes_copied_comments(three_day_gap):
     assert sorted(ks.travel_date.unique()) == [20260911, 20260912, 20260913]
     assert (ks.groupby("travel_date").size() == 3).all()
     day = ks[ks.travel_date == 20260912]
-    assert pd.to_datetime(day.publish_time).dt.strftime("%Y%m%d").eq("20260912").all()
+    # publish_time = 补到的那一天 00:00:00：不会是「未来」时刻，重跑也是同一个值
+    assert pd.to_datetime(day.publish_time).eq(pd.Timestamp("2026-09-12 00:00:00")).all()
     assert ks.detail_uk.is_unique
     assert set(ks.comment_id) == {"ks0", "ks1", "ks2"}
 
@@ -388,3 +389,29 @@ def test_core_sentiment_split_follows_the_backfilled_channel(multi_channel_case)
     core = multi_channel_case.tables[CORE]
     row = core[core.travel_date == 20260911].iloc[0]
     assert row.positive_count + row.neutral_count + row.negative_count == row.comment_count
+
+
+def test_drill_comment_count_equals_macro_day_total():
+    """客户要求：某天某渠道下钻表按评论去重的条数 == 大盘表 td 的 comment_total，合计 == all。
+    没有关键词的评论也要出一行（空词），否则数不到。"""
+    rows = []
+    for d in pd.date_range("2026-09-01", "2026-09-11"):
+        ds = d.strftime("%Y%m%d")
+        for i in range(4):
+            rows.append(_comment(ds, "douyin", f"dy{ds}{i}"))
+    no_kw = _comment("20260911", "douyin", "nokw")
+    no_kw["keyword_tags"] = "[]"
+    rows.append(no_kw)
+    rows += [_comment("20260910", "kuaishou", f"ks{i}") for i in range(3)]   # 11 号快手没有 → 补
+    r = run(_settings(), ["20260911"], comments_df=pd.DataFrame(rows))
+    assert r.errors == []                                   # 自检里就有这条对账
+    dr = r.tables[DRILL]
+    macro = r.tables["ads_trf_social_opinion_macro_gran_metric_di"]
+    td = macro[(macro.time_granularity == "td") & (macro.travel_date == 20260911)]
+    want = td.set_index("channel").comment_total
+    got = dr[dr.travel_date == 20260911].groupby("channel").comment_id.nunique()
+    assert got["douyin"] == want["douyin"] == 5             # 4 条有词 + 1 条没词
+    assert got["kuaishou"] == want["kuaishou"] == 3         # 复制 10 号的 3 条
+    assert got.sum() == want["all"] == 8
+    none = dr[dr.comment_id == "nokw"]
+    assert len(none) == 1 and none.emotion_word.iloc[0] == "" and none.word_source.iloc[0] == "none"

@@ -13,9 +13,15 @@
 --------------------------------------
 与指标表同一套「先补明细」：某渠道在输出日期当天一条评论都没有 → 复制往前最近一个
 有评论那天（当日档，最多找 5 天）的全部评论明细，作为这一天的下钻明细。
-复制出来的行：travel_date = 这一天；publish_time 挪到这一天（时分秒不变），
-这样「按 publish_time 先删后插」重跑时能删干净；detail_uk 带上这一天，不和原评论撞键。
-看板点内容表里补出来的词，也能列出对应的评论。
+复制出来的行：travel_date = 这一天；publish_time = 这一天 00:00:00（客户要求补进来的明细
+publish_time 用跑数那天）。不保留原评论的时分秒：上午跑批时 23:25 这种时刻还在「未来」，
+下游按「当天到现在」查会查不到；固定 00:00:00 也保证重跑得到同一个值（publish_time 在推送 pkId 里）。
+detail_uk 带上这一天，不和原评论撞键。看板点内容表里补出来的词，也能列出对应的评论。
+
+与大盘表对账（客户要求）：某天某渠道，下钻表按 comment_id 去重的评论数
+== 大盘表当日（td）该渠道的 comment_total；各渠道加起来 == all 行。
+所以**没有关键词的评论也出一行**（emotion_word 为空、word_source = none），
+否则这些评论在下钻表里数不到。看板点词查询按词过滤，碰不到这些行。
 
 `content_snippet` 掩码
 ---------------------
@@ -92,8 +98,6 @@ def build_drill_analysis(comment_facts: pd.DataFrame, works: pd.DataFrame,
     rows = []
     for r in df.itertuples(index=False):
         words = parse_json_array(getattr(r, "keyword_tags", None))
-        if not words:
-            continue
         etype = SENTIMENT_TYPE.get(int(r.sentiment), "neutral")
         # 维度只取第一条，作为「这条评论主要在说哪个维度」的定位信息；
         # 完整维度分布在维度表里，明细表不重复承载。
@@ -109,9 +113,10 @@ def build_drill_analysis(comment_facts: pd.DataFrame, works: pd.DataFrame,
         # 被截断切掉一半的关键词自然就匹配不上，跟着一起进掩码段，不会露出半个词。
         if mask_cfg is not None and by_word is None:
             snippet, hit = mask_content(snippet, words, **mask_cfg)
-            n_masked += 1
-            if hit == 0:
-                n_no_match += 1
+            if words:                    # 没有关键词的评论不算进「词没找到」的统计
+                n_masked += 1
+                if hit == 0:
+                    n_no_match += 1
         comment_id = str(getattr(r, "comment_id", "") or "")
         work_id = str(getattr(r, "work_id", "") or "")
         # 实体标签原样落 JSON 数组（解析一遍再序列化，单引号等脏写法顺手修掉）；没有就是 []
@@ -119,27 +124,30 @@ def build_drill_analysis(comment_facts: pd.DataFrame, works: pd.DataFrame,
                               ensure_ascii=False, separators=(",", ":"))
         region = str(getattr(r, "region", "") or "")
 
-        seen = set()
+        clean = []
         for w in words:
             if isinstance(w, dict):
                 w = w.get("word") or w.get("value") or w.get("keyword")
             word = str(w or "").strip()
-            if not word or word in seen:
-                continue
-            seen.add(word)
+            if word and word not in clean:
+                clean.append(word)
+        # 没有关键词的评论也出一行（空词），下钻表的评论数才能和大盘表 comment_total 对上
+        for word in clean or [""]:
             row_snippet = snippet
             if by_word is not None:
                 # scope="word"：每行只保留自己那一个词，所以要逐行掩码
-                row_snippet, hit = mask_content(content[:limit], [word], **mask_cfg)
-                n_masked += 1
-                if hit == 0:
-                    n_no_match += 1
+                row_snippet, hit = mask_content(content[:limit], [word] if word else [],
+                                                **mask_cfg)
+                if word:
+                    n_masked += 1
+                    if hit == 0:
+                        n_no_match += 1
             rows.append({
                 "scenic_id": r.scenic_spot_code,
                 "scenic_name": r.scenic_spot_name,
                 "emotion_word": word,
                 "emotion_type": etype,
-                "word_source": "keyword",
+                "word_source": "keyword" if word else "none",
                 "channel": r.platform_code,
                 "channel_name": r.platform_name,
                 "work_id": work_id,
@@ -205,7 +213,8 @@ def build_drill_analysis(comment_facts: pd.DataFrame, works: pd.DataFrame,
 def _filled_copies(comment_facts: pd.DataFrame, ctx: RunContext) -> pd.DataFrame:
     """输出日期上「渠道当天没评论」的那几天，复制往前最近一天的评论明细（domain §1.8）。
 
-    上限用当日档（1 日档）。复制行改 travel_date / publish_dt，带 fill_copy=True。
+    上限用当日档（1 日档）。复制行 travel_date = 这一天、publish_dt = 这一天 00:00:00，
+    带 fill_copy=True。
     """
     lb = ctx.backfill_lookback([1]).get(1, 0)
     if lb <= 0 or comment_facts.empty:
@@ -219,9 +228,8 @@ def _filled_copies(comment_facts: pd.DataFrame, ctx: RunContext) -> pd.DataFrame
     m = m.rename(columns={"travel_date": "_target"})[by + ["_target", "src_date"]]
     c = comment_facts.merge(m, left_on=by + ["travel_date"],
                             right_on=by + ["src_date"], how="inner")
-    gap = (pd.to_datetime(c["_target"], format="%Y%m%d")
-           - pd.to_datetime(c["src_date"], format="%Y%m%d"))
-    c["publish_dt"] = pd.to_datetime(c["publish_dt"]) + gap
+    # publish_time = 补到的那一天 00:00:00（见模块说明：不能是「未来」时刻，重跑要得到同一个值）
+    c["publish_dt"] = pd.to_datetime(c["_target"], format="%Y%m%d")
     c["travel_date"] = c["_target"]
     return c.drop(columns=["_target", "src_date"]).assign(fill_copy=True)
 

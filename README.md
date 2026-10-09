@@ -667,9 +667,14 @@ python -m engin_cli.cli repair --tables core --start-date 20260101 --end-date 20
 > 另外四张里不许出现裸的 `scenic_id`。
 
 缺数回补（业务确认「包含」）：某渠道在输出日期当天没评论 → 复制往前最近一天（当日档，最多找 5 天）
-那个渠道的全部评论，作为这一天的下钻明细。复制行的 `travel_date` = 这一天，`publish_time`
-挪到这一天（时分秒不变，这样按 `publish_time` 先删后插重跑能删干净），`detail_uk` 带上这一天，
-不和原评论撞键。看板点内容表里补出来的词，也能列出对应的评论。按 `travel_date` 幂等重写当期即可。词表大时可以开 `content_top_words`
+那个渠道的全部评论，作为这一天的下钻明细。复制行的 `travel_date` = 这一天，`publish_time` =
+这一天 00:00:00（客户要求用跑数日期；不保留原评论的时分秒，否则上午跑批时 23:25 这种时刻还在「未来」，
+下游按「当天到现在」查会查不到；固定值也保证重跑一致，`publish_time` 在推送 pkId 里），
+`detail_uk` 带上这一天，不和原评论撞键。
+
+与大盘表对账（客户要求，自检里卡死）：某天某渠道，下钻表按评论去重的条数 == 大盘表当日周期（`td`）
+该渠道的 `comment_total`，各渠道合计 == `all` 行。所以**没有关键词的评论也出一行**
+（`emotion_word` 为空、`word_source = none`），看板点词查询按词过滤，碰不到这些行。看板点内容表里补出来的词，也能列出对应的评论。按 `travel_date` 幂等重写当期即可。词表大时可以开 `content_top_words`
 只保留每日 TopN 的词，明细表跟着一起瘦身。
 
 ### `content_snippet` 掩码（domain 第 9 章）
