@@ -305,16 +305,18 @@ def test_compute_and_push_without_writing_tables(sample, tmp_path, gateway):
     assert set(gateway.store) == {CORE, PLATFORM, DIMENSION, CONTENT, DRILL, MACRO}
 
 
-def test_write_db_false_in_settings_is_not_overridden_by_the_cli(monkeypatch):
-    """settings_local.py 里 write_db=False（不写表）时，命令行不加 --skip-db 也不能偷偷写库。"""
+@pytest.mark.parametrize("extra,want", [([], True), (["--skip-db"], False)])
+def test_run_writes_db_unless_skip_db(monkeypatch, extra, want):
+    """不加 --skip-db 就一定写库（客户要求），哪怕 settings_local.py 里写了 write_db=False；
+    加了 --skip-db 就不写。"""
     captured = {}
     monkeypatch.setattr(cli, "load_settings", lambda: _settings_no_db())
     monkeypatch.setattr(cli, "MySQL", lambda cfg: _NoDB())
     monkeypatch.setattr(cli, "_run_one_scenic",
                         lambda st, sc, *a, **k: (captured.update(write_db=st.write_db) or (True, "")))
     monkeypatch.setattr("engin_cli.source.list_scenic_codes", lambda db, lo, hi: ["S1"])
-    assert cli.main(["run", "--date", "20260911"]) == 0
-    assert captured["write_db"] is False
+    assert cli.main(["run", "--date", "20260911", *extra]) == 0
+    assert captured["write_db"] is want
 
 
 def _settings_no_db():

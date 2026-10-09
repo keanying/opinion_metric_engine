@@ -141,9 +141,9 @@ def cmd_run(args) -> int:
         st.lookback_days = int(args.lookback_days)
     if args.output_dir:
         st.output_dir = args.output_dir
-    # 命令行只能「关掉」写库/写 CSV，不能把配置里关掉的重新打开：
-    # settings_local.py 里写了 "write_db": False（只算 + 推送、不写表），就一直不写表。
-    st.write_db = bool(st.write_db) and not args.skip_db
+    # 写不写库只看命令行：不加 --skip-db 就一定写库（客户要求），
+    # settings_local.py 里的 "write_db" 对 run 命令不起作用，免得配置里关了却以为写进去了。
+    st.write_db = not args.skip_db
     st.write_csv = bool(st.write_csv) and not args.skip_csv
     st.dry_run = bool(args.dry_run)
     if args.no_backfill:
@@ -677,7 +677,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--lookback-days", type=int, help="取数回溯天数，默认 180（近半年）")
     r.add_argument("--output-dir", help="CSV 输出目录")
     r.add_argument("--skip-db", action="store_true",
-                   help="不写 ADS 表（照常从源表读数、计算、推送）；配置里 write_db=False 效果相同")
+                   help="不写 ADS 表（照常从源表读数、计算、推送）。不加就一定写库")
     r.add_argument("--skip-csv", action="store_true", help="不出 CSV")
     r.add_argument("--dry-run", action="store_true", help="连库但不真正写入")
     r.add_argument("--no-backfill", action="store_true",
