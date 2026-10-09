@@ -45,7 +45,7 @@ from typing import List
 import pandas as pd
 
 from .context import RunContext
-from .metric_calc_domain import (DRILL_MASK_SCOPE_WORD, SENTIMENT_TYPE,
+from .metric_calc_domain import (DRILL_MASK_SCOPE_WORD, REGION_UNKNOWN, SENTIMENT_TYPE,
                                  daily_channel_presence, mask_content)
 from .normalize import parse_json_array
 from .windows import fill_source_dates
@@ -122,7 +122,8 @@ def build_drill_analysis(comment_facts: pd.DataFrame, works: pd.DataFrame,
         # 实体标签原样落 JSON 数组（解析一遍再序列化，单引号等脏写法顺手修掉）；没有就是 []
         entities = json.dumps(parse_json_array(getattr(r, "entity_tags", None)),
                               ensure_ascii=False, separators=(",", ":"))
-        region = str(getattr(r, "region", "") or "")
+        # 与大盘热力图同口径：没地域记「未知」
+        region = str(getattr(r, "region", "") or "") or REGION_UNKNOWN
 
         clean = []
         for w in words:

@@ -353,7 +353,10 @@ MACRO_WORD_GROUP_KEY = {POSITIVE: "positiveWord", NEUTRAL: "neutralWord",
 # 来源是评论表的 `location`（发布地址）。各平台写法不统一：
 #   「IP属地：广东」「广东」「广东省」「四川成都」「北京市」「美国」「」
 # 统一归一到**省级简称**（与需求样例 {"region":"北京"} 一致）；
-# 认不出省份的（境外、只写了城市名）保留清洗后的原文；空值不进热力图。
+# 认不出省份的（境外、只写了城市名）保留清洗后的原文。
+# 空值（没写、「未知」「null」等）统一归到「未知」，热力图和下钻表 region 都用这个值：
+#   热力图各地域 heat 合计 = 同口径 comment_total = 下钻表 comment_id 去重数，
+#   下钻表按 region='未知' 也能搜到这些评论，两边对得上。
 PROVINCE_SHORT_NAMES = [
     "北京", "天津", "上海", "重庆", "河北", "山西", "辽宁", "吉林", "黑龙江",
     "江苏", "浙江", "安徽", "福建", "江西", "山东", "河南", "湖北", "湖南",
@@ -362,6 +365,7 @@ PROVINCE_SHORT_NAMES = [
 ]
 REGION_PREFIXES = ("IP属地", "ip属地", "IP 属地", "发布于", "来自")
 REGION_EMPTY_VALUES = {"", "未知", "unknown", "null", "none", "nan", "-"}
+REGION_UNKNOWN = "未知"
 REGION_MAX_LEN = 64
 
 DATE_FMT = "%Y%m%d"
@@ -1458,10 +1462,10 @@ def normalize_region(raw: Any) -> str:
 
     入参：源表 location 原文
     出参：省级简称（「IP属地：广东」→「广东」、「四川成都」→「四川」）；
-          认不出省份的保留清洗后的原文（「美国」）；空值 → ""
+          认不出省份的保留清洗后的原文（「美国」）；空值 → REGION_UNKNOWN（「未知」）
     """
     if raw is None or (isinstance(raw, float) and np.isnan(raw)):
-        return ""
+        return REGION_UNKNOWN
     s = str(raw).strip()
     for p in REGION_PREFIXES:
         if s.startswith(p):
@@ -1471,7 +1475,7 @@ def normalize_region(raw: Any) -> str:
     if s.startswith("中国") and len(s) > 2:
         s = s[2:].strip()
     if s.lower() in REGION_EMPTY_VALUES:
-        return ""
+        return REGION_UNKNOWN
     for name in _PROVINCES_LONGEST_FIRST:
         if s.startswith(name):
             return name
@@ -1599,7 +1603,8 @@ def macro_heatmap(regions, counts) -> str:
     公式：heat = 本期来自该地域的评论数（地域归一见 normalize_region / §1.11）
     入参：regions / counts 等长数组
     出参：JSON 数组字符串 [{"region":"北京","heat":12}, ...]，按 heat 降序、地域名升序；
-          空地域与 0 计数不输出
+          0 计数不输出。没地域的评论已在归一时记为「未知」，照常输出，
+          所以 heat 合计 = 同口径 comment_total
     """
     regions = np.asarray(regions, dtype=object).astype(str)
     counts = np.asarray(counts, dtype="float64")

@@ -550,10 +550,25 @@ macro td 的 all 行 comment_total   == core.comment_count
 | `*_comment_rate` | 该类计数 × 100 / 本期总评数 |
 | `dimension_breakdown` | 6 个一级维度**全量、固定顺序**，本期与上期得分；没有提及的维度取 5 × 中评权重（默认 4.5，同综合得分的约定） |
 | `wordcloud_map` | 好/中/差各 Top 30（`macro_wordcloud_top_n`），rate = 该词次数 × 100 / **周期内全部关键词次数**（三组合计）；同一个词可同时出现在两组；同一条评论里同词只算一次。组内按本期次数降序；**次数并列时按近期热度**（该词在本景区近 90 天、截至当天的真实出现次数，不分渠道和情感）降序，再并列按词排序 —— 单日样本少、大量词只出现 1 次时，前 30 挑的是常见说法，不是按字符顺序随机截断 |
-| `period_comment_heatmap` | 本期评论按地域计数，按 heat 降序 |
+| `period_comment_heatmap` | 本期评论按地域计数，按 heat 降序；heat 合计 = 同行 `comment_total` |
 
 **地域**来自评论表 `location`，归一到省级简称（`IP属地：广东` → `广东`、`四川成都` → `四川`、
-`北京市` → `北京`），认不出省份的保留原文（`美国`），空值不进热力图（domain §1.11）。
+`北京市` → `北京`），认不出省份的保留原文（`美国`），**没写地域的记 `未知`**（domain §1.11）。
+热力图和下钻表 `region` 用同一个值，所以对得上：
+
+- 热力图 heat 合计 = 同口径 `comment_total` = 下钻表当天 `comment_id` 去重数（全渠道、分渠道都成立）；
+- 按地域逐个对：某地域 heat = 下钻表 `region` = 该地域的 `comment_id` 去重数，`未知` 也能搜到。
+
+核对 SQL（下钻表一定要带 `travel_date`，否则会把所有日期的评论都算进去）：
+
+```sql
+SELECT region, COUNT(DISTINCT channel, work_id, comment_id) AS cnt
+FROM ads_trf_social_opinion_drill_analysis_di
+WHERE scenic_id = 'PFTSCE01001721' AND travel_date = 20261009   -- 分渠道再加 AND channel = 'weibo'
+GROUP BY region ORDER BY cnt DESC;
+```
+
+老数据里 `region` 为空的行要用 `repair` 重跑后才会变成 `未知`。
 
 #### 得分权重可配置
 

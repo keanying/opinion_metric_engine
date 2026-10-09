@@ -323,4 +323,12 @@ def validate_macro(macro: pd.DataFrame, core: pd.DataFrame,
             macro[c].map(json.loads)
         except Exception as e:                      # noqa: BLE001
             errs.append(f"macro: {c} 不是合法 JSON（{e}）")
+    # 热力图 heat 合计 == comment_total（没地域的记「未知」，一条都不能漏）
+    try:
+        heat = macro["period_comment_heatmap"].map(
+            lambda v: sum(x["heat"] for x in json.loads(v)))
+        bad = int((heat != macro["comment_total"]).sum())
+        _fail(errs, bad == 0, f"macro: 热力图 heat 合计 != comment_total，{bad} 行")
+    except Exception:                               # noqa: BLE001  JSON 错误上面已报
+        pass
     return errs

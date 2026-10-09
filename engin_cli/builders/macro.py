@@ -235,8 +235,10 @@ def build_macro(comment_facts: pd.DataFrame, dim_facts: pd.DataFrame,
     comments = _RangeSum(_daily(c, "_sent", base), "_sent", len(_SENT_ORDER))
 
     if "region" not in cf.columns:
-        cf = cf.assign(region="")
-    regions = sorted(r for r in cf["region"].dropna().unique() if r)
+        cf = cf.assign(region=D.REGION_UNKNOWN)
+    # 没地域的评论也要算进热力图（记「未知」），heat 合计才等于 comment_total
+    cf = cf.assign(region=cf["region"].fillna("").replace("", D.REGION_UNKNOWN))
+    regions = sorted(cf["region"].unique())
     r_idx = {r: i for i, r in enumerate(regions)}
     rc = cf[cf["region"].isin(r_idx)]
     rc = rc.assign(_reg=rc["region"].map(r_idx))

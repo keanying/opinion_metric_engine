@@ -219,7 +219,7 @@ def test_percent_formulas_and_zero_denominators():
     ("IP属地：广东", "广东"), ("IP属地:湖北", "湖北"), ("广东省深圳市", "广东"),
     ("四川成都", "四川"), ("北京市", "北京"), ("黑龙江哈尔滨", "黑龙江"),
     ("广西壮族自治区", "广西"), ("中国 上海", "上海"), ("美国", "美国"),
-    ("", ""), (None, ""), ("未知", ""), (float("nan"), ""),
+    ("", "未知"), (None, "未知"), ("未知", "未知"), (" null ", "未知"), (float("nan"), "未知"),
 ])
 def test_normalize_region(raw, want):
     assert D.normalize_region(raw) == want
@@ -386,11 +386,32 @@ def test_heatmap_uses_normalized_regions(macro, facts):
     hm = json.loads(r.period_comment_heatmap)
     regions = [x["region"] for x in hm]
     assert "广东" in regions and not any("IP属地" in x or "省" in x for x in regions)
-    assert "" not in regions
+    assert "" not in regions and "未知" in regions       # 样例里有空 location
     heats = [x["heat"] for x in hm]
     assert heats == sorted(heats, reverse=True)
     f = _filled(facts, facts, sc, "20260911", END, 10)
     assert dict((x["region"], x["heat"]) for x in hm)["广东"] == int((f.region == "广东").sum())
+
+
+def test_heatmap_total_equals_comment_total_and_drill(result):
+    """客户口径：热力图 heat 合计 = comment_total = 下钻表 comment_id 去重数；
+    按地域逐个对，heat = 下钻表该 region 的 comment_id 去重数（没地域的都在「未知」）。"""
+    macro, drill = result.tables[MACRO], result.tables[DRILL]
+    td = macro[macro.time_granularity == "td"]
+    assert len(td) > 0
+    checked = 0
+    for r in td.itertuples():
+        hm = json.loads(r.period_comment_heatmap)
+        assert sum(x["heat"] for x in hm) == r.comment_total, (r.scenic_id, r.travel_date, r.channel)
+        d = drill[(drill.scenic_id == r.scenic_id) & (drill.travel_date == r.travel_date)]
+        if r.channel != "all":
+            d = d[d.channel == r.channel]
+        got = (d.drop_duplicates(["channel", "work_id", "comment_id"])
+               .groupby("region").size().to_dict())
+        assert got == {x["region"]: x["heat"] for x in hm}, (r.scenic_id, r.travel_date, r.channel)
+        checked += 1
+    assert checked > 0
+    assert "" not in set(drill.region)
 
 
 # ══════════════════════════════════════════════════════════════════
