@@ -346,6 +346,23 @@ def test_dimension_breakdown(macro, sample):
     assert got == pytest.approx(float(want), abs=1e-6)
 
 
+def test_wordcloud_ties_are_broken_by_recent_heat():
+    """本期次数并列时按近期热度排先后（决定谁进前 N），不是按字符顺序截断。"""
+    words = ["啊词", "环境优美", "空气清新", "冷门说法"]
+    sents = [D.POSITIVE] * 4
+    counts = [1, 1, 1, 1]                      # 本期都只出现 1 次
+    heat = [1, 40, 25, 1]                      # 近 90 天：环境优美、空气清新常见
+    wc = json.loads(D.macro_wordcloud(words, sents, counts, top_n=2, heat=heat))
+    assert [x["word"] for x in wc["positiveWord"]] == ["环境优美", "空气清新"]
+    assert all(x["rate"] == 25.0 for x in wc["positiveWord"])      # 占比不受影响
+    # 本期次数仍然优先于热度
+    wc = json.loads(D.macro_wordcloud(words, sents, [2, 1, 1, 1], top_n=2, heat=heat))
+    assert [x["word"] for x in wc["positiveWord"]] == ["啊词", "环境优美"]
+    # 不给热度时退回按词排序（结果可复现）
+    wc = json.loads(D.macro_wordcloud(words, sents, counts, top_n=2))
+    assert [x["word"] for x in wc["positiveWord"]] == sorted(words)[:2]
+
+
 def test_wordcloud(macro, facts):
     sc = "PFTSCA01002434"
     r = _row(macro, sc, END, "latest_30d")

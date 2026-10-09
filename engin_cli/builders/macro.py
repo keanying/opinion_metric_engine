@@ -262,6 +262,10 @@ def build_macro(comment_facts: pd.DataFrame, dim_facts: pd.DataFrame,
         w_words, w_sents = np.array([], dtype=object), np.array([], dtype="int64")
         kw = kw.assign(_wid=[])
     word_sum = _RangeSum(_daily(kw, "_wid", base), "_wid", len(w_words))
+    # 近期热度按「词」算（不分情感）：同一个词的各情感项加在一起
+    w_code = pd.factorize(pd.Series(w_words, dtype=object))[0] if len(w_words) else \
+        np.array([], dtype="int64")
+    heat_days = int(D.MACRO_WORDCLOUD_HEAT_DAYS)
 
     names = (cf[cf["scenic_spot_name"].astype(str).str.len() > 0]
              .groupby("scenic_spot_code")["scenic_spot_name"].first())
@@ -284,6 +288,11 @@ def build_macro(comment_facts: pd.DataFrame, dim_facts: pd.DataFrame,
     rows: List[dict] = []
     for sc, dates in emit.items():
         for t in dates:
+            # 词云并列排序用的近期热度：该景区近 heat_days 天的真实词频（不补齐、全渠道）
+            hi_t = _day(pd.to_datetime(t, format=D.DATE_FMT))
+            raw = word_sum.sum(sc, [(ch, hi_t - heat_days + 1, hi_t) for ch in codes])
+            heat = (np.bincount(w_code, weights=raw)[w_code] if len(w_code)
+                    else raw)
             for si, spec in enumerate(specs):
                 r = _ranges(si, t)
                 lb = lookbacks[si]
@@ -317,7 +326,7 @@ def build_macro(comment_facts: pd.DataFrame, dim_facts: pd.DataFrame,
                     row["dimension_breakdown"] = D.macro_dimension_breakdown(
                         dims, agg["dim_cur"], agg["dim_prev"], formula=formula, weights=weights)
                     row["wordcloud_map"] = D.macro_wordcloud(
-                        w_words, w_sents, agg["words"], top_n=top_n)
+                        w_words, w_sents, agg["words"], top_n=top_n, heat=heat)
                     row["period_comment_heatmap"] = D.macro_heatmap(regions, agg["regions"])
                     rows.append(row)
 

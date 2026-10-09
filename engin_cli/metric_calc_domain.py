@@ -340,6 +340,10 @@ MACRO_CHANNEL_ALL_NAME = "整体"
 
 # 词云：好/中/差各取 Top N（需求「各30个」）
 MACRO_WORDCLOUD_TOP_N = 30
+# 词云并列时的排序：本期次数相同 → 看「近期热度」= 这个词在该景区近 N 天（截至 travel_date，
+# 真实明细、不补齐、不分渠道和情感）一共出现了多少次，多的排前面；再并列才按词排序。
+# 单日样本少时大量词只出现 1 次，按字符顺序截断等于随机挑，常见词（环境优美、空气清新）反而被挤掉。
+MACRO_WORDCLOUD_HEAT_DAYS = 90
 MACRO_WORD_GROUP_KEY = {POSITIVE: "positiveWord", NEUTRAL: "neutralWord",
                         NEGATIVE: "negativeWord"}
 
@@ -1559,27 +1563,31 @@ def macro_dimension_breakdown(dims: Sequence[str], cur, prev,
                    for i, d in enumerate(dims)])
 
 
-def macro_wordcloud(words, sentiments, counts, top_n: int = MACRO_WORDCLOUD_TOP_N) -> str:
+def macro_wordcloud(words, sentiments, counts, top_n: int = MACRO_WORDCLOUD_TOP_N,
+                    heat=None) -> str:
     """wordcloud_map 列：好/中/差三组关键词各 Top N 及占比。
 
     公式：rate = 周期内该词在该组的出现次数 × 100 / 周期内**全部**关键词出现次数（三组合计）
     入参：words / sentiments / counts 等长数组，一个 (词, 情感) 一项；
-          情感取所属评论的 sentiment（同 content 表口径），同一条评论里同词只算一次
+          情感取所属评论的 sentiment（同 content 表口径），同一条评论里同词只算一次；
+          heat 等长数组，近期热度（见 MACRO_WORDCLOUD_HEAT_DAYS），只用来给并列的词排先后
     出参：JSON 对象字符串
           {"positiveWord":[{"word":"很好","rate":32.121213},...],
            "neutralWord":[...], "negativeWord":[...]}
     口径要点：同一个词可能同时出现在好评和差评里，会分别进两组；
-              组内按次数降序，次数相同按词排序，结果可复现。
+              组内按次数降序；次数相同按近期热度降序；再相同按词排序，结果可复现。
     """
     words = np.asarray(words, dtype=object).astype(str)
     sentiments = np.asarray(sentiments, dtype="int64")
     counts = np.asarray(counts, dtype="float64")
+    heat = (np.zeros(len(words)) if heat is None
+            else np.asarray(heat, dtype="float64"))
     total = float(counts.sum())
     out: Dict[str, list] = {}
     for s, key in MACRO_WORD_GROUP_KEY.items():
         m = (sentiments == s) & (counts > 0)
-        ws, cs = words[m], counts[m]
-        order = np.lexsort((ws, -cs))[:max(int(top_n), 0)]
+        ws, cs, hs = words[m], counts[m], heat[m]
+        order = np.lexsort((ws, -hs, -cs))[:max(int(top_n), 0)]
         rates = pct_ratio(cs[order], total)
         out[key] = [{"word": ws[i], "rate": float(r)} for i, r in zip(order, rates)]
     return _dumps(out)
