@@ -217,6 +217,7 @@ def test_feeding_backfilled_counts_back_in_is_wrong():
 
     st = EtlSettings()
     st.lookback_days = 16
+    st.backfill_lookback = dict(D.BACKFILL_LOOKBACK)      # 分档：1 日档 5 天、7 日档 10 天
     cal = ("20260801", "20260816")
     days = [d.strftime("%Y%m%d") for d in pd.date_range("2026-08-01", "2026-08-16")]
     raw = pd.DataFrame([{"scenic_spot_code": "S1", "platform_code": "douyin",

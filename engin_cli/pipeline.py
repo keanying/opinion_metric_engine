@@ -206,6 +206,9 @@ def run(settings: EtlSettings,
     if macro is not None:
         checks["macro"] = macro
         checks["macro_granularities"] = [g["name"] for g in ctx.macro_granularities]
+        # 补数上限统一（一个数）时：任意周期 == 区间内每天 td 之和
+        if len(set(ctx.backfill_lookback().values())) <= 1:
+            checks["macro_period_specs"] = ctx.macro_granularities
         # 下钻表 ↔ 大盘表逐周期对账（评论数 / 地域 / 词云）
         if TABLE_DRILL_ANALYSIS in res.tables:
             checks["drill"] = res.tables[TABLE_DRILL_ANALYSIS]

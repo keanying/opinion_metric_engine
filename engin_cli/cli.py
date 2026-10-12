@@ -113,18 +113,21 @@ def _print_pk_warning(r) -> None:
         print(f"    全部 pkId 有问题的行（同样的请求格式）已写到：{r.pk_dump}")
 
 
-def _parse_lookback(text: str) -> dict:
-    """解析 --backfill-lookback "1:5,7:10,30:20" → {1: 5, 7: 10, 30: 20}。
+def _parse_lookback(text: str):
+    """解析 --backfill-lookback。
 
-    只覆盖写到的档位，没写的仍用 domain.BACKFILL_LOOKBACK 的默认值。
+    "5"               → 5：所有周期统一往前找 5 天
+    "1:5,7:10,30:20"  → {1: 5, 7: 10, 30: 20}：按窗口分档，没写的档用 domain.BACKFILL_LOOKBACK
     """
+    if str(text).strip().isdigit():
+        return int(str(text).strip())
     out = {}
     for part in str(text).split(","):
         part = part.strip()
         if not part:
             continue
         if ":" not in part:
-            raise SystemExit(f"--backfill-lookback 格式错误：{part!r}，应形如 7:10")
+            raise SystemExit(f"--backfill-lookback 格式错误：{part!r}，应形如 5 或 7:10")
         w, d = part.split(":", 1)
         out[int(w)] = int(d)
     return out
@@ -683,7 +686,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--no-backfill", action="store_true",
                    help="关闭缺数回补（backfill_mode=off），渠道当天没评论就是 0")
     r.add_argument("--backfill-lookback",
-                   help="覆盖各窗口补明细时最多往前找几天，形如 1:5,7:10,30:20；只写要改的档")
+                   help="补明细时最多往前找几天：写一个数（如 5）= 所有周期统一；"
+                        "写 1:5,7:10,30:20 = 按窗口分档，只写要改的档")
     r.add_argument("--no-drill-analysis", action="store_true", help="不产出 5.2 下钻明细表")
     r.add_argument("--no-macro", action="store_true",
                    help="不产出 2.0 大盘 KPI 表（也就不会为同比多取去年同期的数据）")

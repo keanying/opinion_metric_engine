@@ -193,7 +193,7 @@ def test_bad_granularity_config_fails_loudly():
 
 
 def test_fetch_ranges_cover_previous_periods_and_last_year():
-    st = _settings()
+    st = _settings(backfill_lookback=dict(D.BACKFILL_LOOKBACK))     # 分档：近90日找 60 天
     ctx = RunContext(settings=st, output_dates=[END], load_start="20260322", load_end=END)
     ranges = macro_data_ranges(ctx)
     assert ranges[-1][1] == END
@@ -554,7 +554,8 @@ def test_previous_period_uses_filled_detail(gap_comments, sample):
     d = pd.to_datetime(c.publish_time, errors="coerce").dt.strftime("%Y%m%d")
     # 抖音去掉 8/1~8/17（本月的上期）：8/1~8/17 都复制 7/31（8/17 距 7/31 是 17 天 ≤ 20）
     c = c[~((c.scenic_id == GAP_SCENIC) & (c.channel == "douyin") & d.between("20260801", "20260817"))]
-    res = run(_settings(enable_drill_analysis=False), [END], comments_df=c, works_df=sample[1])
+    res = run(_settings(enable_drill_analysis=False, backfill_lookback=dict(D.BACKFILL_LOOKBACK)),
+              [END], comments_df=c, works_df=sample[1])
     assert res.ok, res.errors
     r = _row(res.tables[MACRO], GAP_SCENIC, END, "mtd", "douyin")
     cf = build_comment_facts(c)

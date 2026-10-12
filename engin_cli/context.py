@@ -58,7 +58,8 @@ class RunContext:
     def backfill_lookback(self, windows=None) -> dict:
         """本次跑批的明细补齐上限：{窗口天数: 最多往前找几天}（domain §1.8）。
 
-        口径默认值在 domain.BACKFILL_LOOKBACK，settings.backfill_lookback 可逐档覆盖。
+        settings.backfill_lookback：一个数 = 所有窗口统一（默认 5）；dict = 按窗口分档，
+        逐档覆盖 domain.BACKFILL_LOOKBACK。
         backfill_mode = "off" 时返回空字典 = 不补。windows=None 返回全部档位。
         """
         from . import metric_calc_domain as D

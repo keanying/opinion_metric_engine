@@ -187,11 +187,18 @@ PLATFORM_CODES = list(CHANNEL_NAME)
 # 占比、环比、同比、词频、维度、地域……窗口里有就有，没有就没有，不再整窗挪动。
 # 上一周期（环比分母）与去年同期（同比分母）同样用补齐后的明细。
 #
-# 往前最多找几天，**按指标窗口分档**（挪过头就失去时效性了）：
-# 窗口 N 的指标用「最多往前找 L_N 天」补出来的那一份明细，再逐日相加。
-#   当日 / 近 1 日 → 最多往前找 5 天；近 7 日 → 10 天；…… 近 365 日 → 90 天
-# 所以同一天的明细，在 1 日档和 30 日档里可能不一样：09-01 有数据、09-07 没有时，
-# 1 日档往前找 5 天找不到（09-07 为空），30 日档往前找 20 天能找到 09-01。
+# 往前最多找几天（settings.backfill_lookback，可配置）：
+#
+#   默认**所有窗口统一一个上限**（客户 2026-10：几个地方的数要能对上）。
+#   每天只有一份补齐结果，于是任意周期 == 区间内每天 td 之和，下钻表也天然一致。
+#     backfill_lookback = 5        所有窗口都最多往前找 5 天（默认）
+#
+#   也可以**按指标窗口分档**（写成 dict）：窗口 N 的指标用「最多往前找 L_N 天」补出来的
+#   那一份明细。代价是同一天的明细在 1 日档和 30 日档里可能不一样（09-01 有数据、09-07 没有时，
+#   1 日档往前找 5 天找不到，30 日档往前找 20 天能找到 09-01），长周期就不再等于 td 之和。
+#     backfill_lookback = {1: 5, 7: 10}   只写要改的档，其余用下面的 BACKFILL_LOOKBACK
+DEFAULT_BACKFILL_LOOKBACK_DAYS = 5
+# 分档时的默认表（backfill_lookback 写成 dict 时生效）
 BACKFILL_LOOKBACK = {
     1: 5,        # 当日 / 近 1 日：最多往前找 5 天
     7: 10,       # 近 7 日：最多往前找 10 天
@@ -220,16 +227,23 @@ def backfill_enabled(mode: str) -> bool:
     return str(mode or "").strip().lower() in (BACKFILL_MODE_FILL, BACKFILL_MODE_SHIFT)
 
 
-def resolve_backfill_lookback(mode: str, overrides: dict | None = None,
-                              windows=None) -> Dict[int, int]:
+def resolve_backfill_lookback(mode: str, overrides=None, windows=None) -> Dict[int, int]:
     """本次运行用的回补上限 {窗口天数: 最多往前找几天}。
 
-    入参：mode backfill_mode；overrides settings.backfill_lookback（逐档覆盖默认表）；
+    入参：mode backfill_mode；
+          overrides settings.backfill_lookback：
+            None / 整数  所有窗口统一这个上限（None = DEFAULT_BACKFILL_LOOKBACK_DAYS）
+            dict        按窗口分档，逐档覆盖 BACKFILL_LOOKBACK 默认表
           windows 只要这几档（None = 全部档位）
     出参：关闭回补时返回空字典
     """
     if not backfill_enabled(mode):
         return {}
+    if overrides is None or isinstance(overrides, (int, float, str)):
+        n = int(DEFAULT_BACKFILL_LOOKBACK_DAYS if overrides is None else overrides)
+        if n < 0:
+            raise ValueError(f"backfill_lookback 不能是负数：{overrides!r}")
+        return {int(w): n for w in (BACKFILL_LOOKBACK if windows is None else windows)}
     table = dict(BACKFILL_LOOKBACK)
     table.update({int(k): int(v) for k, v in (overrides or {}).items()})
     if windows is None:

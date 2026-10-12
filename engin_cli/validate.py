@@ -15,6 +15,7 @@ from typing import List
 import numpy as np
 import pandas as pd
 
+from . import metric_calc_domain as D
 from .metric_calc_domain import (BACKFILL_MODE_FILL, CORE_SUFFIX, CORE_WINDOWS,
                                  DEFAULT_SCORE_FORMULA, MACRO_CHANNEL_ALL, MACRO_KEYS,
                                  MACRO_SENTIMENT_PREFIX, PLATFORM_WINDOWS, PLAT_POS,
@@ -253,6 +254,47 @@ def validate_drill(drill: pd.DataFrame, macro: pd.DataFrame) -> List[str]:
     return errs
 
 
+def validate_period_sums(macro: pd.DataFrame, specs: list) -> List[str]:
+    """补数上限统一时（settings.backfill_lookback 是一个数）：每天只有一份补齐结果，
+    所以任意周期的 comment_total == 本期区间内每天 td 的 comment_total 之和（每个渠道、all 都是）。
+
+    只核对「区间里每一天都有 td 行」的格子：日常只跑当天时，前几天的 td 不在本次结果里，跳过。
+    """
+    errs: List[str] = []
+    if macro is None or macro.empty or not specs:
+        return errs
+    day = [g for g in specs if g["type"] == D.MACRO_PERIOD_ROLLING
+           and int(g.get("days", 0)) == 1 and not int(g.get("offset") or 0)]
+    if not day:
+        return errs
+    td = macro[macro["time_granularity"] == day[0]["name"]]
+    series = {k: g.set_index("travel_date")["comment_total"].astype("int64").sort_index()
+              for k, g in td.groupby(["scenic_id", "channel"])}
+    bad, sample, checked = 0, None, 0
+    for spec in specs:
+        if spec["name"] == day[0]["name"]:
+            continue
+        rows = macro[macro["time_granularity"] == spec["name"]]
+        for (sc, ch, t), total in rows.set_index(
+                ["scenic_id", "channel", "travel_date"])["comment_total"].items():
+            s = series.get((sc, ch))
+            if s is None:
+                continue
+            lo, hi = D.macro_period_ranges(spec, str(t))["cur"]
+            want = [int(d.strftime(D.DATE_FMT)) for d in pd.date_range(lo, hi)]
+            got = s.reindex(want)
+            if got.isna().any():
+                continue                       # 区间里有的日子不在本次结果里，没法核对
+            checked += 1
+            if int(got.sum()) != int(total):
+                bad += 1
+                sample = sample or ((sc, t, spec["name"], ch), int(got.sum()), int(total))
+    _fail(errs, bad == 0,
+          f"macro: 周期 comment_total != 区间内每天 td 之和，{bad} 处（共核对 {checked} 处）"
+          + (f"（例如 {sample[0]}：td 合计 {sample[1]} vs 周期 {sample[2]}）" if sample else ""))
+    return errs
+
+
 def validate_all(tables: dict) -> List[str]:
     """tables 额外可带 "platform_codes"：本次跑批配置的渠道全集，用于行完整性断言。"""
     core = tables.get("core", pd.DataFrame())
@@ -266,6 +308,8 @@ def validate_all(tables: dict) -> List[str]:
     errs += validate_content(tables.get("content", pd.DataFrame()), core)
     if "macro" in tables and "drill" in tables:
         errs += validate_drill(tables["drill"], tables["macro"])
+    if "macro" in tables and tables.get("macro_period_specs"):
+        errs += validate_period_sums(tables["macro"], tables["macro_period_specs"])
     if "macro" in tables:
         errs += validate_macro(tables["macro"], core, tables.get("platform_codes"),
                                tables.get("macro_granularities"), formula)

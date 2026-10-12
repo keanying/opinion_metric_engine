@@ -27,6 +27,7 @@ PLATFORM = "ads_trf_social_opinion_comment_platform_di"
 DIMENSION = "ads_trf_social_opinion_comment_dimension_score_di"
 CONTENT = "ads_trf_social_opinion_comment_content_di"
 DRILL = "ads_trf_social_opinion_drill_analysis_di"
+MACRO = "ads_trf_social_opinion_macro_gran_metric_di"
 
 
 def _comment(ds, channel, cid, sentiment=1, word="好玩"):
@@ -43,6 +44,10 @@ def _comment(ds, channel, cid, sentiment=1, word="好玩"):
         "keyword_tags": json.dumps([word], ensure_ascii=False),
         "publish_time": f"{ds[:4]}-{ds[4:6]}-{ds[6:]} 10:00:00",
     }
+
+
+# 按窗口分档的补数上限（backfill_lookback 写成 dict）；默认是所有周期统一 5 天
+TIERED = dict(D.BACKFILL_LOOKBACK)
 
 
 def _settings(**kw):
@@ -154,13 +159,13 @@ def test_drill_includes_copied_comments(three_day_gap):
 
 
 def test_drill_follows_each_period_s_own_lookback():
-    """下钻表每个周期各一份明细，补数上限跟大盘表这个周期一样：
+    """分档时下钻表每个周期各一份明细，补数上限跟大盘表这个周期一样：
     快手只在 9/01 有评论，9/11 当日档（最多找 5 天）借不到，近30日档（20 天）借得到。"""
     rows = [_comment("20260901", "kuaishou", "ks1")]
     for d in pd.date_range("2026-08-20", "2026-09-11"):
         ds = d.strftime("%Y%m%d")
         rows.append(_comment(ds, "douyin", f"dy{ds}"))
-    r = run(_settings(), ["20260911"], comments_df=pd.DataFrame(rows))
+    r = run(_settings(backfill_lookback=TIERED), ["20260911"], comments_df=pd.DataFrame(rows))
     assert r.errors == []                                   # 自检逐周期对账
     dr = r.tables[DRILL]
     ks = dr[dr.channel == "kuaishou"]
@@ -186,14 +191,14 @@ def test_lookback_limit_is_respected():
     df = pd.DataFrame(rows)
 
     # 09-06 距离 09-01 是 5 天 → 够得着
-    r = run(_settings(), ["20260906"], comments_df=df)
+    r = run(_settings(backfill_lookback=TIERED), ["20260906"], comments_df=df)
     p = r.tables[PLATFORM]
     assert p[(p.travel_date == 20260906)
              & (p.platform_code == "kuaishou")].comment_cnt.iloc[0] == 1
 
     # 09-07 距离 09-01 是 6 天 → 超过当日档上限 5，当日为 0；
     # 但 7 日档最多找 10 天：09-01 真实 1 + 09-02~09-07 各复制 1 = 7
-    r = run(_settings(), ["20260907"], comments_df=df)
+    r = run(_settings(backfill_lookback=TIERED), ["20260907"], comments_df=df)
     p = r.tables[PLATFORM]
     ks = p[(p.travel_date == 20260907) & (p.platform_code == "kuaishou")].iloc[0]
     assert ks.comment_cnt == 0
@@ -285,8 +290,9 @@ def test_cli_parses_lookback_overrides():
     from engin_cli.cli import _parse_lookback
     assert _parse_lookback("1:5,7:10,30:20") == {1: 5, 7: 10, 30: 20}
     assert _parse_lookback(" 1:3 , 7:7 ") == {1: 3, 7: 7}
+    assert _parse_lookback("7") == 7                        # 一个数 = 所有周期统一
     with pytest.raises(SystemExit):
-        _parse_lookback("7")
+        _parse_lookback("7天")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -437,3 +443,108 @@ def test_drill_comment_count_equals_macro_day_total():
     assert got.sum() == want["all"] == 8
     none = dr[(dr.comment_id == "nokw") & (dr.time_granularity == "td")]
     assert len(none) == 1 and none.emotion_word.iloc[0] == "" and none.word_source.iloc[0] == "none"
+
+
+# ══════════════════════════════════════════════════════════════════
+# 客户验收三点（补数上限统一，默认 5 天）：
+#   1. 词云里的词，下钻表都能按 emotion_word 找到
+#   2. 热力图各地域的数量 == 下钻表同周期同地域的评论数（总数 == comment_total）
+#   3. 近 N 日（每个周期）== 区间内每天 td 之和，每个渠道和 all 都是
+# ══════════════════════════════════════════════════════════════════
+@pytest.fixture(scope="module")
+def uniform_run():
+    """断档各不相同：抖音天天有；快手隔 3 天断一次；微博每 10 天断 8 天；
+    携程只零星几条（断 25 天以上）；地域、关键词各不相同。连跑 100 天。"""
+    regions = ["IP属地：广东", "北京", "", "四川成都", "美国"]
+    words = ["好玩", "排队", "风景优美", "人多", "值得"]
+    rows = []
+    days = pd.date_range("2026-06-01", "2026-09-17")
+    for i, d in enumerate(days):
+        ds = d.strftime("%Y%m%d")
+        plan = [("douyin", 3)]
+        if i % 4:
+            plan.append(("kuaishou", 2))
+        if i % 10 < 2:
+            plan.append(("weibo", 4))
+        if i in (5, 40, 75):
+            plan.append(("ctrip", 1))
+        for ch, n in plan:
+            for k in range(n):
+                c = _comment(ds, ch, f"{ch}{ds}{k}", 1 if (i + k) % 3 else -1,
+                             words[(i + k) % len(words)])
+                c["location"] = regions[(i * 7 + k) % len(regions)]
+                c["keyword_tags"] = json.dumps(
+                    [words[(i + k) % len(words)], words[(i + 2 * k + 1) % len(words)]],
+                    ensure_ascii=False)
+                rows.append(c)
+    out = [d.strftime("%Y%m%d") for d in pd.date_range("2026-06-10", "2026-09-17")]
+    return run(_settings(lookback_days=400), out, comments_df=pd.DataFrame(rows))
+
+
+def test_default_lookback_is_uniform():
+    assert EtlSettings().backfill_lookback == D.DEFAULT_BACKFILL_LOOKBACK_DAYS == 5
+    assert D.resolve_backfill_lookback("fill", 5, [1, 7, 30, 90]) == {1: 5, 7: 5, 30: 5, 90: 5}
+    assert D.resolve_backfill_lookback("fill", 3, [1, 30]) == {1: 3, 30: 3}
+
+
+def test_uniform_run_passes_all_self_checks(uniform_run):
+    assert uniform_run.errors == []          # 自检里就有下面三点，逐格核对
+
+
+def test_wordcloud_words_are_in_drill(uniform_run):
+    m, d = uniform_run.tables[MACRO], uniform_run.tables[DRILL]
+    t = 20260917
+    for r in m[m.travel_date == t].itertuples():
+        x = d[(d.travel_date == t) & (d.time_granularity == r.time_granularity)]
+        if r.channel != "all":
+            x = x[x.channel == r.channel]
+        words = {e["word"] for g in json.loads(r.wordcloud_map).values() for e in g}
+        assert words <= set(x.emotion_word), (r.time_granularity, r.channel)
+
+
+def test_heatmap_regions_match_drill(uniform_run):
+    m, d = uniform_run.tables[MACRO], uniform_run.tables[DRILL]
+    t = 20260917
+    for r in m[m.travel_date == t].itertuples():
+        x = d[(d.travel_date == t) & (d.time_granularity == r.time_granularity)]
+        if r.channel != "all":
+            x = x[x.channel == r.channel]
+        u = x.drop_duplicates(["channel", "work_id", "comment_id", "publish_time"])
+        hm = {e["region"]: e["heat"] for e in json.loads(r.period_comment_heatmap)}
+        assert u.groupby("region").size().to_dict() == hm, (r.time_granularity, r.channel)
+        assert len(u) == r.comment_total == sum(hm.values())
+
+
+def test_every_period_equals_sum_of_daily_td(uniform_run):
+    m = uniform_run.tables[MACRO]
+    td = m[m.time_granularity == "td"].pivot(index="travel_date", columns="channel",
+                                             values="comment_total")
+    t = "20260917"
+    for spec in D.macro_granularities(None):
+        lo, hi = D.macro_period_ranges(spec, t)["cur"]
+        want = td.loc[int(lo.strftime("%Y%m%d")):int(hi.strftime("%Y%m%d"))].sum()
+        got = m[(m.travel_date == int(t)) & (m.time_granularity == spec["name"])]
+        got = got.set_index("channel").comment_total
+        for ch in got.index:
+            assert int(got[ch]) == int(want[ch]), (spec["name"], ch, int(got[ch]), int(want[ch]))
+    # 断档超过 5 天的那几天不补：微博每 10 天只有 2 天有评论，近30日不是每天都有
+    w30 = int(m[(m.travel_date == int(t)) & (m.time_granularity == "latest_30d")
+                & (m.channel == "weibo")].comment_total.iloc[0])
+    assert 0 < w30 < 30 * 4
+
+
+def test_tiered_lookback_breaks_the_daily_sum():
+    """反面用例：分档上限下长周期补得更远，就不等于每天 td 之和了（所以默认统一）。"""
+    rows = [_comment("20260901", "kuaishou", "ks1")]
+    for d in pd.date_range("2026-08-01", "2026-09-17"):
+        ds = d.strftime("%Y%m%d")
+        rows.append(_comment(ds, "douyin", f"dy{ds}"))
+    out = [d.strftime("%Y%m%d") for d in pd.date_range("2026-09-01", "2026-09-17")]
+    tiered = run(_settings(backfill_lookback=TIERED, enable_drill_analysis=False), out,
+                 comments_df=pd.DataFrame(rows))
+    m = tiered.tables[MACRO]
+    ks = m[m.channel == "kuaishou"]
+    td_sum = int(ks[ks.time_granularity == "td"].comment_total.sum())     # 9/01~9/06 = 6
+    k30 = int(ks[(ks.time_granularity == "latest_30d")
+                 & (ks.travel_date == 20260917)].comment_total.iloc[0])   # 找 20 天 = 17
+    assert td_sum == 6 and k30 == 17

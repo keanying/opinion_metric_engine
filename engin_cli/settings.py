@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field, asdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 
 def _env(key: str, default=None, cast=str):
@@ -68,11 +68,13 @@ class EtlSettings:
     # shift  旧写法，等同 fill
     # off    不回补，当天没评论就是 0（用来对拍回补到底影响了多少）
     backfill_mode: str = "fill"
-    # 每个窗口的指标最多往前找几天来补明细，找不到这一天就是空的。
-    # 不填用 domain.BACKFILL_LOOKBACK 的默认表：
-    #   1日(当日/近1日)→5  7日→10  14日→15  30日→20  60日→30  90日→60  365日→90
-    # 只想改其中几档就只写那几档，其余仍用默认，例如 {1: 3, 7: 7}
-    backfill_lookback: Optional[dict] = None
+    # 补明细时最多往前找几天，找不到这一天就是空的。
+    #   整数（默认 5）：**所有周期统一**这个上限。每天只有一份补齐结果，所以
+    #       任意周期（近7日/本月/近90日…）== 区间内每天 td 之和，下钻表、热力图、词云也都对得上。
+    #   dict：按窗口分档，只写要改的档，其余用 domain.BACKFILL_LOOKBACK 的默认表
+    #       1日(当日/近1日)→5  7日→10  14日→15  30日→20  60日→30  90日→60  365日→90
+    #       例如 {1: 5, 7: 10, 30: 20}。分档时长周期不再等于每天 td 之和。
+    backfill_lookback: Union[int, dict, None] = 5
 
     # publish_time 的写入格式。DDL 注释是 'YYYY-MM-DD HH:mm:ss'，
     # 但它进了三张表的唯一索引，默认沿用现有数据的 yyyyMMdd 口径。
