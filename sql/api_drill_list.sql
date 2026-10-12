@@ -1,6 +1,8 @@
 -- 看板下钻列表接口（客户 2026-10）：点词云 / 热力图地域 / 渠道 → 列出评论，分页。
 --
--- 参数与大盘表接口一致：:scenicId、:qTime（= 大盘表 travel_date，yyyyMMdd）、:timeTag（= 大盘表 time_granularity）。
+-- 参数与大盘表接口一致：:scenicId（必填）、:qTime（= 大盘表 travel_date，yyyyMMdd）、:timeTag（= 大盘表 time_granularity）。
+-- 可选参数都用模板的 if-empty 判断包起来（不嵌套），不传不报错：
+--   不传 timeTag → 按今日（td）；不传 qTime → 不按日期过滤；pageIndex 默认 0、pageSize 默认 20。
 -- 下钻表按天存，这里把 :timeTag 换算成本期区间 [d_start, d_end] 再圈 travel_date，和大盘表同一套口径：
 --   td 今日 [T, T]          latest_1d 近1日 [T-1, T-1]   latest_7d / 30d / 60d / 90d [T-6 / 29 / 59 / 89, T]
 --   wtd 本周 [本周一, T]    mtd 本月 [本月1日, T]        qtd 本季度 [本季度首日, T]
@@ -47,9 +49,11 @@ FROM (
                 ORDER BY d.publish_time DESC
             ) AS rn
         FROM ads_trf_social_opinion_drill_analysis_di d
-        -- 周期 → 本期区间（和大盘表同一套口径）
+        -- 周期 → 本期区间（和大盘表同一套口径），模板判断不嵌套：
+        --   不传 qTime：q 为 NULL，区间为 NULL，不按日期过滤
+        --   传了 qTime 不传 timeTag：tag 为空串，落到 ELSE，按今日（td）只查 qTime 当天
         JOIN (
-            SELECT CAST(DATE_FORMAT(CASE :timeTag
+            SELECT CAST(DATE_FORMAT(CASE tag
                         WHEN 'latest_1d'  THEN q - INTERVAL 1 DAY
                         WHEN 'latest_7d'  THEN q - INTERVAL 6 DAY
                         WHEN 'latest_30d' THEN q - INTERVAL 29 DAY
@@ -58,12 +62,15 @@ FROM (
                         WHEN 'wtd'        THEN q - INTERVAL WEEKDAY(q) DAY                  -- 本周一
                         WHEN 'mtd'        THEN q - INTERVAL (DAYOFMONTH(q) - 1) DAY         -- 本月 1 日
                         WHEN 'qtd'        THEN MAKEDATE(YEAR(q), 1) + INTERVAL (QUARTER(q) - 1) QUARTER
-                        ELSE q END, '%Y%m%d') AS UNSIGNED) AS d_start,                     -- td
-                   CAST(DATE_FORMAT(CASE :timeTag
+                        ELSE q END, '%Y%m%d') AS UNSIGNED) AS d_start,                     -- td / 不传
+                   CAST(DATE_FORMAT(CASE tag
                         WHEN 'latest_1d' THEN q - INTERVAL 1 DAY
                         ELSE q END, '%Y%m%d') AS UNSIGNED) AS d_end
-            FROM (SELECT STR_TO_DATE(:qTime, '%Y%m%d') AS q) x
-        ) r ON d.travel_date BETWEEN r.d_start AND r.d_end
+            FROM (
+                SELECT STR_TO_DATE(NULLIF(CONCAT('' $if(!empty(qTime))$ , :qTime $endif$), ''), '%Y%m%d') AS q,
+                       CONCAT('' $if(!empty(timeTag))$ , :timeTag $endif$) AS tag
+            ) x
+        ) r ON (r.d_start IS NULL OR d.travel_date BETWEEN r.d_start AND r.d_end)
         WHERE d.scenic_id = :scenicId                                              -- 必填
         $if(!empty(emotionWord))$     AND d.emotion_word = :emotionWord          $endif$
         $if(!empty(region))$          AND d.region = :region                     $endif$
@@ -74,7 +81,12 @@ FROM (
     ) t
     WHERE rn = 1
 ) p
-WHERE rowNo >    :pageIndex      * :pageSize
-  AND rowNo <=  (:pageIndex + 1) * :pageSize
-ORDER BY rowNo
+-- 分页：pageIndex 从 0 开始，默认 0；pageSize 每页条数，默认 20（不传或传空都走默认）
+CROSS JOIN (
+    SELECT CAST(COALESCE(NULLIF(CONCAT('' $if(!empty(pageIndex))$ , :pageIndex $endif$), ''), '0')  AS UNSIGNED) AS page_index,
+           CAST(COALESCE(NULLIF(CONCAT('' $if(!empty(pageSize))$  , :pageSize  $endif$), ''), '20') AS UNSIGNED) AS page_size
+) pg
+WHERE p.rowNo >  pg.page_index      * pg.page_size
+  AND p.rowNo <= (pg.page_index + 1) * pg.page_size
+ORDER BY p.rowNo
 ;
