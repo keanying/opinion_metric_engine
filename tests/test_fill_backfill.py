@@ -143,14 +143,35 @@ def test_copied_detail_carries_sentiment_and_words(three_day_gap):
 def test_drill_includes_copied_comments(three_day_gap):
     """下钻表也包含复制来的评论（业务确认「包含」）：publish_time 挪到这一天，主键不撞。"""
     dr = three_day_gap.tables[DRILL]
-    ks = dr[dr.channel == "kuaishou"]
+    ks = dr[(dr.channel == "kuaishou") & (dr.time_granularity == "td")]
     assert sorted(ks.travel_date.unique()) == [20260911, 20260912, 20260913]
     assert (ks.groupby("travel_date").size() == 3).all()
     day = ks[ks.travel_date == 20260912]
     # publish_time = 补到的那一天 00:00:00：不会是「未来」时刻，重跑也是同一个值
     assert pd.to_datetime(day.publish_time).eq(pd.Timestamp("2026-09-12 00:00:00")).all()
-    assert ks.detail_uk.is_unique
+    assert dr.detail_uk.is_unique
     assert set(ks.comment_id) == {"ks0", "ks1", "ks2"}
+
+
+def test_drill_follows_each_period_s_own_lookback():
+    """下钻表每个周期各一份明细，补数上限跟大盘表这个周期一样：
+    快手只在 9/01 有评论，9/11 当日档（最多找 5 天）借不到，近30日档（20 天）借得到。"""
+    rows = [_comment("20260901", "kuaishou", "ks1")]
+    for d in pd.date_range("2026-08-20", "2026-09-11"):
+        ds = d.strftime("%Y%m%d")
+        rows.append(_comment(ds, "douyin", f"dy{ds}"))
+    r = run(_settings(), ["20260911"], comments_df=pd.DataFrame(rows))
+    assert r.errors == []                                   # 自检逐周期对账
+    dr = r.tables[DRILL]
+    ks = dr[dr.channel == "kuaishou"]
+    assert ks[ks.time_granularity == "td"].empty
+    k30 = ks[ks.time_granularity == "latest_30d"]
+    # 30 日窗口 8/13~9/11：9/01 真评论 + 9/02~9/11 各复制一份（距 9/01 不超过 20 天）
+    days = pd.to_datetime(k30.publish_time).dt.strftime("%Y%m%d")
+    assert sorted(days) == [d.strftime("%Y%m%d") for d in pd.date_range("2026-09-01", "2026-09-11")]
+    macro = r.tables["ads_trf_social_opinion_macro_gran_metric_di"]
+    m = macro[(macro.time_granularity == "latest_30d") & (macro.channel == "kuaishou")]
+    assert int(m.comment_total.iloc[0]) == len(k30) == 11
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -409,9 +430,10 @@ def test_drill_comment_count_equals_macro_day_total():
     macro = r.tables["ads_trf_social_opinion_macro_gran_metric_di"]
     td = macro[(macro.time_granularity == "td") & (macro.travel_date == 20260911)]
     want = td.set_index("channel").comment_total
-    got = dr[dr.travel_date == 20260911].groupby("channel").comment_id.nunique()
+    got = (dr[(dr.travel_date == 20260911) & (dr.time_granularity == "td")]
+           .groupby("channel").comment_id.nunique())
     assert got["douyin"] == want["douyin"] == 5             # 4 条有词 + 1 条没词
     assert got["kuaishou"] == want["kuaishou"] == 3         # 复制 10 号的 3 条
     assert got.sum() == want["all"] == 8
-    none = dr[dr.comment_id == "nokw"]
+    none = dr[(dr.comment_id == "nokw") & (dr.time_granularity == "td")]
     assert len(none) == 1 and none.emotion_word.iloc[0] == "" and none.word_source.iloc[0] == "none"

@@ -6,22 +6,30 @@
 所以单独出一张 `ads_trf_social_opinion_drill_analysis_di`（建表语句见
 `sql/ads_drill_analysis_ddl.sql`）。
 
-一行 = 一个词 × 一条评论。同一条评论命中 3 个词就有 3 行。
+一行 = 跑数日期 × 周期 × 一条评论 × 一个词。同一条评论命中 3 个词就有 3 行。
 `work_url` 直接来自 `src_opinion_social_work_di`，前端拿到就能跳转。
 
-缺数回补（domain §1.8，业务确认「包含」）
---------------------------------------
-与指标表同一套「先补明细」：某渠道在输出日期当天一条评论都没有 → 复制往前最近一个
-有评论那天（当日档，最多找 5 天）的全部评论明细，作为这一天的下钻明细。
-复制出来的行：travel_date = 这一天；publish_time = 这一天 00:00:00（客户要求补进来的明细
-publish_time 用跑数那天）。不保留原评论的时分秒：上午跑批时 23:25 这种时刻还在「未来」，
-下游按「当天到现在」查会查不到；固定 00:00:00 也保证重跑得到同一个值（publish_time 在推送 pkId 里）。
-detail_uk 带上这一天，不和原评论撞键。看板点内容表里补出来的词，也能列出对应的评论。
+按周期出数（客户 2026-10：几个地方的数据都要能对上）
+------------------------------------------------------
+大盘表每个周期（td / latest_7d / mtd / qtd …）各有一份「补齐后的明细」，
+下钻表按同一套口径**每个周期各出一份**，用 `time_granularity` 区分：
 
-与大盘表对账（客户要求）：某天某渠道，下钻表按 comment_id 去重的评论数
-== 大盘表当日（td）该渠道的 comment_total；各渠道加起来 == all 行。
-所以**没有关键词的评论也出一行**（emotion_word 为空、word_source = none），
-否则这些评论在下钻表里数不到。看板点词查询按词过滤，碰不到这些行。
+    travel_date       = 跑数日期（与大盘表 travel_date 相同）
+    time_granularity  = 周期（与大盘表 time_granularity 相同）
+    一行              = 这个周期本期区间内的一条评论 × 一个词
+
+本期区间、往前找几天补数，都和大盘表这个周期完全一样（domain §1.8 / §1.10，
+macro_period_ranges + macro_backfill_window）：区间里某渠道某天没评论 →
+复制往前最近一个有评论那天的全部评论，复制行 publish_time = 那一天 00:00:00
+（真实评论保留原发布时间）。所以对任意 (景区, 日期, 周期, 渠道)：
+
+    下钻表 COUNT(DISTINCT channel, work_id, comment_id, publish_time) == 大盘表 comment_total
+    下钻表按 region 计数 == period_comment_heatmap 的 heat
+    大盘表 wordcloud_map 里的词，下钻表按 emotion_word 都查得到
+
+去重要带上 publish_time：同一条评论被复制到区间里好几天时，大盘表每天各算一次，
+下钻表也是每天一行（publish_time 不同）。
+没有关键词的评论也出一行（emotion_word 为空、word_source = none），否则数不到这些评论。
 
 `content_snippet` 掩码
 ---------------------
@@ -42,13 +50,14 @@ import hashlib
 import json
 from typing import List
 
+import numpy as np
 import pandas as pd
 
+from . import metric_calc_domain as D
 from .context import RunContext
 from .metric_calc_domain import (DRILL_MASK_SCOPE_WORD, REGION_UNKNOWN, SENTIMENT_TYPE,
                                  daily_channel_presence, mask_content)
 from .normalize import parse_json_array
-from .windows import fill_source_dates
 
 # ⚠ 这张表的景区 / 渠道字段跟另外四张 ADS 表**不一样**：
 #   下钻表    scenic_id / scenic_name、channel / channel_name   （与源表同名，客户 2026-10 改表）
@@ -65,8 +74,12 @@ COLUMNS: List[str] = [
     "dimension_level1", "dimension_level2", "dimension_level3",
     # 需求 2.0 新增：评论地域（location 归一，domain §1.11）与实体标签（原样 JSON 数组）
     "region", "entity_tags",
-    "publish_time", "travel_date", "etl_time", "detail_uk",
+    "publish_time", "travel_date",
+    # 客户 2026-10：与大盘表同一套周期，每个周期一份明细
+    "time_granularity",
+    "etl_time", "detail_uk",
 ]
+_PKEY = ["scenic_spot_code", "platform_code"]
 
 
 def _uk(*parts) -> str:
@@ -80,11 +93,13 @@ def build_drill_analysis(comment_facts: pd.DataFrame, works: pd.DataFrame,
     if comment_facts.empty:
         return pd.DataFrame(columns=COLUMNS)
 
-    out_dates = set(ctx.output_dates)
-    df = comment_facts[comment_facts["travel_date"].isin(out_dates)].assign(fill_copy=False)
-    copies = _filled_copies(comment_facts, ctx)
-    if not copies.empty:
-        df = pd.concat([df, copies], ignore_index=True)
+    plan = _window_plan(comment_facts, ctx)
+    if plan.empty:
+        return pd.DataFrame(columns=COLUMNS)
+    # 只给用得到的 (景区, 渠道, 来源日) 拼行，每条评论拼一次，再按周期展开
+    need = plan[_PKEY + ["src_date"]].drop_duplicates()
+    df = comment_facts.merge(need, left_on=_PKEY + ["travel_date"],
+                             right_on=_PKEY + ["src_date"], how="inner")
     if df.empty:
         return pd.DataFrame(columns=COLUMNS)
 
@@ -165,12 +180,7 @@ def build_drill_analysis(comment_facts: pd.DataFrame, works: pd.DataFrame,
                 "region": region,
                 "entity_tags": entities,
                 "publish_time": r.publish_dt,
-                "travel_date": int(r.travel_date),
-                # 复制来的明细带上这一天，否则与原评论那一行撞 detail_uk
-                "detail_uk": (_uk(r.scenic_spot_code, word, r.platform_code, work_id,
-                                  comment_id, "fill", r.travel_date) if r.fill_copy
-                              else _uk(r.scenic_spot_code, word, r.platform_code,
-                                       work_id, comment_id)),
+                "src_date": r.src_date,
             })
 
     if not rows:
@@ -195,6 +205,8 @@ def build_drill_analysis(comment_facts: pd.DataFrame, works: pd.DataFrame,
     out["work_title"] = out["work_title"].astype(str).str.slice(0, 255)
 
     out["etl_time"] = ctx.etl_time
+    # 作品信息拼好之后再按周期展开（展开后行数是评论数的好几倍）
+    out = _expand(out, plan)
     # 同一 (词, 评论) 只保留一行 —— 一条评论的 keyword_tags 里若有重复词，
     # 上面已按 seen 去重，这里再兜一层，防止源表 comment_uk 重复导致唯一键冲突。
     out = out.drop_duplicates(subset=["detail_uk"], keep="first")
@@ -208,31 +220,66 @@ def build_drill_analysis(comment_facts: pd.DataFrame, works: pd.DataFrame,
                     f"{getattr(ctx.settings, 'drill_mask_on_no_match', 'mask_all')} 处理"
                     if n_no_match else "，关键词全部命中"))
     return out[COLUMNS].sort_values(
-        ["scenic_id", "travel_date", "emotion_word"]).reset_index(drop=True)
+        ["scenic_id", "travel_date", "time_granularity", "emotion_word"]).reset_index(drop=True)
 
 
-def _filled_copies(comment_facts: pd.DataFrame, ctx: RunContext) -> pd.DataFrame:
-    """输出日期上「渠道当天没评论」的那几天，复制往前最近一天的评论明细（domain §1.8）。
+def _window_plan(comment_facts: pd.DataFrame, ctx: RunContext) -> pd.DataFrame:
+    """每个 (景区, 渠道, 跑数日期, 周期) 的本期区间里，每一天用哪一天的评论。
 
-    上限用当日档（1 日档）。复制行 travel_date = 这一天、publish_dt = 这一天 00:00:00，
-    带 fill_copy=True。
+    口径与大盘表一致（builders/macro.py 的 _FillPlan）：当天有评论就用当天；
+    没有就用往前最近一个有评论的日子，最多往前找这个周期的补数上限天；找不到这一天就空着。
+    出参：scenic_spot_code, platform_code, travel_date（跑数日期 int）, time_granularity,
+          day（区间里的那一天 Timestamp）, src_date（来源日 yyyyMMdd）
     """
-    lb = ctx.backfill_lookback([1]).get(1, 0)
-    if lb <= 0 or comment_facts.empty:
-        return pd.DataFrame()
-    by = ["scenic_spot_code", "platform_code"]
-    m = fill_source_dates(daily_channel_presence(comment_facts), by, "travel_date",
-                          ctx.output_dates, lb)
-    m = m[m["found"]]
-    if m.empty:
-        return pd.DataFrame()
-    m = m.rename(columns={"travel_date": "_target"})[by + ["_target", "src_date"]]
-    c = comment_facts.merge(m, left_on=by + ["travel_date"],
-                            right_on=by + ["src_date"], how="inner")
-    # publish_time = 补到的那一天 00:00:00（见模块说明：不能是「未来」时刻，重跑要得到同一个值）
-    c["publish_dt"] = pd.to_datetime(c["_target"], format="%Y%m%d")
-    c["travel_date"] = c["_target"]
-    return c.drop(columns=["_target", "src_date"]).assign(fill_copy=True)
+    cols = _PKEY + ["travel_date", "time_granularity", "day", "src_date"]
+    pres = daily_channel_presence(comment_facts)
+    if pres.empty:
+        return pd.DataFrame(columns=cols)
+    pres = pres.assign(_d=pd.to_datetime(pres["travel_date"].astype(str), format=D.DATE_FMT))
+    present = {k: np.sort(g["_d"].to_numpy(dtype="datetime64[D]"))
+               for k, g in pres.groupby(_PKEY)}
+    one = np.timedelta64(1, "D")
+    parts = []
+    for spec in ctx.macro_granularities:
+        w = D.macro_backfill_window(spec)
+        lookback = int(ctx.backfill_lookback([w]).get(w, 0))
+        for t in ctx.output_dates:
+            lo, hi = D.macro_period_ranges(spec, t)["cur"]
+            days = np.arange(np.datetime64(lo.date(), "D"), np.datetime64(hi.date(), "D") + one)
+            for (sc, ch), p in present.items():
+                i = np.searchsorted(p, days, side="right") - 1    # 最近一个 <= 当天的有评论日
+                src = p[np.clip(i, 0, None)]
+                ok = (i >= 0) & ((days - src) <= lookback * one)
+                if not ok.any():
+                    continue
+                parts.append(pd.DataFrame({
+                    "scenic_spot_code": sc, "platform_code": ch,
+                    "travel_date": int(t), "time_granularity": spec["name"],
+                    "day": days[ok], "src_date": src[ok]}))
+    if not parts:
+        return pd.DataFrame(columns=cols)
+    plan = pd.concat(parts, ignore_index=True)
+    plan["day"] = pd.to_datetime(plan["day"])
+    plan["src_date"] = pd.to_datetime(plan["src_date"]).dt.strftime(D.DATE_FMT)
+    return plan[cols]
+
+
+def _expand(base: pd.DataFrame, plan: pd.DataFrame) -> pd.DataFrame:
+    """每条评论的行（base，带来源日 src_date）× 用到它的 (跑数日期, 周期, 那一天) → 下钻行。
+
+    复制来的（那一天 != 来源日）publish_time = 那一天 00:00:00：不能是「未来」时刻，重跑要得到同一个值。
+    detail_uk 带上跑数日期、周期、那一天：同一条评论在不同周期、被复制到不同天，各是一行。
+    """
+    p = plan.rename(columns={"scenic_spot_code": "scenic_id", "platform_code": "channel"})
+    out = base.merge(p, on=["scenic_id", "channel", "src_date"], how="inner")
+    copy = out["day"].dt.strftime(D.DATE_FMT) != out["src_date"]
+    out["publish_time"] = pd.to_datetime(out["publish_time"]).where(~copy, out["day"])
+    day = out["day"].dt.strftime(D.DATE_FMT)
+    out["detail_uk"] = [
+        _uk(*k) for k in zip(out["scenic_id"], out["emotion_word"], out["channel"],
+                             out["work_id"], out["comment_id"], out["travel_date"],
+                             out["time_granularity"], day)]
+    return out.drop(columns=["day", "src_date"])
 
 
 def _mask_config(ctx: RunContext):

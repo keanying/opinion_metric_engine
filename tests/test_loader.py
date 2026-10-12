@@ -46,14 +46,12 @@ def test_varchar_publish_time_tables_delete_by_scenic_and_publish_time(table, ke
     assert params == [SC, "20260909", "20260910"]
 
 
-def test_drill_deletes_whole_days_because_publish_time_is_a_datetime():
-    """下钻表的 publish_time 是评论自己的发布时间，按值相等删不干净，按「落在那几天内」删。"""
+def test_drill_deletes_by_travel_date():
+    """下钻表一次跑数的行散在整个周期区间里（publish_time 是评论发布时间），按跑数日期删。"""
     where, params = L.delete_scope(L.TABLE_DRILL_ANALYSIS, [SC],
                                    ["20260909", "20260910", "20260912"])
-    assert where.startswith("`scenic_id` IN (%s) AND (")
-    assert where.count("`publish_time` >= %s AND `publish_time` < %s") == 2   # 9/9~9/10 合并
-    assert params == [SC, "2026-09-09 00:00:00", "2026-09-11 00:00:00",
-                      "2026-09-12 00:00:00", "2026-09-13 00:00:00"]
+    assert where == "`scenic_id` IN (%s) AND `travel_date` IN (%s,%s,%s)"
+    assert params == [SC, 20260909, 20260910, 20260912]
 
 
 def test_publish_time_format_is_respected():
@@ -105,7 +103,7 @@ def test_pipeline_deletes_by_this_runs_scenic_and_dates(tmp_path):
     for c in db.calls:
         assert c["params"][0] == "PFT_S_00001"
         if c["table"] == L.TABLE_DRILL_ANALYSIS:
-            assert c["params"][1:] == ["2026-09-16 00:00:00", "2026-09-18 00:00:00"]
+            assert c["params"][1:] == [20260916, 20260917]          # 按 travel_date 删
         else:
             assert c["params"][1:] == ["20260916", "20260917"]
         assert c["rows"] == len(res.tables[c["table"]])

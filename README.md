@@ -554,24 +554,23 @@ macro td 的 all 行 comment_total   == core.comment_count
 
 **地域**来自评论表 `location`，归一到省级简称（`IP属地：广东` → `广东`、`四川成都` → `四川`、
 `北京市` → `北京`），认不出省份的保留原文（`美国`），**没写地域的记 `未知`**（domain §1.11）。
-热力图和下钻表 `region` 用同一个值，所以对得上：
+热力图和下钻表 `region` 用同一个值，所以对得上（每个周期都成立，见下文「需求 5.2」）：
 
-- 热力图 heat 合计 = 同口径 `comment_total` = 下钻表当天 `comment_id` 去重数（全渠道、分渠道都成立）；
-- 按地域逐个对：某地域 heat = 下钻表 `region` = 该地域的 `comment_id` 去重数，`未知` 也能搜到。
+- 热力图 heat 合计 = 同行 `comment_total` = 下钻表同一 (日期, 周期, 渠道) 的评论数；
+- 按地域逐个对：某地域 heat = 下钻表该 `region` 的评论数，`未知` 也能搜到。
 
-核对 SQL（下钻表一定要带 `travel_date`，否则会把所有日期的评论都算进去）：
+核对 SQL（下钻表带上和大盘表一样的 `travel_date` + `time_granularity`）：
 
 ```sql
-SELECT region, COUNT(DISTINCT channel, work_id, comment_id) AS cnt
+SELECT region, COUNT(DISTINCT channel, work_id, comment_id, publish_time) AS cnt
 FROM ads_trf_social_opinion_drill_analysis_di
-WHERE scenic_id = 'PFTSCE01001721' AND travel_date = 20261009   -- 分渠道再加 AND channel = 'weibo'
+WHERE scenic_id = 'PFTSCE01001721' AND travel_date = 20261009
+  AND time_granularity = 'latest_7d'          -- 分渠道再加 AND channel = 'weibo'
 GROUP BY region ORDER BY cnt DESC;
 ```
 
-⚠ **不要写 `publish_time = '20261009'`**：下钻表 `publish_time` 是 datetime，MySQL 会把它当成
-`2026-10-09 00:00:00` 精确匹配，只能查到补进来的评论（补数统一记零点），当天真实采集的评论
-（带具体时分秒）全部漏掉，数就比大盘表少。按天查用 `travel_date = 20261009`，
-或者 `publish_time >= '2026-10-09' AND publish_time < '2026-10-10'`。
+⚠ 下钻表不要按 `publish_time` 圈日期：它是评论自己的发布时间，补数复制来的评论记那天零点；
+「近7日」这一格的评论就是 `travel_date = 跑数日期 AND time_granularity = 'latest_7d'` 那些行。
 
 老数据里 `region` 为空的行要用 `repair` 重跑后才会变成 `未知`。
 
@@ -596,12 +595,12 @@ GROUP BY region ORDER BY cnt DESC;
 |---|---|
 | `core_di` / `platform_di` / `dimension_score_di` / `content_di` | `scenic_spot_code IN (本次景区) AND publish_time IN (本次日期)` |
 | `macro_gran_metric_di` | `scenic_id IN (本次景区) AND publish_time IN (本次日期)` |
-| `drill_analysis_di` | `scenic_id IN (本次景区) AND publish_time` 落在本次日期那几天内（`>= 当天 0 点 且 < 次日 0 点`） |
+| `drill_analysis_di` | `scenic_id IN (本次景区) AND travel_date IN (本次日期)` |
 
 - **删除范围 = 本次跑的景区 × 本次跑的日期**，不是「新数据里出现过的 publish_time」。
   重算后某天某张表没有行了（比如某个词不再出现），旧行照样删掉，不会残留；这次某张表一行都没算出来也会执行删除。
-- 下钻表的 `publish_time` 是**评论自己的发布时间**（datetime），按值相等删只能删到时间一模一样的行，
-  所以按「落在那一天内」删。其余五张表的 `publish_time` 是 `yyyyMMdd` 字符串，与日期一一对应。
+- 下钻表的 `publish_time` 是**评论自己的发布时间**（datetime），一次跑数的行散在整个周期区间里（近90日就是 90 天），
+  所以按 `travel_date`（= 跑数日期，同大盘表）删。其余五张表的 `publish_time` 是 `yyyyMMdd` 字符串，与日期一一对应。
 - **删除和写入在同一个事务里**（`db.replace_rows`）：写入失败整体回滚，不会出现「旧数据删了、新数据没写进去」的空窗。
 - 景区 = 命令行 `--scenic` 指定的；不指定时 `run` 本来就是逐个景区跑，每次只删当前景区。
 - `settings.dimension_upsert` 与 `sql/alter_dimension_uniquekey.sql` 已不再需要（执行过也没有影响）。
@@ -668,8 +667,32 @@ python -m engin_cli.cli repair --tables core --start-date 20260101 --end-date 20
 
 新表 `ads_trf_social_opinion_drill_analysis_di`，建表语句见 `sql/ads_drill_analysis_ddl.sql`。
 
-一行 = 一个词 × 一条评论。命中 3 个词的评论就有 3 行。带 `work_url`，前端直接跳转。
-查询见 `sql/queries.sql` 最后两段（点词看评论 / 点作品反查词）。
+一行 = **跑数日期 × 周期 × 一条评论 × 一个词**。命中 3 个词的评论就有 3 行。带 `work_url`，前端直接跳转。
+查询见 `sql/queries.sql` 最后几段（点词看评论 / 点地域数评论 / 点作品反查词）。
+
+**按周期出数（客户 2026-10）**：大盘表每个周期（`td` / `latest_7d` / `mtd` / `qtd` …）各有一份「补齐后的明细」，
+下钻表也每个周期各存一份，用 `time_granularity` 区分，`travel_date` = 跑数日期（都和大盘表同义）：
+
+| 列 | 含义 |
+|---|---|
+| `travel_date` | 跑数日期，同大盘表 `travel_date` |
+| `time_granularity` | 周期，同大盘表 `time_granularity` |
+| `publish_time` | 评论发布时间；补数复制来的评论 = 补到的那天 00:00:00 |
+
+所以看板选的是哪天、哪个周期，下钻就带同样的 `travel_date + time_granularity`，查到的评论正好是大盘表这一格背后的那些：
+
+- `COUNT(DISTINCT channel, work_id, comment_id, publish_time)` == `comment_total`；
+- 按 `region` 计数 == `period_comment_heatmap` 的 heat；
+- `wordcloud_map` 里的每个词按 `emotion_word` 都查得到。
+
+去重要带上 `publish_time`：同一条评论被复制到区间里好几天时，大盘表每天各算一次，下钻表每天一行。
+跑批自检逐个 (景区, 日期, 周期, 渠道) 核对这三条，对不上直接报错。
+
+代价是行数：每天每个景区 ≈ 各周期本期区间的评论数之和（某景区实测约 2.4 万行/天，近 90 日占三分之一）。
+
+**升级**：已有的库执行 `sql/alter_drill_analysis_time_granularity.sql`（加列 + 换索引），下游推送表同样加列。
+口径变了（`travel_date` 从「评论所在日」改为「跑数日期」），要看的日期用 `repair` / `run` 重跑一遍
+（按 `scenic_id + travel_date` 先删后写，这些日期的旧行一起删掉）；`detail_uk` 算法也变了，下游下钻表建议清空后重推。
 
 > ⚠ **这张表的景区列名、渠道列名跟另外四张不一样**：
 >
@@ -686,16 +709,14 @@ python -m engin_cli.cli repair --tables core --start-date 20260101 --end-date 20
 > `tests/test_schema.py` 把这个差异钉死了：下钻表里不许出现 `scenic_spot_*` / `platform_*`，
 > 另外四张里不许出现裸的 `scenic_id`。
 
-缺数回补（业务确认「包含」）：某渠道在输出日期当天没评论 → 复制往前最近一天（当日档，最多找 5 天）
-那个渠道的全部评论，作为这一天的下钻明细。复制行的 `travel_date` = 这一天，`publish_time` =
-这一天 00:00:00（客户要求用跑数日期；不保留原评论的时分秒，否则上午跑批时 23:25 这种时刻还在「未来」，
-下游按「当天到现在」查会查不到；固定值也保证重跑一致，`publish_time` 在推送 pkId 里），
-`detail_uk` 带上这一天，不和原评论撞键。
+缺数回补：和大盘表完全一样 —— 周期区间里某渠道某天没评论，复制往前最近一个有评论那天的全部评论，
+最多往前找这个周期的上限天（`backfill_lookback`：当日 5 天、7 日 10 天、30 日 20 天、60 日 30 天、90 日 60 天；
+本周 / 本月 / 本季度按 7 / 30 / 90 日档）。复制行 `publish_time` = 那一天 00:00:00（不保留原评论的时分秒，
+否则上午跑批时 23:25 这种时刻还在「未来」；固定值也保证重跑一致）。
+`detail_uk` = md5(景区, 词, 渠道, 作品, 评论, 跑数日期, 周期, 评论所在日)，各周期、各复制日互不撞键。
 
-与大盘表对账（客户要求，自检里卡死）：某天某渠道，下钻表按评论去重的条数 == 大盘表当日周期（`td`）
-该渠道的 `comment_total`，各渠道合计 == `all` 行。所以**没有关键词的评论也出一行**
-（`emotion_word` 为空、`word_source = none`），看板点词查询按词过滤，碰不到这些行。看板点内容表里补出来的词，也能列出对应的评论。按 `travel_date` 幂等重写当期即可。词表大时可以开 `content_top_words`
-只保留每日 TopN 的词，明细表跟着一起瘦身。
+**没有关键词的评论也出一行**（`emotion_word` 为空、`word_source = none`），否则评论数对不上；
+看板点词查询按词过滤，碰不到这些行。词表大时可以开 `content_top_words` 只保留每日 TopN 的词。
 
 ### `content_snippet` 掩码（domain 第 9 章）
 
@@ -786,7 +807,8 @@ opinion_metric_engine/          项目根
 | `engin_cli/pipeline.py` | 编排 |
 | `engin_cli/cli.py` | 命令行 |
 | `sql/ads_ddl_reference.sql` | 四张目标表的建表语句（原样保留，测试据此断言） |
-| `sql/ads_drill_analysis_ddl.sql` | 5.2 下钻分析表建表语句（含 2.0 新增的 region / entity_tags） |
+| `sql/ads_drill_analysis_ddl.sql` | 5.2 下钻分析表建表语句（含 2.0 新增的 region / entity_tags、time_granularity） |
+| `sql/alter_drill_analysis_time_granularity.sql` | 已有下钻表补 time_granularity 列、换查询索引 |
 | `sql/alter_drill_analysis_region_entity.sql` | 已有下钻表补 region / entity_tags 两列 |
 | `sql/ads_macro_gran_metric_ddl.sql` | 2.0 大盘 KPI 表建表语句 |
 | `sql/alter_dimension_uniquekey.sql` | 给维度表补唯一索引（可选） |

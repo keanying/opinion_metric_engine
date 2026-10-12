@@ -175,13 +175,14 @@ def run(settings: EtlSettings,
 
     # ---- 4. 5.2 下钻分析表（词 → 评论 → 作品）----
     if settings.enable_drill_analysis:
+        # 下钻表按大盘表的周期出数（qtd / 近90日 往前补得更远），所以用和大盘表一样的 cf_all
         if works_df is None and db is not None:
-            work_ids = cf.get("work_id")
+            work_ids = cf_all.get("work_id")
             works_df = fetch_works(db, fill_start, load_end, scenic_codes,
                                    work_ids.dropna().unique().tolist()
                                    if work_ids is not None else None)
         drill = build_drill_analysis(
-            cf, works_df if works_df is not None else pd.DataFrame(), ctx)
+            cf_all, works_df if works_df is not None else pd.DataFrame(), ctx)
         res.tables[TABLE_DRILL_ANALYSIS] = drill
         res.notes.append(f"下钻明细（词→评论→作品）{len(drill):,} 行")
 
@@ -205,13 +206,9 @@ def run(settings: EtlSettings,
     if macro is not None:
         checks["macro"] = macro
         checks["macro_granularities"] = [g["name"] for g in ctx.macro_granularities]
-        # 下钻表 ↔ 大盘表「当日」周期对账（rolling 1 天、不偏移的那个周期，默认 td）
-        day = [g["name"] for g in ctx.macro_granularities
-               if g["type"] == "rolling" and int(g.get("days", 0)) == 1
-               and not int(g.get("offset") or 0)]
-        if day and TABLE_DRILL_ANALYSIS in res.tables:
+        # 下钻表 ↔ 大盘表逐周期对账（评论数 / 地域 / 词云）
+        if TABLE_DRILL_ANALYSIS in res.tables:
             checks["drill"] = res.tables[TABLE_DRILL_ANALYSIS]
-            checks["macro_day_granularity"] = day[0]
     res.errors = validate_all(checks)
 
     # 回补可见化：输出日期里有多少「景区·渠道·日」是复制来的明细

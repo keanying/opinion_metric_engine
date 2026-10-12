@@ -184,14 +184,15 @@ def test_same_comment_looks_the_same_on_every_row(drill):
     不然同一条评论会忽长忽短，读的人以为是两条不同的评论。
     """
     d = drill.tables[DRILL]
-    rows = d[d.comment_id == "c1"]
-    assert len(rows) == 2                       # 两个词 → 两行
+    rows = d[(d.comment_id == "c1") & (d.time_granularity == "td")]
+    assert len(rows) == 2                       # 两个词 → 两行（每个周期各一份）
     assert rows["content_snippet"].nunique() == 1
 
 
 def test_scope_word_highlights_only_that_row_s_word():
     d = _run(drill_mask_scope=D.DRILL_MASK_SCOPE_WORD).tables[DRILL]
-    rows = d[d.comment_id == "c1"].set_index("emotion_word")["content_snippet"]
+    rows = d[(d.comment_id == "c1") & (d.time_granularity == "td")]
+    rows = rows.set_index("emotion_word")["content_snippet"]
     assert rows["体力一般"] == "**体力一般**"
     assert rows["来回两个半小时"] == "**来回两个半小时**"
 

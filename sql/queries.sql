@@ -103,22 +103,34 @@ limit 10;
 
 -- ============================================================
 -- §5.2 点词下钻：列出命中该词的评论，再点评论跳作品
+-- 下钻表和大盘表用同一套 travel_date + time_granularity：看板当前选的是哪个日期、哪个周期，
+-- 这里就传哪个，查到的评论正好是大盘表这一格（词云 / 热力图 / comment_total）背后的那些。
 -- ============================================================
 select emotion_word, channel_name, commenter_name, content_snippet,
        likes, sentiment_score, publish_time,
        work_title, work_url            -- 前端跳转就用 work_url
 from ads_trf_social_opinion_drill_analysis_di
-where scenic_spot_code = :scenic
+where scenic_id = :scenic
+  and travel_date = :anchor              -- 跑数日期，同大盘表 travel_date
+  and time_granularity = :granularity    -- td / latest_7d / mtd / qtd ...，同大盘表
   and emotion_word = :word
-  and travel_date between date_format(date_sub(str_to_date(:anchor,'%Y%m%d'),
-                                               interval 6 day),'%Y%m%d')
-                      and :anchor
+  -- and channel = :channel              -- 选了单个渠道时再加
 order by likes desc, publish_time desc
 limit 100;
+
+-- 点热力图某个地域：评论条数 == 大盘表 period_comment_heatmap 里这个地域的 heat
+-- 去重要带 publish_time：同一条评论被补数复制到区间里好几天时，大盘表每天各算一次
+select count(distinct channel, work_id, comment_id, publish_time) as cnt
+from ads_trf_social_opinion_drill_analysis_di
+where scenic_id = :scenic
+  and travel_date = :anchor
+  and time_granularity = :granularity
+  and region = :region;
 
 -- 反查：某个作品下命中了哪些词、各多少条
 select emotion_word, emotion_type, count(*) cnt
 from ads_trf_social_opinion_drill_analysis_di
-where scenic_spot_code = :scenic and work_id = :work_id
+where scenic_id = :scenic and travel_date = :anchor and time_granularity = 'td'
+  and work_id = :work_id
 group by emotion_word, emotion_type
 order by cnt desc;
