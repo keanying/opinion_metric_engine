@@ -814,6 +814,7 @@ opinion_metric_engine/          项目根
 | `sql/ads_ddl_reference.sql` | 四张目标表的建表语句（原样保留，测试据此断言） |
 | `sql/ads_drill_analysis_ddl.sql` | 5.2 下钻分析表建表语句（含 2.0 新增的 region / entity_tags、time_granularity） |
 | `sql/api_drill_list.sql` | 看板下钻列表接口 SQL：按 :qTime + :timeTag 换算区间、按评论×天去重、分页 |
+| `sql/check_drill_vs_macro.sql` | 下钻表 ↔ 大盘表对不上时的排查 SQL（旧行 / 空地域 / 周期≠td 之和 / 逐地域对比） |
 | `sql/alter_drill_analysis_time_granularity.sql` | 已有下钻表补 time_granularity 列（固定 td）、换查询索引 |
 | `sql/alter_drill_analysis_region_entity.sql` | 已有下钻表补 region / entity_tags 两列 |
 | `sql/ads_macro_gran_metric_ddl.sql` | 2.0 大盘 KPI 表建表语句 |

@@ -72,6 +72,7 @@ FROM (
             ) x
         ) r ON (r.d_start IS NULL OR d.travel_date BETWEEN r.d_start AND r.d_end)
         WHERE d.scenic_id = :scenicId                                              -- 必填
+          AND d.time_granularity = 'td'        -- 只取按天存的行；挡掉旧版本按周期存的行（不然会重复计数）
         $if(!empty(emotionWord))$     AND d.emotion_word = :emotionWord          $endif$
         $if(!empty(region))$          AND d.region = :region                     $endif$
         $if(!empty(channel))$         AND d.channel = :channel                   $endif$
