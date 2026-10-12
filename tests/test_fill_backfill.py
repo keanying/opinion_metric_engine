@@ -158,25 +158,22 @@ def test_drill_includes_copied_comments(three_day_gap):
     assert set(ks.comment_id) == {"ks0", "ks1", "ks2"}
 
 
-def test_drill_follows_each_period_s_own_lookback():
-    """分档时下钻表每个周期各一份明细，补数上限跟大盘表这个周期一样：
-    快手只在 9/01 有评论，9/11 当日档（最多找 5 天）借不到，近30日档（20 天）借得到。"""
+def test_drill_is_stored_per_day():
+    """下钻表按天存一份（time_granularity 固定 td），周期用 travel_date 区间查，数据不随周期放大。"""
     rows = [_comment("20260901", "kuaishou", "ks1")]
     for d in pd.date_range("2026-08-20", "2026-09-11"):
         ds = d.strftime("%Y%m%d")
         rows.append(_comment(ds, "douyin", f"dy{ds}"))
-    r = run(_settings(backfill_lookback=TIERED), ["20260911"], comments_df=pd.DataFrame(rows))
-    assert r.errors == []                                   # 自检逐周期对账
+    out = [d.strftime("%Y%m%d") for d in pd.date_range("2026-09-01", "2026-09-11")]
+    r = run(_settings(), out, comments_df=pd.DataFrame(rows))
+    assert r.errors == []
     dr = r.tables[DRILL]
+    assert set(dr.time_granularity) == {"td"}
+    assert sorted(dr.travel_date.unique()) == [int(x) for x in out]
+    # 快手 9/01 真实 1 条，9/02~9/06 各复制 1 条（往前最多 5 天），9/07 起找不到
     ks = dr[dr.channel == "kuaishou"]
-    assert ks[ks.time_granularity == "td"].empty
-    k30 = ks[ks.time_granularity == "latest_30d"]
-    # 30 日窗口 8/13~9/11：9/01 真评论 + 9/02~9/11 各复制一份（距 9/01 不超过 20 天）
-    days = pd.to_datetime(k30.publish_time).dt.strftime("%Y%m%d")
-    assert sorted(days) == [d.strftime("%Y%m%d") for d in pd.date_range("2026-09-01", "2026-09-11")]
-    macro = r.tables["ads_trf_social_opinion_macro_gran_metric_di"]
-    m = macro[(macro.time_granularity == "latest_30d") & (macro.channel == "kuaishou")]
-    assert int(m.comment_total.iloc[0]) == len(k30) == 11
+    assert sorted(ks.travel_date) == [20260901 + i for i in range(6)]
+    assert dr.detail_uk.is_unique
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -481,6 +478,13 @@ def uniform_run():
     return run(_settings(lookback_days=400), out, comments_df=pd.DataFrame(rows))
 
 
+def _window(name, t):
+    """周期 name 在跑数日期 t 的本期区间 → (首日, 末日) int，下钻表按 travel_date 区间查。"""
+    spec = {g["name"]: g for g in D.macro_granularities(None)}[name]
+    lo, hi = D.macro_period_ranges(spec, str(t))["cur"]
+    return int(lo.strftime("%Y%m%d")), int(hi.strftime("%Y%m%d"))
+
+
 def test_default_lookback_is_uniform():
     assert EtlSettings().backfill_lookback == D.DEFAULT_BACKFILL_LOOKBACK_DAYS == 5
     assert D.resolve_backfill_lookback("fill", 5, [1, 7, 30, 90]) == {1: 5, 7: 5, 30: 5, 90: 5}
@@ -495,7 +499,7 @@ def test_wordcloud_words_are_in_drill(uniform_run):
     m, d = uniform_run.tables[MACRO], uniform_run.tables[DRILL]
     t = 20260917
     for r in m[m.travel_date == t].itertuples():
-        x = d[(d.travel_date == t) & (d.time_granularity == r.time_granularity)]
+        x = d[d.travel_date.between(*_window(r.time_granularity, t))]
         if r.channel != "all":
             x = x[x.channel == r.channel]
         words = {e["word"] for g in json.loads(r.wordcloud_map).values() for e in g}
@@ -506,7 +510,7 @@ def test_heatmap_regions_match_drill(uniform_run):
     m, d = uniform_run.tables[MACRO], uniform_run.tables[DRILL]
     t = 20260917
     for r in m[m.travel_date == t].itertuples():
-        x = d[(d.travel_date == t) & (d.time_granularity == r.time_granularity)]
+        x = d[d.travel_date.between(*_window(r.time_granularity, t))]
         if r.channel != "all":
             x = x[x.channel == r.channel]
         u = x.drop_duplicates(["channel", "work_id", "comment_id", "publish_time"])

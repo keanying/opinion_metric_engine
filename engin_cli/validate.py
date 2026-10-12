@@ -197,60 +197,79 @@ def validate_content(content: pd.DataFrame, core: pd.DataFrame) -> List[str]:
     return errs
 
 
-def validate_drill(drill: pd.DataFrame, macro: pd.DataFrame) -> List[str]:
+def validate_drill(drill: pd.DataFrame, macro: pd.DataFrame, specs: list,
+                   output_dates, uniform: bool) -> List[str]:
     """下钻表与大盘表对账（客户要求：几个地方的数据都要能对上）。
 
-    对每个 (景区, 日期, 周期, 渠道)，包括 all 行：
-      · 下钻表评论数 == 大盘表 comment_total
-      · 下钻表按 region 计数 == 热力图各地域 heat
+    下钻表按天存；大盘表 (景区, 日期 T, 周期 g, 渠道) 这一格对应下钻表
+    travel_date 落在 g 的本期区间里的那些行（all 行不过滤渠道）：
+      · 评论数 == comment_total
+      · 按 region 计数 == 热力图各地域 heat
       · 词云里的词，下钻表都查得到
     评论按 (渠道, 作品, comment_id, publish_time) 去重：comment_id 只在同一作品内唯一；
     同一条评论被复制到区间里好几天时，大盘表每天各算一次，下钻表每天一行（publish_time 不同）。
+
+    只核对区间里每一天都在本次输出日期里的格子；补数上限分档（uniform=False）时
+    长周期补得比下钻表（当日档）远，只核对当日周期。
     """
     errs: List[str] = []
-    if drill is None or macro is None or macro.empty:
+    if drill is None or macro is None or macro.empty or not specs:
         return errs
-    key = ["scenic_id", "travel_date", "time_granularity"]
-    u = drill.drop_duplicates(key + ["channel", "work_id", "comment_id", "publish_time"])
-    u_all = u.assign(channel=MACRO_CHANNEL_ALL)
-    both = pd.concat([u, u_all], ignore_index=True)
-    k = key + ["channel"]
-    m = macro.set_index(k)
+    days_out = {int(d) for d in output_dates}
+    day_spec = [g["name"] for g in specs if g["type"] == D.MACRO_PERIOD_ROLLING
+                and int(g.get("days", 0)) == 1 and not int(g.get("offset") or 0)]
+    use = specs if uniform else [g for g in specs if g["name"] in day_spec]
 
-    cnt = both.groupby(k).size().rename("drill_cnt")
-    j = pd.concat([m["comment_total"].astype("int64"), cnt], axis=1).fillna(0).astype("int64")
-    bad = j[j["comment_total"] != j["drill_cnt"]]
-    _fail(errs, bad.empty,
-          f"drill: 下钻表评论数 != 大盘表 comment_total，{len(bad)} 处"
-          + (f"（例如 {bad.index[0]}：下钻 {bad.iloc[0].drill_cnt} vs 大盘 {bad.iloc[0].comment_total}）"
-             if not bad.empty else ""))
+    u = drill.drop_duplicates(["scenic_id", "travel_date", "channel", "work_id",
+                               "comment_id", "publish_time"])
+    u = pd.concat([u, u.assign(channel=MACRO_CHANNEL_ALL)], ignore_index=True)
+    k = ["scenic_id", "channel", "travel_date"]
+    cnt = u.groupby(k).size().to_dict()
+    reg = {key: g.to_dict() for key, g in u.groupby(k)["region"].value_counts().groupby(level=[0, 1, 2])}
+    reg = {key: {r: int(n) for (_, _, _, r), n in v.items()} for key, v in reg.items()}
+    dw = drill[drill["emotion_word"] != ""]
+    dw = pd.concat([dw, dw.assign(channel=MACRO_CHANNEL_ALL)], ignore_index=True)
+    words = dw.groupby(k)["emotion_word"].agg(set).to_dict()
 
-    try:
-        heat = {(i, e["region"]): e["heat"] for i, v in m["period_comment_heatmap"].items()
-                for e in json.loads(v)}
-        got = both.groupby(k + ["region"]).size()
-        got = {(i[:-1], i[-1]): int(n) for i, n in got.items()}
-        diff = [x for x in set(heat) | set(got) if heat.get(x, 0) != got.get(x, 0)]
-        _fail(errs, not diff, f"drill: 下钻表按地域计数 != 大盘表热力图，{len(diff)} 处"
-              + (f"（例如 {diff[0]}：下钻 {got.get(diff[0], 0)} vs 热力 {heat.get(diff[0], 0)}）"
-                 if diff else ""))
-
-        # 词要从全部行里取（上面的 both 按评论去重过，每条评论只剩一个词）
-        dw = drill[drill["emotion_word"] != ""]
-        words = (pd.concat([dw, dw.assign(channel=MACRO_CHANNEL_ALL)], ignore_index=True)
-                 .groupby(k)["emotion_word"].agg(set))
-        miss = 0
-        sample = None
-        for i, v in m["wordcloud_map"].items():
-            have = words.get(i, set())
-            lack = {e["word"] for g in json.loads(v).values() for e in g} - have
-            if lack:
-                miss += 1
-                sample = sample or (i, sorted(lack)[:3])
-        _fail(errs, miss == 0, f"drill: 词云里的词下钻表查不到，{miss} 处"
-              + (f"（例如 {sample[0]}：{sample[1]}）" if sample else ""))
-    except (ValueError, TypeError, KeyError, AttributeError):    # JSON 错误由 validate_macro 报
-        pass
+    bad_cnt = bad_reg = bad_word = checked = 0
+    sample = {}
+    for spec in use:
+        rows = macro[macro["time_granularity"] == spec["name"]]
+        for r in rows.itertuples(index=False):
+            lo, hi = D.macro_period_ranges(spec, str(r.travel_date))["cur"]
+            win = [int(x.strftime(D.DATE_FMT)) for x in pd.date_range(lo, hi)]
+            if not set(win) <= days_out:
+                continue
+            checked += 1
+            key = (r.scenic_id, r.travel_date, spec["name"], r.channel)
+            keys = [(r.scenic_id, r.channel, d) for d in win]
+            n = sum(cnt.get(x, 0) for x in keys)
+            if n != int(r.comment_total):
+                bad_cnt += 1
+                sample.setdefault("cnt", (key, n, int(r.comment_total)))
+            got = {}
+            for x in keys:
+                for reg_name, c in reg.get(x, {}).items():
+                    got[reg_name] = got.get(reg_name, 0) + c
+            try:
+                heat = {e["region"]: int(e["heat"]) for e in json.loads(r.period_comment_heatmap)}
+                cloud = {e["word"] for g in json.loads(r.wordcloud_map).values() for e in g}
+            except (ValueError, TypeError, KeyError, AttributeError):   # JSON 错误由 validate_macro 报
+                continue
+            if got != heat:
+                bad_reg += 1
+                sample.setdefault("reg", key)
+            have = set().union(*(words.get(x, set()) for x in keys))
+            if cloud - have:
+                bad_word += 1
+                sample.setdefault("word", (key, sorted(cloud - have)[:3]))
+    _fail(errs, bad_cnt == 0, f"drill: 下钻表评论数 != 大盘表 comment_total，{bad_cnt} 处"
+          + (f"（例如 {sample['cnt'][0]}：下钻 {sample['cnt'][1]} vs 大盘 {sample['cnt'][2]}）"
+             if "cnt" in sample else ""))
+    _fail(errs, bad_reg == 0, f"drill: 下钻表按地域计数 != 大盘表热力图，{bad_reg} 处"
+          + (f"（例如 {sample['reg']}）" if "reg" in sample else ""))
+    _fail(errs, bad_word == 0, f"drill: 词云里的词下钻表查不到，{bad_word} 处"
+          + (f"（例如 {sample['word'][0]}：{sample['word'][1]}）" if "word" in sample else ""))
     return errs
 
 
@@ -307,7 +326,9 @@ def validate_all(tables: dict) -> List[str]:
     errs += validate_dimension(tables.get("dimension", pd.DataFrame()))
     errs += validate_content(tables.get("content", pd.DataFrame()), core)
     if "macro" in tables and "drill" in tables:
-        errs += validate_drill(tables["drill"], tables["macro"])
+        errs += validate_drill(tables["drill"], tables["macro"],
+                               tables.get("macro_specs", []), tables.get("output_dates", []),
+                               bool(tables.get("macro_period_specs")))
     if "macro" in tables and tables.get("macro_period_specs"):
         errs += validate_period_sums(tables["macro"], tables["macro_period_specs"])
     if "macro" in tables:

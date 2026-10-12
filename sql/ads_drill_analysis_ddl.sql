@@ -3,8 +3,8 @@
 -- 用途：看板点击关键词云/负面突增词里的某个 emotion_word，
 --       列出命中该词的评论明细，再点评论跳转到原作品（work_url）。
 --
--- 粒度：跑数日期（travel_date）× 周期（time_granularity，同大盘表）× 评论 × 词。
---       每个周期一份「补齐后的明细」，与大盘表同一格的 comment_total / 热力图 / 词云逐条对得上。
+-- 粒度：日期（travel_date）× 评论 × 词，按天存一份补齐后的明细。
+--       大盘表某个周期 = 下钻表 travel_date 落在这个周期本期区间里的行（补数上限统一时逐条对得上）。
 --
 -- 幂等：跑批按 scenic_id + travel_date 先删后写；detail_uk 唯一，推送下游按它定位。
 
@@ -44,19 +44,23 @@ create table if not exists ads_trf_social_opinion_drill_analysis_di
     entity_tags      text                                     null comment '评论实体标签，JSON 数组（src.entity_tags 原样）',
 
     publish_time     datetime                                 null comment '评论发布时间；补数复制来的评论 = 补到的那天 00:00:00',
-    travel_date      int                                      not null comment '跑数日期（yyyyMMdd），同大盘表 travel_date',
-    time_granularity varchar(32)     default 'td'             not null comment '周期粒度，同大盘表 time_granularity（td/latest_1d/latest_7d/wtd/latest_30d/mtd/latest_60d/latest_90d/qtd）',
+    travel_date      int                                      not null comment '日期（yyyyMMdd）：评论所在日，补数复制来的 = 补到的那天',
+    time_granularity varchar(32)     default 'td'             not null comment '固定 td（按天存；周期用 travel_date 区间查）',
     etl_time         datetime        default CURRENT_TIMESTAMP null comment 'ETL写入时间',
 
-    detail_uk        char(32)                                 not null comment 'md5(景区+词+渠道+作品+评论+跑数日期+周期+评论所在日)，幂等唯一键',
+    detail_uk        char(32)                                 not null comment 'md5(景区+词+渠道+作品+评论+日期)，幂等唯一键',
 
     constraint uk_drill_analysis unique (detail_uk)
 )
     comment '舆情下钻分析表(关键词-评论-作品)' charset = utf8mb4 row_format = DYNAMIC;
 
--- 下钻主查询走这条索引：先定景区+日期+周期，再按词过滤，最后按点赞排序取前 N 条
+-- 点词下钻：景区 + 词 + 日期区间
 create index idx_drill_analysis_query
-    on ads_trf_social_opinion_drill_analysis_di (scenic_id, travel_date, time_granularity, emotion_word);
+    on ads_trf_social_opinion_drill_analysis_di (scenic_id, emotion_word, travel_date);
+
+-- 按日期区间数评论 / 按地域统计
+create index idx_drill_analysis_date
+    on ads_trf_social_opinion_drill_analysis_di (scenic_id, travel_date);
 
 -- 「这个作品下所有命中词的评论」反查
 create index idx_drill_analysis_work

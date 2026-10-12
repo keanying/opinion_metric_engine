@@ -393,22 +393,22 @@ def test_heatmap_uses_normalized_regions(macro, facts):
     assert dict((x["region"], x["heat"]) for x in hm)["广东"] == int((f.region == "广东").sum())
 
 
-def test_drill_matches_macro_for_every_period(result):
-    """客户口径：几个地方的数据都要对上。对每个 (景区, 日期, 周期, 渠道)：
+def test_drill_matches_macro_on_each_day(result):
+    """客户口径：下钻表按天存，(景区, 日期, 渠道) 当日这一格：
     热力图 heat 合计 = comment_total = 下钻表评论数；逐地域 heat = 下钻表该 region 的评论数；
-    词云里的词下钻表都查得到。评论按 (渠道, 作品, comment_id, publish_time) 去重。"""
+    词云里的词下钻表都查得到。评论按 (渠道, 作品, comment_id, publish_time) 去重。
+    （连续多天的周期对账见 test_fill_backfill.py 的 uniform_run。）"""
     macro, drill = result.tables[MACRO], result.tables[DRILL]
-    assert set(drill.time_granularity) == set(macro.time_granularity)
-    groups = {k: g for k, g in drill.groupby(["scenic_id", "travel_date", "time_granularity"])}
+    assert set(drill.time_granularity) == {"td"}
     checked = 0
-    for r in macro.itertuples():
+    for r in macro[macro.time_granularity == "td"].itertuples():
         hm = json.loads(r.period_comment_heatmap)
         assert sum(x["heat"] for x in hm) == r.comment_total, (r.scenic_id, r.travel_date, r.channel)
-        d = groups.get((r.scenic_id, r.travel_date, r.time_granularity), drill.iloc[:0])
+        d = drill[(drill.scenic_id == r.scenic_id) & (drill.travel_date == r.travel_date)]
         if r.channel != "all":
             d = d[d.channel == r.channel]
         u = d.drop_duplicates(["channel", "work_id", "comment_id", "publish_time"])
-        key = (r.scenic_id, r.travel_date, r.time_granularity, r.channel)
+        key = (r.scenic_id, r.travel_date, r.channel)
         assert len(u) == r.comment_total, key
         assert u.groupby("region").size().to_dict() == {x["region"]: x["heat"] for x in hm}, key
         words = {e["word"] for g in json.loads(r.wordcloud_map).values() for e in g}

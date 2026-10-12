@@ -209,9 +209,11 @@ def run(settings: EtlSettings,
         # 补数上限统一（一个数）时：任意周期 == 区间内每天 td 之和
         if len(set(ctx.backfill_lookback().values())) <= 1:
             checks["macro_period_specs"] = ctx.macro_granularities
-        # 下钻表 ↔ 大盘表逐周期对账（评论数 / 地域 / 词云）
+        # 下钻表（按天）↔ 大盘表逐周期对账（评论数 / 地域 / 词云），按 travel_date 区间
         if TABLE_DRILL_ANALYSIS in res.tables:
             checks["drill"] = res.tables[TABLE_DRILL_ANALYSIS]
+            checks["macro_specs"] = ctx.macro_granularities
+            checks["output_dates"] = ctx.output_dates
     res.errors = validate_all(checks)
 
     # 回补可见化：输出日期里有多少「景区·渠道·日」是复制来的明细

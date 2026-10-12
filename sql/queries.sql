@@ -103,34 +103,36 @@ limit 10;
 
 -- ============================================================
 -- §5.2 点词下钻：列出命中该词的评论，再点评论跳作品
--- 下钻表和大盘表用同一套 travel_date + time_granularity：看板当前选的是哪个日期、哪个周期，
--- 这里就传哪个，查到的评论正好是大盘表这一格（词云 / 热力图 / comment_total）背后的那些。
+-- 下钻表按天存。看板选的是哪个日期、哪个周期，就按这个周期的本期区间圈 travel_date，
+-- 查到的评论正好是大盘表这一格（词云 / 热力图 / comment_total）背后的那些：
+--   td 今日 [T, T]          latest_1d 近1日 [T-1, T-1]   latest_7d 近7日 [T-6, T]
+--   latest_30d [T-29, T]   latest_60d [T-59, T]        latest_90d [T-89, T]
+--   wtd 本周 [本周一, T]    mtd 本月 [本月1日, T]        qtd 本季度 [本季度首日, T]
 -- ============================================================
 select emotion_word, channel_name, commenter_name, content_snippet,
        likes, sentiment_score, publish_time,
        work_title, work_url            -- 前端跳转就用 work_url
 from ads_trf_social_opinion_drill_analysis_di
 where scenic_id = :scenic
-  and travel_date = :anchor              -- 跑数日期，同大盘表 travel_date
-  and time_granularity = :granularity    -- td / latest_7d / mtd / qtd ...，同大盘表
   and emotion_word = :word
+  and travel_date between :period_start and :period_end
   -- and channel = :channel              -- 选了单个渠道时再加
 order by likes desc, publish_time desc
 limit 100;
 
 -- 点热力图某个地域：评论条数 == 大盘表 period_comment_heatmap 里这个地域的 heat
--- 去重要带 publish_time：同一条评论被补数复制到区间里好几天时，大盘表每天各算一次
+-- 去掉 region 条件 == comment_total。去重要带 publish_time：同一条评论被补数复制到区间里好几天时，
+-- 大盘表每天各算一次，下钻表每天一行
 select count(distinct channel, work_id, comment_id, publish_time) as cnt
 from ads_trf_social_opinion_drill_analysis_di
 where scenic_id = :scenic
-  and travel_date = :anchor
-  and time_granularity = :granularity
+  and travel_date between :period_start and :period_end
   and region = :region;
 
 -- 反查：某个作品下命中了哪些词、各多少条
 select emotion_word, emotion_type, count(*) cnt
 from ads_trf_social_opinion_drill_analysis_di
-where scenic_id = :scenic and travel_date = :anchor and time_granularity = 'td'
+where scenic_id = :scenic and travel_date between :period_start and :period_end
   and work_id = :work_id
 group by emotion_word, emotion_type
 order by cnt desc;

@@ -12,8 +12,8 @@
 · 删除范围是「本次跑的景区 × 本次跑的日期」，不是「新数据里出现过的 publish_time」——
   重算后某天某张表没有行了（比如某个词不再出现），旧行也要删掉，不能残留。
   所以即使这次某张表一行都没算出来，也会执行删除。
-· 下钻表的 publish_time 是**评论自己的发布时间**（datetime），一次跑数的行会落在整个周期区间里
-  （近90日就是 90 天），所以不按它删，按 travel_date（= 跑数日期，int yyyyMMdd，与大盘表同义）删。
+· 下钻表的 publish_time 是**评论自己的发布时间**（datetime，带时分秒），按值相等删不干净，
+  所以按 travel_date（int yyyyMMdd，这一行属于哪一天）删。
   其余五张表的 publish_time 是 yyyyMMdd 字符串（settings.publish_time_format），与日期一一对应。
 · 删除与写入在**同一个事务**里（db.replace_rows），写入失败整体回滚，不会出现删了没写的空窗。
 · 不再依赖唯一索引（以前没有唯一索引的维度表靠「先删后插」、其余表靠 upsert），
@@ -48,7 +48,7 @@ SCENIC_KEY = {TABLE_DRILL_ANALYSIS: "scenic_id", TABLE_MACRO: "scenic_id"}
 DEFAULT_SCENIC_KEY = "scenic_spot_code"
 
 
-# 按 travel_date（跑数日期）删的表：下钻表的 publish_time 是评论发布时间，散在整个周期区间里
+# 按 travel_date 删的表：下钻表的 publish_time 是评论发布时间（带时分秒），按值相等删不干净
 DELETE_BY_TRAVEL_DATE = {TABLE_DRILL_ANALYSIS}
 
 
