@@ -56,7 +56,7 @@ ETL = {
     "lookback_days": 180,
     # 每次 run 自动把目标日期之前的这么多天一起重跑（评论会晚到约 1 天，前几天的 td / 下钻要刷新）。
     # 0 = 不重跑；命令行 --rerun-days 可临时覆盖
-    # "rerun_days": 7,
+    # "rerun_days": 3,
 
     # 【是什么】CSV 输出目录（跑批产物 + `report`/`push` 子命令读的也是这里）。
     "output_dir": "output",

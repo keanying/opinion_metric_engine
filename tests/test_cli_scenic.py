@@ -165,13 +165,13 @@ def test_single_day_pushes_only_that_day(sample, tmp_path, gateway):
 
 
 def test_daily_run_reruns_previous_days(sample, tmp_path, gateway):
-    """评论会晚到：按日跑默认把前 rerun_days（7）天一起重算、重推，前几天的 td / 下钻跟着刷新。"""
+    """评论会晚到：按日跑默认把前 rerun_days（3）天一起重算、重推，前几天的 td / 下钻跟着刷新。"""
     rc = _run(sample, tmp_path, "--push", "drill,macro", "--scenic", "PFT_S_00001",
               "--date", "20260911", "--rerun-days", "7")
     assert rc == 0
     days = {row["travel_date"] for row in gateway.store[MACRO].values()}
     assert days == {20260904 + i for i in range(8)}
-    assert EtlSettings().rerun_days == 7                  # 默认往前重跑 7 天
+    assert EtlSettings().rerun_days == 3                  # 默认往前重跑 3 天
     assert cli._with_rerun(["20261013"], 2) == ["20261011", "20261012", "20261013"]
     assert cli._with_rerun(["20261013"], 0) == ["20261013"]
 

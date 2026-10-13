@@ -694,7 +694,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--scenic", help="景区编码，逗号分隔；不填或 all = 全部景区，逐个跑、逐个推")
     r.add_argument("--lookback-days", type=int, help="取数回溯天数，默认 180（近半年）")
     r.add_argument("--rerun-days", type=int,
-                   help="目标日期之前再重跑几天（评论晚到，前几天一起刷新），默认 settings.rerun_days=7；0 = 不重跑")
+                   help="目标日期之前再重跑几天（评论晚到，前几天一起刷新），默认 settings.rerun_days=3；0 = 不重跑")
     r.add_argument("--output-dir", help="CSV 输出目录")
     r.add_argument("--skip-db", action="store_true",
                    help="不写 ADS 表（照常从源表读数、计算、推送）。不加就一定写库")

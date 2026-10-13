@@ -609,7 +609,7 @@ GROUP BY region ORDER BY cnt DESC;
   所以按 `travel_date` 删。其余五张表的 `publish_time` 是 `yyyyMMdd` 字符串，与日期一一对应。
 - **删除和写入在同一个事务里**（`db.replace_rows`）：写入失败整体回滚，不会出现「旧数据删了、新数据没写进去」的空窗。
 - 景区 = 命令行 `--scenic` 指定的；不指定时 `run` 本来就是逐个景区跑，每次只删当前景区。
-- **按日跑会自动往前重跑 `rerun_days` 天**（默认 7，`--rerun-days` 可覆盖，0 关闭）：评论会晚到约 1 天，
+- **按日跑会自动往前重跑 `rerun_days` 天**（默认 3，`--rerun-days` 可覆盖，0 关闭）：评论会晚到约 1 天，
   前几天的 td / 下钻明细要跟着刷新，当天的近N日才等于每天 td 之和、热力图 / 词云才对得上下钻表。
   第一次初始化的开始日期至少比第一次按日跑早 92 天（覆盖近90日 / 本季度）。
 - `settings.dimension_upsert` 与 `sql/alter_dimension_uniquekey.sql` 已不再需要（执行过也没有影响）。
