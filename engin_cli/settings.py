@@ -60,7 +60,7 @@ class EtlSettings:
     # 按日只跑当天的话，前几天的 td / 下钻明细停在「当时没采齐」的样子，而当天的近N日
     # 用的是现在的全量 —— 近N日 ≠ 每天 td 之和，热力图 / 词云对不上下钻表。
     # 0 = 不重跑；命令行 --rerun-days 可临时覆盖。
-    rerun_days: int = 7
+    rerun_days: int = 3
     # 上一周期环比需要额外的历史。默认按最长窗口再补一个周期，封顶到 lookback_days。
     growth_extra_days: int = 30
 
