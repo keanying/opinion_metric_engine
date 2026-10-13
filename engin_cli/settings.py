@@ -155,9 +155,14 @@ class EtlSettings:
     # comment 保留这条评论的**全部**关键词（默认，同一条评论在各行里长得一样）
     # word    只保留当前行那一个 emotion_word
     drill_mask_scope: str = "comment"
-    # 关键词一个都没在原文里找到时（实测约 2% —— 大模型把词抽象过了）：
-    # mask_all 整条隐藏（默认）/ keep_raw 原样保留，别存一条没信息量的 `**`
-    drill_mask_on_no_match: str = "mask_all"
+    # 没有关键字时（没抽到关键词，或关键词一个都没在原文里找到 —— 大模型把词抽象过了）：
+    # prefix   展示前 ceil(长度 × 40%) + 5 个字，其余换成一个掩码串；
+    #          全是特殊符号 / 表情（😁、[赞][心]）的整条展示（默认，客户规则）
+    # mask_all 整条隐藏成 `**`
+    # keep_raw 原样保留
+    drill_mask_on_no_match: str = "prefix"
+    drill_mask_no_match_ratio: float = 0.4   # prefix：展示原文的比例
+    drill_mask_no_match_extra: int = 5       # prefix：比例之外再多展示的字数
     drill_mask_ignore_case: bool = True   # 匹配时忽略大小写，输出仍用原文大小写
     # 下钻表跟着内容表一起瘦身：content_top_words 收窄了词表，这张表的词也同步变少
 

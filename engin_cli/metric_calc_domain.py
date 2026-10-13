@@ -34,6 +34,8 @@
 from __future__ import annotations
 
 import json
+import math
+import re
 from typing import Any, Dict, List, Sequence, Union
 
 import numpy as np
@@ -1270,8 +1272,20 @@ def word_surge(cur_value, prev_value):
 # ⚠ 关键词对不上原文的情况真实存在。实测八大处 2 万条评论：
 #   98.1% 的关键词能在原文里原样找到，1.9% 找不到 —— 大模型把词抽象过了
 #   （原文「每次感受都不错」，关键词「感受不错」；原文「景色很漂亮，人也很多」，
-#   关键词「人很多」）。这类评论一个词都对不上，掩码后就是光秃秃一个 `**`。
-#   默认就这么存（隐藏优先）；想让这类评论保留原文，把 on_no_match 设成 "keep_raw"。
+#   关键词「人很多」）。再加上本来就没抽到关键词的评论（湖南样本 9472 条里 7031 条），
+#   这两类统称「没有关键字」，按客户给的规则展示（on_no_match="prefix"，默认）：
+#
+#     1. 展示原文的前 40%（向上取整）
+#     2. 再多展示 5 个字符，剩下的换成一个掩码串
+#     3. 评论全是特殊符号 / 表情（😁👍、[赞][心] 这类表情码、标点）→ 原样完整展示
+#
+#     原文（20 字）  今天去了景区，人特别多，排队排了一个小时
+#     展示           今天去了景区，人特别多，排**          ← ceil(20×40%)=8，+5 = 13 字
+#     原文（7 字）   每次感受都不错                        ← ceil(2.8)+5 = 8 ≥ 7，整条展示
+#     原文           [赞][赞][心]👍                         ← 全是表情，整条展示
+#
+#   比例和多出的字数都能配（drill_mask_no_match_ratio / drill_mask_no_match_extra）。
+#   旧的两种口径还在：mask_all 整条隐藏成 `**`，keep_raw 原样保留。
 
 DRILL_MASK_TOKEN = "**"              # 每一段被隐藏的内容换成什么
 
@@ -1281,15 +1295,43 @@ DRILL_MASK_MODE_CHAR = "char"        # 每个隐藏字符 → 一个掩码字符
 DRILL_MASK_SCOPE_COMMENT = "comment"  # 保留**这条评论的全部关键词**（默认）
 DRILL_MASK_SCOPE_WORD = "word"        # 只保留当前行那一个 emotion_word
 
-DRILL_NO_MATCH_MASK_ALL = "mask_all"  # 一个词都没对上 → 整条隐藏（默认）
-DRILL_NO_MATCH_KEEP_RAW = "keep_raw"  # 一个词都没对上 → 原样保留，别存一条没信息量的 `**`
+DRILL_NO_MATCH_PREFIX = "prefix"      # 没有关键字 → 展示前 40% + 5 字，其余掩码（默认，客户规则）
+DRILL_NO_MATCH_MASK_ALL = "mask_all"  # 没有关键字 → 整条隐藏
+DRILL_NO_MATCH_KEEP_RAW = "keep_raw"  # 没有关键字 → 原样保留
+DRILL_NO_MATCH_RATIO = 0.4            # prefix：展示原文的比例
+DRILL_NO_MATCH_EXTRA = 5              # prefix：在比例之外再多展示的字数
+
+# 表情码：抖音/微博把表情存成「[赞]」「[打call]」「[666]」这种方括号短码
+_EMOJI_CODE = re.compile(r"\[[^\[\]]{1,8}\]")
+
+
+def is_symbol_only(text: str) -> bool:
+    """评论是不是全由特殊符号 / 表情组成（没有一个汉字、字母、数字）。
+
+    表情有两种存法，都算：Unicode 表情（😁👍）和方括号表情码（[赞][心]）。
+    空串也返回 True —— 没东西可藏。
+    """
+    rest = _EMOJI_CODE.sub("", "" if text is None else str(text))
+    return not any(ch.isalnum() for ch in rest)
+
+
+def no_match_keep_len(n: int, ratio: float = DRILL_NO_MATCH_RATIO,
+                      extra: int = DRILL_NO_MATCH_EXTRA) -> int:
+    """没有关键字的评论展示前几个字：ceil(n × ratio) + extra，不超过 n。
+
+    round 一下再取整：15 × 0.4 在浮点里是 6.000000000000001，直接 ceil 会变成 7。
+    """
+    keep = math.ceil(round(n * float(ratio), 9)) + int(extra)
+    return max(0, min(n, keep))
 
 
 def mask_content(text: str, words: Sequence[str], *,
                  token: str = DRILL_MASK_TOKEN,
                  mode: str = DRILL_MASK_MODE_RUN,
                  ignore_case: bool = True,
-                 on_no_match: str = DRILL_NO_MATCH_MASK_ALL) -> tuple:
+                 on_no_match: str = DRILL_NO_MATCH_PREFIX,
+                 no_match_ratio: float = DRILL_NO_MATCH_RATIO,
+                 no_match_extra: int = DRILL_NO_MATCH_EXTRA) -> tuple:
     """把评论原文里**关键词以外**的内容隐藏掉。
 
     公式
@@ -1307,7 +1349,12 @@ def mask_content(text: str, words: Sequence[str], *,
       token        掩码串，默认 "**"
       mode         "run"（默认）/ "char"
       ignore_case  匹配时忽略大小写（英文/拼音关键词常见），输出仍用原文的大小写
-      on_no_match  一个词都没对上时：mask_all（默认，整条隐藏）/ keep_raw（原样保留）
+      on_no_match  没有关键字（没传词，或一个词都没对上）时：
+                     prefix（默认）  前 ceil(长度 × no_match_ratio) + no_match_extra 个字原样，
+                                     其余掩码；全是符号 / 表情的整条展示
+                     mask_all        整条隐藏
+                     keep_raw        原样保留
+      no_match_ratio / no_match_extra   prefix 用的比例（默认 0.4）和多展示的字数（默认 5）
 
     出参
     ----
@@ -1334,6 +1381,15 @@ def mask_content(text: str, words: Sequence[str], *,
     if not spans:
         if on_no_match == DRILL_NO_MATCH_KEEP_RAW:
             return text, 0
+        if on_no_match == DRILL_NO_MATCH_PREFIX:
+            if is_symbol_only(text):           # 全是符号 / 表情：没什么可藏，整条展示
+                return text, 0
+            keep = no_match_keep_len(len(text), no_match_ratio, no_match_extra)
+            if keep >= len(text):              # 短评论：40% + 5 已经盖住全文
+                return text, 0
+            tail = (token if mode == DRILL_MASK_MODE_RUN
+                    else (token[:1] or "*") * (len(text) - keep))
+            return text[:keep] + tail, 0
         return token if mode == DRILL_MASK_MODE_RUN else (token[:1] or "*") * len(text), 0
 
     # 区间合并：关键词可能互相包含（「体力」「体力一般」）或交叉，不合并会切出空片段

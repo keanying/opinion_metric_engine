@@ -95,29 +95,102 @@ def test_ignore_case_matches_but_output_keeps_original_case():
     assert got == "**Happy Valley**"             # 输出保留原文的大小写
     assert hit == 1
     assert mask_content("去了Happy Valley玩", ["happy valley"],
-                        ignore_case=False)[0] == "**"   # 关掉就匹配不上
+                        ignore_case=False)[1] == 0      # 关掉就匹配不上
 
 
-def test_no_keyword_matches_hides_everything_by_default():
-    """实测约 2% 会这样：大模型把词抽象过了，原文里根本没有这个词。"""
+def test_unmatched_short_comment_is_shown_in_full():
+    """实测约 2% 会这样：大模型把词抽象过了，原文里根本没有这个词。
+
+    没有关键字按客户规则展示前 40% + 5 个字；7 个字的评论 ceil(2.8)+5 = 8 ≥ 7，整条展示。
+    """
     got, hit = mask_content("每次感受都不错", ["感受不错"])
+    assert got == "每次感受都不错"
+    assert hit == 0
+
+
+def test_mask_all_still_available():
+    got, hit = mask_content("每次感受都不错", ["感受不错"],
+                            on_no_match=D.DRILL_NO_MATCH_MASK_ALL)
     assert got == "**"
     assert hit == 0
 
 
 def test_no_match_can_keep_raw_instead():
-    """一条纯 `**` 没有任何信息量，需要的话可以让这类评论保留原文。"""
-    got, hit = mask_content("每次感受都不错", ["感受不错"],
-                            on_no_match=D.DRILL_NO_MATCH_KEEP_RAW)
-    assert got == "每次感受都不错"
+    long_text = "今天去了景区，人特别多，排队排了一个小时"
+    got, hit = mask_content(long_text, ["感受不错"], on_no_match=D.DRILL_NO_MATCH_KEEP_RAW)
+    assert got == long_text
     assert hit == 0
 
 
 def test_empty_inputs():
     assert mask_content("", ["词"]) == ("", 0)
     assert mask_content(None, ["词"]) == ("", 0)
-    assert mask_content("有内容没关键词", []) == ("**", 0)
-    assert mask_content("有内容空关键词", ["", "  ", None]) == ("**", 0)
+    assert mask_content("有内容没关键词", []) == ("有内容没关键词", 0)          # 7 字，整条展示
+    assert mask_content("有内容空关键词", ["", "  ", None]) == ("有内容空关键词", 0)
+
+
+# ══════════════════════════════════════════════════════════════════
+# 没有关键字的评论（客户规则）
+#   1. 展示原文的 40%      2. 默认多展示 5 个字
+#   3. 全是特殊符号 / 表情 → 完整展示
+# ══════════════════════════════════════════════════════════════════
+def test_no_keyword_shows_40_percent_plus_5():
+    text = "今天去了景区，人特别多，排队排了一个小时"            # 20 字
+    got, hit = mask_content(text, [])
+    assert got == "今天去了景区，人特别多，排**"                 # ceil(20×0.4)=8，+5 = 13 字
+    assert len(got) - 2 == 13
+    assert hit == 0
+    # 关键词一个都没对上，同样处理
+    assert mask_content(text, ["感受不错"])[0] == got
+
+
+def test_keep_len_rounds_up_and_caps_at_length():
+    assert D.no_match_keep_len(20) == 13
+    assert D.no_match_keep_len(15) == 6 + 5         # 15×0.4 浮点是 6.000000000000001，不能变 7
+    assert D.no_match_keep_len(11) == 5 + 5         # ceil(4.4) = 5
+    assert D.no_match_keep_len(9) == 9              # ceil(3.6)+5 = 9，正好全文
+    assert D.no_match_keep_len(3) == 3              # 不超过原文
+    assert D.no_match_keep_len(0) == 0
+
+
+def test_boundary_between_full_and_masked():
+    assert mask_content("一二三四五六七八九", [])[0] == "一二三四五六七八九"         # 9 字 → 9
+    assert mask_content("一二三四五六七八九十", [])[0] == "一二三四五六七八九**"     # 10 字 → 9
+
+
+def test_ratio_and_extra_are_configurable():
+    text = "今天去了景区，人特别多，排队排了一个小时"
+    assert mask_content(text, [], no_match_ratio=0.5, no_match_extra=0)[0] \
+        == "今天去了景区，人特别**"
+    assert mask_content(text, [], no_match_ratio=0, no_match_extra=3)[0] == "今天去**"
+
+
+def test_char_mode_prefix_shows_length():
+    got, _ = mask_content("一二三四五六七八九十一二", [], mode=D.DRILL_MASK_MODE_CHAR)
+    assert got == "一二三四五六七八九十" + "**"           # ceil(4.8)+5 = 10，剩 2 字 → 2 个星号
+
+
+@pytest.mark.parametrize("text", [
+    "👍👍👍", "😓😓", "👍🏻", "。", "？？？！！！", "~~~", "  ",
+    "[赞][赞][赞]", "[心][鲜花]", "[打call][打call][打call]", "[666][666][666][666]",
+    "[赞][心]👍！！", "【】……——",
+])
+def test_symbol_or_emoji_only_is_shown_in_full(text):
+    assert D.is_symbol_only(text)
+    assert mask_content(text, [])[0] == text
+    assert mask_content(text, ["好玩"])[0] == text
+
+
+@pytest.mark.parametrize("text", [
+    "好分享[不愧是你][不愧是你]", "666", "ok👍", "[赞]景色很好", "①",
+])
+def test_text_with_letters_or_digits_is_not_symbol_only(text):
+    assert not D.is_symbol_only(text)
+
+
+def test_long_emoji_comment_still_shown_in_full():
+    text = "[赞]" * 20 + "👍" * 10                    # 90 字符，全是表情
+    assert mask_content(text, [])[0] == text
 
 
 def test_custom_token():
@@ -146,7 +219,9 @@ def _comment(cid, content, words, ds="20260911"):
 def _run(**kw):
     rows = [_comment("c1", "我是体力一般，来回两个半小时左右",
                      ["体力一般", "来回两个半小时"]),
-            _comment("c2", "每次感受都不错", ["感受不错"])]
+            _comment("c2", "每次感受都不错", ["感受不错"]),
+            _comment("c3", "今天去了景区，人特别多，排队排了一个小时", []),
+            _comment("c4", "[赞][赞][心]👍👍", [])]
     for d in pd.date_range("2026-09-01", "2026-09-11"):      # 撑住日历
         ds = d.strftime("%Y%m%d")
         rows.append(_comment(f"bg{ds}", "景色很好玩", ["好玩"], ds))
@@ -197,9 +272,18 @@ def test_scope_word_highlights_only_that_row_s_word():
     assert rows["来回两个半小时"] == "**来回两个半小时**"
 
 
-def test_unmatched_keyword_row_is_fully_masked(drill):
+def test_unmatched_keyword_row_uses_the_no_keyword_rule(drill):
     d = drill.tables[DRILL]
-    assert d[d.comment_id == "c2"]["content_snippet"].iloc[0] == "**"
+    assert d[d.comment_id == "c2"]["content_snippet"].iloc[0] == "每次感受都不错"
+    assert d[d.comment_id == "c3"]["content_snippet"].iloc[0] == "今天去了景区，人特别多，排**"
+    assert d[d.comment_id == "c4"]["content_snippet"].iloc[0] == "[赞][赞][心]👍👍"
+
+
+def test_no_keyword_rule_is_configurable_from_settings():
+    d = _run(drill_mask_no_match_ratio=0.5, drill_mask_no_match_extra=0).tables[DRILL]
+    assert d[d.comment_id == "c3"]["content_snippet"].iloc[0] == "今天去了景区，人特别**"
+    d = _run(drill_mask_on_no_match=D.DRILL_NO_MATCH_MASK_ALL).tables[DRILL]
+    assert d[d.comment_id == "c3"]["content_snippet"].iloc[0] == "**"
 
 
 def test_can_be_turned_off():
@@ -221,4 +305,5 @@ def test_truncation_happens_before_masking():
     d = _run(drill_content_limit=10).tables[DRILL]
     assert (d["content_snippet"].str.len() <= 10 + 8).all()
     got, hit = mask_content(long_tail[:10], ["体力一般"])
-    assert got == "**" and hit == 0             # 关键词在 10 字之外，整条隐藏
+    assert hit == 0                             # 关键词在 10 字之外，算没有关键字
+    assert got == "开头填填填填填填填**"         # 截断后的 10 字按 ceil(4)+5 = 9 字展示

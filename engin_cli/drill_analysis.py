@@ -213,7 +213,7 @@ def build_drill_analysis(comment_facts: pd.DataFrame, works: pd.DataFrame,
                  + (f"，其中 {n_no_match:,} 条的关键词在原文里一个都没找到"
                     f"（{n_no_match / n_masked:.1%}，大模型把词抽象过了），"
                     f"按 drill_mask_on_no_match="
-                    f"{getattr(ctx.settings, 'drill_mask_on_no_match', 'mask_all')} 处理"
+                    f"{getattr(ctx.settings, 'drill_mask_on_no_match', 'prefix')} 处理"
                     if n_no_match else "，关键词全部命中"))
     return out[COLUMNS].sort_values(
         ["scenic_id", "travel_date", "time_granularity", "emotion_word"]).reset_index(drop=True)
@@ -291,5 +291,7 @@ def _mask_config(ctx: RunContext):
         "token": getattr(st, "drill_mask_token", D.DRILL_MASK_TOKEN),
         "mode": getattr(st, "drill_mask_mode", D.DRILL_MASK_MODE_RUN),
         "ignore_case": bool(getattr(st, "drill_mask_ignore_case", True)),
-        "on_no_match": getattr(st, "drill_mask_on_no_match", D.DRILL_NO_MATCH_MASK_ALL),
+        "on_no_match": getattr(st, "drill_mask_on_no_match", D.DRILL_NO_MATCH_PREFIX),
+        "no_match_ratio": float(getattr(st, "drill_mask_no_match_ratio", D.DRILL_NO_MATCH_RATIO)),
+        "no_match_extra": int(getattr(st, "drill_mask_no_match_extra", D.DRILL_NO_MATCH_EXTRA)),
     }
