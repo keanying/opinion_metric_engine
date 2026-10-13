@@ -294,4 +294,6 @@ def _mask_config(ctx: RunContext):
         "on_no_match": getattr(st, "drill_mask_on_no_match", D.DRILL_NO_MATCH_PREFIX),
         "no_match_ratio": float(getattr(st, "drill_mask_no_match_ratio", D.DRILL_NO_MATCH_RATIO)),
         "no_match_extra": int(getattr(st, "drill_mask_no_match_extra", D.DRILL_NO_MATCH_EXTRA)),
+        "no_match_short_ratio": float(getattr(st, "drill_mask_no_match_short_ratio",
+                                              D.DRILL_NO_MATCH_SHORT_RATIO)),
     }

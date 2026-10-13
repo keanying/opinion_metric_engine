@@ -1273,18 +1273,23 @@ def word_surge(cur_value, prev_value):
 #   98.1% 的关键词能在原文里原样找到，1.9% 找不到 —— 大模型把词抽象过了
 #   （原文「每次感受都不错」，关键词「感受不错」；原文「景色很漂亮，人也很多」，
 #   关键词「人很多」）。再加上本来就没抽到关键词的评论（湖南样本 9472 条里 7031 条），
-#   这两类统称「没有关键字」，按客户给的规则展示（on_no_match="prefix"，默认）：
+#   这两类统称「没有关键字」，按客户给的规则展示（on_no_match="prefix"，默认）。
+#   记 n = 原文字数，比例 r = 20%，最多展示 m = 4 个字：
 #
-#     1. 展示原文的前 40%（向上取整）
-#     2. 再多展示 5 个字符，剩下的换成一个掩码串
-#     3. 评论全是特殊符号 / 表情（😁👍、[赞][心] 这类表情码、标点）→ 原样完整展示
+#     0. 全是特殊符号 / 表情（😁👍、[赞][心] 这类表情码、标点）→ 整条展示
+#     1. 只有 1 个文字、其余是符号 / 表情（好！ / 好👌）→ 直接 `**`
+#     2. n ≤ m（4 字及以内）→ 砍掉一半，展示前 floor(n × 50%) 个字；不足 1 个字 → `**`
+#     3. floor(n × 20%) ≤ m → 展示前 floor(n × 20%) 个字，其余 `**`
+#     4. floor(n × 20%) > m → 掐头去尾，展示正中间的 m 个字，两头 `**`
 #
-#     原文（20 字）  今天去了景区，人特别多，排队排了一个小时
-#     展示           今天去了景区，人特别多，排**          ← ceil(20×40%)=8，+5 = 13 字
-#     原文（7 字）   每次感受都不错                        ← ceil(2.8)+5 = 8 ≥ 7，整条展示
-#     原文           [赞][赞][心]👍                         ← 全是表情，整条展示
+#     原文                                         展示
+#     好 / 好！ / 好👌                              **
+#     很好玩啊（4 字）                              很好**              ← 规则 2
+#     今天去了景区，人特别多，排队排了一个小时（20 字）  今天去了**          ← 规则 3，floor(4.0)=4
+#     30 字的评论                                   **正中4字**         ← 规则 4，floor(6.0)=6 > 4
+#     [赞][赞][心]👍                                 [赞][赞][心]👍       ← 规则 0
 #
-#   比例和多出的字数都能配（drill_mask_no_match_ratio / drill_mask_no_match_extra）。
+#   比例、最多字数、短评论比例都能配（drill_mask_no_match_ratio / _extra / _short_ratio）。
 #   旧的两种口径还在：mask_all 整条隐藏成 `**`，keep_raw 原样保留。
 
 DRILL_MASK_TOKEN = "**"              # 每一段被隐藏的内容换成什么
@@ -1295,11 +1300,12 @@ DRILL_MASK_MODE_CHAR = "char"        # 每个隐藏字符 → 一个掩码字符
 DRILL_MASK_SCOPE_COMMENT = "comment"  # 保留**这条评论的全部关键词**（默认）
 DRILL_MASK_SCOPE_WORD = "word"        # 只保留当前行那一个 emotion_word
 
-DRILL_NO_MATCH_PREFIX = "prefix"      # 没有关键字 → 展示前 40% + 5 字，其余掩码（默认，客户规则）
+DRILL_NO_MATCH_PREFIX = "prefix"      # 没有关键字 → 按比例展示一小段，其余掩码（默认，客户规则）
 DRILL_NO_MATCH_MASK_ALL = "mask_all"  # 没有关键字 → 整条隐藏
 DRILL_NO_MATCH_KEEP_RAW = "keep_raw"  # 没有关键字 → 原样保留
-DRILL_NO_MATCH_RATIO = 0.4            # prefix：展示原文的比例
-DRILL_NO_MATCH_EXTRA = 5              # prefix：在比例之外再多展示的字数
+DRILL_NO_MATCH_RATIO = 0.2            # prefix：展示原文的比例（向下取整）
+DRILL_NO_MATCH_EXTRA = 4              # prefix：最多展示几个字；原文不超过这么多字的算短评论
+DRILL_NO_MATCH_SHORT_RATIO = 0.5      # prefix：短评论展示的比例（向下取整，不足 1 个字 → 全隐藏）
 
 # 表情码：抖音/微博把表情存成「[赞]」「[打call]」「[666]」这种方括号短码
 _EMOJI_CODE = re.compile(r"\[[^\[\]]{1,8}\]")
@@ -1315,14 +1321,42 @@ def is_symbol_only(text: str) -> bool:
     return not any(ch.isalnum() for ch in rest)
 
 
-def no_match_keep_len(n: int, ratio: float = DRILL_NO_MATCH_RATIO,
-                      extra: int = DRILL_NO_MATCH_EXTRA) -> int:
-    """没有关键字的评论展示前几个字：ceil(n × ratio) + extra，不超过 n。
+def text_char_count(text: str) -> int:
+    """文字（汉字 / 字母 / 数字）的个数，表情码和符号不算。"""
+    rest = _EMOJI_CODE.sub("", "" if text is None else str(text))
+    return sum(1 for ch in rest if ch.isalnum())
 
-    round 一下再取整：15 × 0.4 在浮点里是 6.000000000000001，直接 ceil 会变成 7。
+
+def _floor_ratio(n: int, ratio: float) -> int:
+    # round 一下再取整：浮点乘法会有 0.999999 这种尾巴（如 15 × 0.2 不是正好 3）
+    return int(math.floor(round(n * float(ratio), 9)))
+
+
+def no_match_keep_span(text: str, ratio: float = DRILL_NO_MATCH_RATIO,
+                       max_chars: int = DRILL_NO_MATCH_EXTRA,
+                       short_ratio: float = DRILL_NO_MATCH_SHORT_RATIO):
+    """没有关键字的评论展示哪一段（规则见本章开头）。
+
+    出参：(start, end) 原文里原样展示的区间；None = 整条隐藏。
+          (0, len(text)) 就是整条展示。
     """
-    keep = math.ceil(round(n * float(ratio), 9)) + int(extra)
-    return max(0, min(n, keep))
+    text = "" if text is None else str(text)
+    n = len(text)
+    m = int(max_chars)
+    if is_symbol_only(text):                   # 0. 全是符号 / 表情：没什么可藏
+        return (0, n)
+    if text_char_count(text) <= 1:             # 1. 好！ / 好👌：露一个字就是全部，直接藏
+        return None
+    if n <= m:                                 # 2. 短评论：砍掉一半
+        keep = _floor_ratio(n, short_ratio)
+        return (0, keep) if keep >= 1 else None
+    keep = _floor_ratio(n, ratio)
+    if keep < 1:                               # 比例配得很小时兜底
+        return None
+    if keep <= m:                              # 3. 前 20%
+        return (0, keep)
+    start = (n - m) // 2                       # 4. 掐头去尾，正中间 m 个字
+    return (start, start + m)
 
 
 def mask_content(text: str, words: Sequence[str], *,
@@ -1331,7 +1365,8 @@ def mask_content(text: str, words: Sequence[str], *,
                  ignore_case: bool = True,
                  on_no_match: str = DRILL_NO_MATCH_PREFIX,
                  no_match_ratio: float = DRILL_NO_MATCH_RATIO,
-                 no_match_extra: int = DRILL_NO_MATCH_EXTRA) -> tuple:
+                 no_match_extra: int = DRILL_NO_MATCH_EXTRA,
+                 no_match_short_ratio: float = DRILL_NO_MATCH_SHORT_RATIO) -> tuple:
     """把评论原文里**关键词以外**的内容隐藏掉。
 
     公式
@@ -1350,11 +1385,12 @@ def mask_content(text: str, words: Sequence[str], *,
       mode         "run"（默认）/ "char"
       ignore_case  匹配时忽略大小写（英文/拼音关键词常见），输出仍用原文的大小写
       on_no_match  没有关键字（没传词，或一个词都没对上）时：
-                     prefix（默认）  前 ceil(长度 × no_match_ratio) + no_match_extra 个字原样，
-                                     其余掩码；全是符号 / 表情的整条展示
+                     prefix（默认）  按 no_match_keep_span 展示一小段，其余掩码
                      mask_all        整条隐藏
                      keep_raw        原样保留
-      no_match_ratio / no_match_extra   prefix 用的比例（默认 0.4）和多展示的字数（默认 5）
+      no_match_ratio        prefix：展示比例，默认 0.2
+      no_match_extra        prefix：最多展示几个字，默认 4
+      no_match_short_ratio  prefix：不超过 no_match_extra 字的短评论展示比例，默认 0.5
 
     出参
     ----
@@ -1382,15 +1418,10 @@ def mask_content(text: str, words: Sequence[str], *,
         if on_no_match == DRILL_NO_MATCH_KEEP_RAW:
             return text, 0
         if on_no_match == DRILL_NO_MATCH_PREFIX:
-            if is_symbol_only(text):           # 全是符号 / 表情：没什么可藏，整条展示
-                return text, 0
-            keep = no_match_keep_len(len(text), no_match_ratio, no_match_extra)
-            if keep >= len(text):              # 短评论：40% + 5 已经盖住全文
-                return text, 0
-            tail = (token if mode == DRILL_MASK_MODE_RUN
-                    else (token[:1] or "*") * (len(text) - keep))
-            return text[:keep] + tail, 0
-        return token if mode == DRILL_MASK_MODE_RUN else (token[:1] or "*") * len(text), 0
+            span = no_match_keep_span(text, no_match_ratio, no_match_extra,
+                                      no_match_short_ratio)
+            return _render_spans(text, [list(span)] if span else [], token, mode), 0
+        return _render_spans(text, [], token, mode), 0
 
     # 区间合并：关键词可能互相包含（「体力」「体力一般」）或交叉，不合并会切出空片段
     spans.sort()
@@ -1400,17 +1431,21 @@ def mask_content(text: str, words: Sequence[str], *,
             merged[-1][1] = max(merged[-1][1], e)
         else:
             merged.append([s, e])
+    return _render_spans(text, merged, token, mode), len(merged)
 
+
+def _render_spans(text: str, keep, token: str, mode: str) -> str:
+    """keep 里的区间原样输出，区间之间 / 两头的内容换成掩码。keep 须已排序、不重叠。"""
     fill = (token[:1] or "*")
     out, pos = [], 0
-    for s, e in merged:
-        if s > pos:                            # 命中区间之前的那段要隐藏
+    for s, e in keep:
+        if s > pos:                            # 保留区间之前的那段要隐藏
             out.append(token if mode == DRILL_MASK_MODE_RUN else fill * (s - pos))
-        out.append(text[s:e])                  # 关键词原样输出
+        out.append(text[s:e])                  # 关键词 / 展示段原样输出
         pos = e
-    if pos < len(text):                        # 最后一个关键词之后还有尾巴
+    if pos < len(text):                        # 最后一个保留区间之后还有尾巴
         out.append(token if mode == DRILL_MASK_MODE_RUN else fill * (len(text) - pos))
-    return "".join(out), len(merged)
+    return "".join(out)
 
 
 # ══════════════════════════════════════════════════════════════════════════

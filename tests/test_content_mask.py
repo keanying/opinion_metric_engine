@@ -98,13 +98,10 @@ def test_ignore_case_matches_but_output_keeps_original_case():
                         ignore_case=False)[1] == 0      # 关掉就匹配不上
 
 
-def test_unmatched_short_comment_is_shown_in_full():
-    """实测约 2% 会这样：大模型把词抽象过了，原文里根本没有这个词。
-
-    没有关键字按客户规则展示前 40% + 5 个字；7 个字的评论 ceil(2.8)+5 = 8 ≥ 7，整条展示。
-    """
+def test_unmatched_keyword_uses_the_no_keyword_rule():
+    """实测约 2% 会这样：大模型把词抽象过了，原文里根本没有这个词 —— 按「没有关键字」处理。"""
     got, hit = mask_content("每次感受都不错", ["感受不错"])
-    assert got == "每次感受都不错"
+    assert got == "每**"                          # 7 字：floor(7×20%) = 1
     assert hit == 0
 
 
@@ -125,49 +122,77 @@ def test_no_match_can_keep_raw_instead():
 def test_empty_inputs():
     assert mask_content("", ["词"]) == ("", 0)
     assert mask_content(None, ["词"]) == ("", 0)
-    assert mask_content("有内容没关键词", []) == ("有内容没关键词", 0)          # 7 字，整条展示
-    assert mask_content("有内容空关键词", ["", "  ", None]) == ("有内容空关键词", 0)
+    assert mask_content("有内容没关键词", []) == ("有**", 0)
+    assert mask_content("有内容空关键词", ["", "  ", None]) == ("有**", 0)
 
 
 # ══════════════════════════════════════════════════════════════════
-# 没有关键字的评论（客户规则）
-#   1. 展示原文的 40%      2. 默认多展示 5 个字
-#   3. 全是特殊符号 / 表情 → 完整展示
+# 没有关键字的评论（客户规则）：展示 20%，最多展示 4 个字
+#   1. 20% 后不超过 4 个字 → 直接展示（前 20%）
+#   2. 原文本身不超过 4 个字 → 砍 50%，不足 1 个字 → **
+#   3. 只有 1 个文字 + 符号 / 表情（好！ / 好👌）→ **
+#   4. 20% 后超过 4 个字 → 掐头去尾，展示正中间 4 个字
+#   全是符号 / 表情 → 完整展示
 # ══════════════════════════════════════════════════════════════════
-def test_no_keyword_shows_40_percent_plus_5():
+def test_rule1_shows_first_20_percent():
     text = "今天去了景区，人特别多，排队排了一个小时"            # 20 字
     got, hit = mask_content(text, [])
-    assert got == "今天去了景区，人特别多，排**"                 # ceil(20×0.4)=8，+5 = 13 字
-    assert len(got) - 2 == 13
+    assert got == "今天去了**"                               # floor(20×20%) = 4
     assert hit == 0
-    # 关键词一个都没对上，同样处理
-    assert mask_content(text, ["感受不错"])[0] == got
+    assert mask_content(text, ["感受不错"])[0] == got          # 关键词没对上，同样处理
+    assert mask_content("一二三四五", [])[0] == "一**"          # 5 字：floor(1.0) = 1
+    assert mask_content("一二三四五六七八九", [])[0] == "一**"   # 9 字：floor(1.8) = 1
+    assert mask_content("一二三四五六七八九十", [])[0] == "一二**"
 
 
-def test_keep_len_rounds_up_and_caps_at_length():
-    assert D.no_match_keep_len(20) == 13
-    assert D.no_match_keep_len(15) == 6 + 5         # 15×0.4 浮点是 6.000000000000001，不能变 7
-    assert D.no_match_keep_len(11) == 5 + 5         # ceil(4.4) = 5
-    assert D.no_match_keep_len(9) == 9              # ceil(3.6)+5 = 9，正好全文
-    assert D.no_match_keep_len(3) == 3              # 不超过原文
-    assert D.no_match_keep_len(0) == 0
+@pytest.mark.parametrize("text, want", [
+    ("很好玩啊", "很好**"),         # 4 字 → 2
+    ("好玩啊", "好**"),             # 3 字 → floor(1.5) = 1
+    ("好的", "好**"),               # 2 字 → 1
+    ("好", "**"),                   # 1 字 → floor(0.5) = 0，不足 1 个字
+    ("ok", "o**"),
+])
+def test_rule2_short_comment_is_cut_in_half(text, want):
+    assert mask_content(text, [])[0] == want
 
 
-def test_boundary_between_full_and_masked():
-    assert mask_content("一二三四五六七八九", [])[0] == "一二三四五六七八九"         # 9 字 → 9
-    assert mask_content("一二三四五六七八九十", [])[0] == "一二三四五六七八九**"     # 10 字 → 9
+@pytest.mark.parametrize("text", ["好！", "好👌", "好[赞]", "好！！！", "👍好👍", "A~"])
+def test_rule3_one_char_plus_symbols_is_fully_masked(text):
+    assert mask_content(text, [])[0] == "**"
 
 
-def test_ratio_and_extra_are_configurable():
+def test_rule4_long_comment_shows_the_middle_4_chars():
+    text = "一二三四五六七八九十" * 3                             # 30 字：floor(6) = 6 > 4
+    assert mask_content(text, [])[0] == "**" + text[13:17] + "**"   # (30-4)//2 = 13
+    text = "零一二三四五六七八九" + "甲乙丙丁戊" + "零一二三四五六七八九"   # 25 字
+    assert mask_content(text, [])[0] == "**甲乙丙丁**"              # (25-4)//2 = 10
+
+
+def test_boundary_between_rule1_and_rule4():
+    t24, t25 = "一" * 20 + "二三四五", "一" * 25
+    assert mask_content(t24, [])[0] == "一一一一**"            # floor(4.8) = 4 → 前 4 个
+    assert mask_content(t25, [])[0] == "**一一一一**"          # floor(5.0) = 5 → 正中间 4 个
+
+
+def test_floor_ratio_ignores_float_noise():
+    assert D._floor_ratio(100, 0.29) == 29        # 100×0.29 浮点是 28.999999999999996
+    assert D._floor_ratio(3, 0.5) == 1
+    assert D._floor_ratio(4, 0.2) == 0
+
+
+def test_ratio_and_max_chars_are_configurable():
     text = "今天去了景区，人特别多，排队排了一个小时"
-    assert mask_content(text, [], no_match_ratio=0.5, no_match_extra=0)[0] \
+    assert mask_content(text, [], no_match_ratio=0.5, no_match_extra=10)[0] \
         == "今天去了景区，人特别**"
-    assert mask_content(text, [], no_match_ratio=0, no_match_extra=3)[0] == "今天去**"
+    assert mask_content(text, [], no_match_ratio=0.5, no_match_extra=2)[0] \
+        == "**别多**"                                         # 10 > 2：(20-2)//2 = 9 起 2 个字
+    assert mask_content("很好玩啊", [], no_match_short_ratio=0.75)[0] == "很好玩**"
 
 
-def test_char_mode_prefix_shows_length():
-    got, _ = mask_content("一二三四五六七八九十一二", [], mode=D.DRILL_MASK_MODE_CHAR)
-    assert got == "一二三四五六七八九十" + "**"           # ceil(4.8)+5 = 10，剩 2 字 → 2 个星号
+def test_char_mode_shows_length():
+    text = "一二三四五六七八九十" * 3
+    got, _ = mask_content(text, [], mode=D.DRILL_MASK_MODE_CHAR)
+    assert got == "*" * 13 + text[13:17] + "*" * 13
 
 
 @pytest.mark.parametrize("text", [
@@ -274,13 +299,13 @@ def test_scope_word_highlights_only_that_row_s_word():
 
 def test_unmatched_keyword_row_uses_the_no_keyword_rule(drill):
     d = drill.tables[DRILL]
-    assert d[d.comment_id == "c2"]["content_snippet"].iloc[0] == "每次感受都不错"
-    assert d[d.comment_id == "c3"]["content_snippet"].iloc[0] == "今天去了景区，人特别多，排**"
+    assert d[d.comment_id == "c2"]["content_snippet"].iloc[0] == "每**"
+    assert d[d.comment_id == "c3"]["content_snippet"].iloc[0] == "今天去了**"
     assert d[d.comment_id == "c4"]["content_snippet"].iloc[0] == "[赞][赞][心]👍👍"
 
 
 def test_no_keyword_rule_is_configurable_from_settings():
-    d = _run(drill_mask_no_match_ratio=0.5, drill_mask_no_match_extra=0).tables[DRILL]
+    d = _run(drill_mask_no_match_ratio=0.5, drill_mask_no_match_extra=10).tables[DRILL]
     assert d[d.comment_id == "c3"]["content_snippet"].iloc[0] == "今天去了景区，人特别**"
     d = _run(drill_mask_on_no_match=D.DRILL_NO_MATCH_MASK_ALL).tables[DRILL]
     assert d[d.comment_id == "c3"]["content_snippet"].iloc[0] == "**"
@@ -306,4 +331,4 @@ def test_truncation_happens_before_masking():
     assert (d["content_snippet"].str.len() <= 10 + 8).all()
     got, hit = mask_content(long_tail[:10], ["体力一般"])
     assert hit == 0                             # 关键词在 10 字之外，算没有关键字
-    assert got == "开头填填填填填填填**"         # 截断后的 10 字按 ceil(4)+5 = 9 字展示
+    assert got == "开头**"                       # 截断后的 10 字：floor(10×20%) = 2
