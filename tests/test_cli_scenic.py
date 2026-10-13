@@ -81,9 +81,11 @@ def sample(tmp_path_factory):
 
 
 def _run(sample, out, *extra):
+    # 默认不往前重跑（--rerun-days 0），各用例按「只跑指定日期」数行数；测重跑的用例自己传
+    rerun = [] if "--rerun-days" in extra else ["--rerun-days", "0"]
     return cli.main(["run", "--comments-csv", str(sample / "comments.csv"),
                      "--works-csv", str(sample / "works.csv"), "--skip-db",
-                     "--output-dir", str(out), "--lookback-days", "40", *extra])
+                     "--output-dir", str(out), "--lookback-days", "40", *rerun, *extra])
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -153,13 +155,25 @@ def test_run_all_scenics_one_by_one(sample, tmp_path, gateway):
 
 
 def test_single_day_pushes_only_that_day(sample, tmp_path, gateway):
-    rc = _run(sample, tmp_path, "--push", "all",
+    rc = _run(sample, tmp_path, "--push", "all", "--rerun-days", "0",
               "--start-date", "20260911", "--end-date", "20260911")
     assert rc == 0
     for t in (CORE, PLATFORM, DIMENSION, CONTENT, DRILL, MACRO):
         assert {k[[i for i, _ in enumerate(k)][0]] for k in gateway.store[t]}  # 非空
         days = {row["travel_date"] for row in gateway.store[t].values()}
         assert days == {20260911}, t
+
+
+def test_daily_run_reruns_previous_days(sample, tmp_path, gateway):
+    """评论会晚到：按日跑默认把前 rerun_days（7）天一起重算、重推，前几天的 td / 下钻跟着刷新。"""
+    rc = _run(sample, tmp_path, "--push", "drill,macro", "--scenic", "PFT_S_00001",
+              "--date", "20260911", "--rerun-days", "7")
+    assert rc == 0
+    days = {row["travel_date"] for row in gateway.store[MACRO].values()}
+    assert days == {20260904 + i for i in range(8)}
+    assert EtlSettings().rerun_days == 7                  # 默认往前重跑 7 天
+    assert cli._with_rerun(["20261013"], 2) == ["20261011", "20261012", "20261013"]
+    assert cli._with_rerun(["20261013"], 0) == ["20261013"]
 
 
 def test_push_subset_of_tables(sample, tmp_path, gateway):
