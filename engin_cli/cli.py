@@ -82,6 +82,15 @@ def _explicit_dates(args) -> Optional[List[str]]:
     return None
 
 
+def _with_rerun(dates: List[str], rerun_days: int) -> List[str]:
+    """目标日期再往前加 rerun_days 天（settings.rerun_days）：前几天晚到的评论一起重算、重写库、重推。"""
+    n = int(rerun_days or 0)
+    if n <= 0 or not dates:
+        return list(dates)
+    first = (pd.to_datetime(min(dates), format="%Y%m%d") - pd.Timedelta(days=n)).strftime("%Y%m%d")
+    return sorted(set(dates) | set(_date_range(first, min(dates))))
+
+
 def _dates(args) -> List[str]:
     """run 的目标日期。什么都不写 = 昨天（当天评论还在陆续产生，跑当天会偏低）。"""
     return _explicit_dates(args) or [
@@ -167,6 +176,9 @@ def cmd_run(args) -> int:
         return 2
 
     dates = _dates(args)
+    rerun = st.rerun_days if getattr(args, "rerun_days", None) is None else args.rerun_days
+    asked = dates
+    dates = _with_rerun(dates, rerun)
     comments_df = fetch_comments_csv(args.comments_csv) if args.comments_csv else None
     works_df = fetch_works_csv(args.works_csv) if args.works_csv else None
 
@@ -196,6 +208,9 @@ def cmd_run(args) -> int:
         print(f"engin_cli v{__version__}   目标日期 {dates[0]} ~ {dates[-1]}   "
               f"景区 {len(scenics)} 个"
               + (f"   推送 → {st.push_url}" if st.push_enabled else ""))
+        if len(dates) > len(asked):
+            print(f"（含往前重跑 {len(dates) - len(asked)} 天：评论会晚到，前几天的数据一起刷新；"
+                  f"--rerun-days 0 可关闭）")
         print("=" * 72)
         for i, sc in enumerate(scenics, 1):
             print(f"\n[{i}/{len(scenics)}] 景区 {sc}")
@@ -678,6 +693,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--end-date", help="区间止 yyyyMMdd")
     r.add_argument("--scenic", help="景区编码，逗号分隔；不填或 all = 全部景区，逐个跑、逐个推")
     r.add_argument("--lookback-days", type=int, help="取数回溯天数，默认 180（近半年）")
+    r.add_argument("--rerun-days", type=int,
+                   help="目标日期之前再重跑几天（评论晚到，前几天一起刷新），默认 settings.rerun_days=7；0 = 不重跑")
     r.add_argument("--output-dir", help="CSV 输出目录")
     r.add_argument("--skip-db", action="store_true",
                    help="不写 ADS 表（照常从源表读数、计算、推送）。不加就一定写库")
