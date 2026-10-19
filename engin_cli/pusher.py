@@ -28,6 +28,8 @@
 · **重试只针对可重试的错误**（网络异常、5xx、429），4xx 不重试 ——
   报文格式错了重试一百次也还是错。
 · **日志不打请求头**：Authorization 里是密钥，落到日志文件就等于泄露。
+· **每次请求的真实响应都落盘**（push_log_dir，默认 logs/push_<日期>.log，一行一个 JSON）：
+  成功、失败、重试的每一次都记，带 HTTP 状态码和响应体原文，事后对账 / 找下游要 trace_id 用。
 · **HTTP 200 不等于成功**：网关把业务失败放在响应体里
   （`{"status": false, "code": 5011, "msg": "...", "trace_id": "..."}`）。
   响应体是 JSON 且带 push_success_field（默认 status）时，它为假就算失败，
@@ -39,6 +41,7 @@ from __future__ import annotations
 import errno
 import json
 import logging
+import os
 import socket
 import threading
 import time
@@ -96,6 +99,7 @@ class PushResult:
     warning: str = ""
     pk_sample: str = ""         # 一组重复行组成的请求 JSON（单行，可直接拿去推）
     pk_dump: str = ""           # 全部重复行组成的请求 JSON 文件路径
+    log_path: str = ""          # 推送记录文件（每次请求的真实响应）
 
     @property
     def ok(self) -> bool:
@@ -124,6 +128,9 @@ class PushReport:
                        f"{r.elapsed:.1f}s，{state}")
             if r.warning:
                 out.append(f"⚠ {r.table}：{r.warning}")
+        paths = sorted({r.log_path for r in self.results if r.log_path})
+        if paths:
+            out.append("推送响应记录：" + "、".join(paths))
         return out
 
 
@@ -411,6 +418,57 @@ def check_response(text: str, fields: Optional[Dict[str, str]] = None) -> None:
     raise BusinessError("业务失败（HTTP 200）：" + (" ".join(parts) or text[:500]))
 
 
+# ══════════════════════════════════════════════════════════════════════
+# 推送记录：每次请求的真实响应落盘
+# ══════════════════════════════════════════════════════════════════════
+def push_log_path(settings, now: Optional[float] = None) -> str:
+    """推送记录文件路径：<push_log_dir>/push_<yyyyMMdd>.log；push_log_dir 为空返回 ""。
+
+    环境变量 OPINION_PUSH_LOG_DIR 优先于 settings（临时换目录、测试隔离用）。
+    """
+    env = os.environ.get("OPINION_PUSH_LOG_DIR")
+    d = str(env if env is not None else (getattr(settings, "push_log_dir", "") or "")).strip()
+    if not d:
+        return ""
+    return os.path.join(d, time.strftime("push_%Y%m%d.log", time.localtime(now)))
+
+
+def write_push_log(settings, record: Dict[str, Any]) -> str:
+    """追加一行 JSON 到推送记录文件，返回文件路径（不记 / 写失败返回 ""）。
+
+    写失败（目录没权限、磁盘满）只打一条 warning，不影响推送本身。
+    """
+    path = push_log_path(settings)
+    if not path:
+        return ""
+    rec = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), **record}
+    limit = int(getattr(settings, "push_log_max_chars", 0) or 0)
+    text = rec.get("response")
+    if limit > 0 and isinstance(text, str) and len(text) > limit:
+        rec["response"] = text[:limit]
+        rec["response_truncated"] = len(text)
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+        return path
+    except OSError as e:
+        log.warning("推送记录写文件失败：%s（%s）", path, e)
+        return ""
+
+
+def _batch_brief(chunk: pd.DataFrame) -> Dict[str, Any]:
+    """这一批推的是哪个景区、哪几天（写进推送记录，方便按景区 / 日期查）。"""
+    out: Dict[str, Any] = {}
+    for col in ("scenic_id", "scenic_spot_code"):
+        if col in chunk.columns:
+            out["scenic"] = sorted(chunk[col].dropna().astype(str).unique().tolist())
+            break
+    if "travel_date" in chunk.columns:
+        out["travel_dates"] = sorted(chunk["travel_date"].dropna().astype(str).unique().tolist())
+    return out
+
+
 def _post_watched(url: str, body: Dict[str, Any], headers: Dict[str, str],
                   timeout: float, on_wait=None) -> tuple:
     """同 _post，但等待响应期间每秒回调 on_wait(已等秒数)，进度条用它显示读秒 ——
@@ -440,46 +498,68 @@ def _post_watched(url: str, body: Dict[str, Any], headers: Dict[str, str],
 def _post_with_retry(url: str, body: Dict[str, Any], headers: Dict[str, str],
                      timeout: float, retries: int, backoff: float,
                      response_fields: Optional[Dict[str, str]] = None,
-                     on_retry=None, on_wait=None) -> None:
+                     on_retry=None, on_wait=None, on_response=None) -> None:
     """失败重试。不可重试的错误直接抛，不浪费时间。
 
     on_retry(第几次重试, 共几次, 原因, 等几秒)：每次重试前回调，进度条用它把「在重试」显示出来。
     on_wait(第几次尝试, 已等秒数)：等待响应期间每秒回调。
     每一次都是「连不上」或「超时没有响应」→ 抛 UnreachableError，调用方据此停止整次推送。
     超时最多重试 TIMEOUT_RETRIES 次（见上），不按 push_retries 重试到底。
+    on_response(attempt=, status=, response=, result=, error=, elapsed=)：每次尝试结束回调一次，
+    拿到的是对方的真实响应（成功、业务失败、HTTP 错误、网络错误都有），推送记录用它落盘。
     """
+    def _report(attempt, t0, status=None, text=None, result="", error=""):
+        if on_response is None:
+            return
+        try:
+            on_response(attempt=attempt, status=status, response=text, result=result,
+                        error=error, elapsed=round(time.time() - t0, 3))
+        except Exception as e:                      # noqa: BLE001 —— 记日志失败不能拖垮推送
+            log.warning("推送记录回调失败：%s", e)
+
     last = None
     unreachable = True          # 每次都连不上或超时
     timeouts = 0
     for attempt in range(max(int(retries), 0) + 1):
         timed_out = False
+        n = attempt + 1
+        t0 = time.time()
         try:
-            wait_cb = None if on_wait is None else (lambda s, _a=attempt + 1: on_wait(_a, s))
+            wait_cb = None if on_wait is None else (lambda s, _a=n: on_wait(_a, s))
             status, text = _post_watched(url, body, headers, timeout, wait_cb)
             text = text or ""
             if 200 <= status < 300:
-                check_response(text, response_fields)   # 业务失败直接抛，不重试
+                try:
+                    check_response(text, response_fields)   # 业务失败直接抛，不重试
+                except BusinessError as e:
+                    _report(n, t0, status, text, "business_fail", str(e))
+                    raise
+                _report(n, t0, status, text, "ok")
                 return
-            text = text[:500]
-            last = f"HTTP {status}: {text}"
+            last = f"HTTP {status}: {text[:500]}"
+            _report(n, t0, status, text, "http_error", last)
             if status not in RETRYABLE_STATUS:
                 raise RuntimeError(last)           # 4xx：报文/鉴权问题，重试无意义
             unreachable = False
         except urllib.error.HTTPError as e:
             unreachable = False
-            text = e.read().decode("utf-8", "replace")[:500] if e.fp else ""
-            last = f"HTTP {e.code}: {text}"
+            text = e.read().decode("utf-8", "replace") if e.fp else ""
+            last = f"HTTP {e.code}: {text[:500]}"
+            _report(n, t0, e.code, text, "http_error", last)
             if e.code not in RETRYABLE_STATUS:
                 raise RuntimeError(last) from None
         except urllib.error.URLError as e:
             timed_out = isinstance(e.reason, (socket.timeout, TimeoutError))
             unreachable = unreachable and (timed_out or _is_unreachable(e.reason))
             last = f"网络错误：{_reason_text(e.reason)}"
+            if not timed_out:
+                _report(n, t0, result="network_error", error=last)
         except (socket.timeout, TimeoutError):
             timed_out = True
         if timed_out:
             timeouts += 1
             last = f"超时（{timeout:g}s 没有响应）"
+            _report(n, t0, result="timeout", error=last)
             if timeouts > TIMEOUT_RETRIES:
                 break
         if attempt < retries:
@@ -621,14 +701,28 @@ def push_table(table: str, df: pd.DataFrame, *, settings, progress=None) -> Push
                              body_fields=getattr(settings, "push_body_fields", None),
                              table_name=cfg["name"],
                              extra=getattr(settings, "push_extra_fields", None))
+        brief = {"table": table, "push_table": cfg["name"], "url": url,
+                 "batch": batch_no, "batches": total, "rows": len(chunk),
+                 **_batch_brief(chunk)}
+
+        def on_response(_brief=brief, **kw):
+            path = write_push_log(settings, {**_brief, **kw})
+            if path:
+                res.log_path = path
+            log.debug("推送 %s 第 %s 批第 %s 次：%s HTTP %s %s", _brief["table"],
+                      _brief["batch"], kw.get("attempt"), kw.get("result"),
+                      kw.get("status"), (kw.get("response") or kw.get("error") or "")[:200])
         try:
             if getattr(settings, "push_dry_run", False):
                 log.info("[push dry-run] %s 第 %d 批 %d 行，不发送",
                          table, res.batches + 1, len(chunk))
+                on_response(attempt=0, status=None, response=None, result="dry_run",
+                            error="", elapsed=0.0)
             else:
                 _post_with_retry(url, body, headers, timeout, retries, backoff,
                                  response_fields=_response_fields(settings),
-                                 on_retry=on_retry, on_wait=on_wait)
+                                 on_retry=on_retry, on_wait=on_wait,
+                                 on_response=on_response)
             res.batches += 1
             res.rows += len(chunk)
             if progress is not None:

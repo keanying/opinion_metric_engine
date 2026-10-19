@@ -139,6 +139,11 @@ class EtlSettings:
     push_code_field: str = "code"
     push_message_field: str = "msg"
     push_trace_field: str = "trace_id"
+    # 推送记录：每次 POST（含重试、失败）的真实响应写一行 JSON 到 <push_log_dir>/push_<日期>.log，
+    # 带表名、批次、行数、景区、日期、HTTP 状态码、耗时、响应体原文。"" = 不记。
+    # 只记响应，不记请求头（Authorization 是密钥）也不记请求体（太大）。
+    push_log_dir: str = "logs"
+    push_log_max_chars: int = 0              # 响应体最多记多少字；0 = 原文全记
 
     # ---- 5.2 下钻分析表（ads_trf_social_opinion_drill_analysis_di）----
     enable_drill_analysis: bool = True

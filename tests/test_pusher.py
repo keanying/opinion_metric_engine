@@ -730,3 +730,104 @@ def test_cleanup_pushed_csv_only_removes_successful_tables(tmp_path):
     assert not (tmp_path / f"{CORE}.csv").exists()
     assert (tmp_path / f"{PLATFORM}.csv").exists()          # 推失败的留着补推
     assert (tmp_path / "skipped_table.csv").exists()
+
+
+# ══════════════════════════════════════════════════════════════════
+# 推送记录：每次请求的真实响应落盘（push_log_dir/push_<日期>.log，一行一个 JSON）
+# ══════════════════════════════════════════════════════════════════
+def _push_log(st):
+    from engin_cli.pusher import push_log_path
+    path = push_log_path(st)
+    with open(path, encoding="utf-8") as f:
+        return path, [json.loads(line) for line in f]
+
+
+def test_push_log_records_the_real_response(server, tmp_path, monkeypatch):
+    monkeypatch.setenv("OPINION_PUSH_LOG_DIR", str(tmp_path / "logs"))
+    srv, rec = server
+    rec.body_plan = ['{"status": true, "code": 200, "msg": "ok", "trace_id": "t-001"}',
+                     '{"status": true, "code": 200, "msg": "ok", "trace_id": "t-002"}']
+    st = _settings(srv, push_batch_size=2)
+    res = push_table(CORE, _core_df(3), settings=st)
+    assert res.ok
+    path, lines = _push_log(st)
+    assert res.log_path == path and path.endswith(".log") and "push_" in path
+    assert [x["batch"] for x in lines] == [1, 2]
+    first = lines[0]
+    assert first["table"] == CORE and first["push_table"] == CORE
+    assert first["rows"] == 2 and first["batches"] == 2
+    assert first["scenic"] == ["S1"] and first["travel_dates"] == ["20260901", "20260902"]
+    assert first["status"] == 200 and first["result"] == "ok" and first["attempt"] == 1
+    assert first["response"] == '{"status": true, "code": 200, "msg": "ok", "trace_id": "t-001"}'
+    assert lines[1]["response"].endswith('"trace_id": "t-002"}')
+    assert "elapsed" in first and "time" in first
+    # 请求头（密钥）不落盘
+    assert "sk_deduehdueh" not in open(path, encoding="utf-8").read()
+
+
+def test_push_log_records_every_retry_and_failure(server, tmp_path, monkeypatch):
+    monkeypatch.setenv("OPINION_PUSH_LOG_DIR", str(tmp_path / "logs"))
+    srv, rec = server
+    rec.status_plan = [502, 200, 400]
+    rec.body_plan = ["bad gateway", '{"ok":true}', '{"error":"字段不对"}']
+    st = _settings(srv, push_retries=2, push_batch_size=1)
+    res = push_table(CORE, _core_df(2), settings=st)
+    assert res.failed_batches == 1 and res.rows == 1
+    _, lines = _push_log(st)
+    assert [(x["batch"], x["attempt"], x["status"], x["result"]) for x in lines] == [
+        (1, 1, 502, "http_error"), (1, 2, 200, "ok"), (2, 1, 400, "http_error")]
+    assert lines[0]["response"] == "bad gateway"
+    assert lines[2]["response"] == '{"error":"字段不对"}' and "400" in lines[2]["error"]
+
+
+def test_push_log_records_business_failure(server, tmp_path, monkeypatch):
+    monkeypatch.setenv("OPINION_PUSH_LOG_DIR", str(tmp_path / "logs"))
+    srv, rec = server
+    body = '{"status": false, "code": 5011, "msg": "主键字段 x 不在允许字段内", "trace_id": "abc123"}'
+    rec.body_plan = [body]
+    st = _settings(srv)
+    push_table(CORE, _core_df(1), settings=st)
+    _, lines = _push_log(st)
+    assert len(lines) == 1
+    assert lines[0]["result"] == "business_fail" and lines[0]["status"] == 200
+    assert lines[0]["response"] == body and "5011" in lines[0]["error"]
+
+
+def test_push_log_records_unreachable(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPINION_PUSH_LOG_DIR", str(tmp_path / "logs"))
+    st = EtlSettings()
+    st.push_enabled, st.push_url = True, _closed_port_url()
+    st.push_retries, st.push_retry_backoff = 0, 0.01
+    push_table(CORE, _core_df(1), settings=st)
+    _, lines = _push_log(st)
+    assert lines[0]["result"] == "network_error" and lines[0]["status"] is None
+    assert "连接被拒绝" in lines[0]["error"]
+
+
+def test_push_log_dir_from_settings_and_can_be_turned_off(server, tmp_path, monkeypatch):
+    monkeypatch.delenv("OPINION_PUSH_LOG_DIR", raising=False)
+    srv, _ = server
+    st = _settings(srv, push_log_dir=str(tmp_path / "mylogs"))
+    res = push_table(CORE, _core_df(1), settings=st)
+    assert res.log_path.startswith(str(tmp_path / "mylogs"))
+    st = _settings(srv, push_log_dir="")
+    res = push_table(CORE, _core_df(1), settings=st)
+    assert res.log_path == ""
+
+
+def test_push_log_max_chars_truncates_long_responses(server, tmp_path, monkeypatch):
+    monkeypatch.setenv("OPINION_PUSH_LOG_DIR", str(tmp_path / "logs"))
+    srv, rec = server
+    rec.body_plan = ['{"ok":true,"pad":"' + "x" * 100 + '"}']
+    st = _settings(srv, push_log_max_chars=20)
+    push_table(CORE, _core_df(1), settings=st)
+    _, lines = _push_log(st)
+    assert len(lines[0]["response"]) == 20 and lines[0]["response_truncated"] == 120
+
+
+def test_push_log_path_is_in_the_run_report(server, tmp_path, monkeypatch):
+    monkeypatch.setenv("OPINION_PUSH_LOG_DIR", str(tmp_path / "logs"))
+    srv, _ = server
+    rep = push_all({CORE: _core_df(1)}, settings=_settings(srv))
+    assert any(n.startswith("推送响应记录：") and str(tmp_path / "logs") in n
+               for n in rep.notes())

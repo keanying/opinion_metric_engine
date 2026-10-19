@@ -267,7 +267,8 @@ def _run_one_scenic(st, scenic: str, dates: List[str], db, comments_df, works_df
                   + ("" if r.ok else f"  ✗ {r.error}"))
             _print_pk_warning(r)
         for n in res.notes:
-            if n.startswith("推送成功，已删除本地 CSV") and not verbose:
+            if (n.startswith("推送成功，已删除本地 CSV") or n.startswith("推送响应记录：")) \
+                    and not verbose:
                 print(f"  {n}")
         push_note = "推送 ✓" if res.push.ok else f"推送 ✗（{len(res.push.errors)} 张表失败，可用 push 补推）"
         if any(r.unreachable for r in res.push.results):
@@ -658,6 +659,9 @@ def cmd_push(args) -> int:
     for sc, tables in batches:
         print(f"\n景区 {sc}", flush=True)
         rep = push_all(tables, settings=st, progress_factory=factory)
+        for n in rep.notes():
+            if n.startswith("推送响应记录："):
+                print(f"  {n}")
         for r in rep.results:
             if factory is None or r.skipped:     # 有进度条时每张表已经打过结果行了
                 print(f"  {r.table:<52} {r.rows:>8,} 行  [{r.batches} 批 {r.elapsed:.1f}s]"

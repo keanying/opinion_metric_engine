@@ -1,5 +1,6 @@
 #settings_local.py
 output/
+logs/
 sample/
 __pycache__/
 *.pyc

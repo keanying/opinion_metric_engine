@@ -400,6 +400,12 @@ ETL = {
     # "push_code_field": "code",
     # "push_message_field": "msg",
     # "push_trace_field": "trace_id",
+    #
+    # 【推送记录】每次请求（含重试、失败）的真实响应写一行 JSON 到 <push_log_dir>/push_<日期>.log：
+    #   表名、批次、行数、景区、日期、HTTP 状态码、result、耗时、响应体原文。
+    #   不记请求头（密钥）和请求体。"" = 不记。
+    # "push_log_dir": "logs",
+    # "push_log_max_chars": 0,          # 响应体最多记多少字，0 = 原文全记
 
 
     # ══════════════════════════════════════════════════════════════

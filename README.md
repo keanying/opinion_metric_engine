@@ -439,6 +439,8 @@ Content-Type: application/json
 | `push_dry_run` | `False` | 只组报文不真发，验证配置用 |
 | `push_strict` | `False` | `True` 时推送失败也让跑批退出码非 0 |
 | `push_cleanup_local` | `True` | 推送成功后删掉本地 CSV（推失败的表留着补推；`push` 补推只删推过的行）。命令行 `--keep-local` 临时保留 |
+| `push_log_dir` | `"logs"` | 推送记录目录：每次请求的真实响应写进 `<目录>/push_<日期>.log`；`""` 不记。环境变量 `OPINION_PUSH_LOG_DIR` 优先 |
+| `push_log_max_chars` | `0` | 响应体最多记多少字，`0` = 原文全记 |
 
 鉴权令牌**不要写进文件**，用环境变量：`OPINION_PUSH_TOKEN=sk_xxx` 会自动拼成
 `Authorization: Bearer sk_xxx`。`OPINION_PUSH_ENABLED` / `OPINION_PUSH_URL` 同理。
@@ -478,6 +480,17 @@ python -m engin_cli.cli push --tables core                         # 从 CSV 补
   网络错误 / 5xx / 429 才重试，指数退避。
 - **一批失败不影响其余批次**，失败批次数会如实报出来。
 - **日志不打请求头** —— `Authorization` 里是密钥，落进日志文件就等于泄露。
+- **每次请求的真实响应都记下来**：`logs/push_<日期>.log`，一行一个 JSON。成功、业务失败、
+  HTTP 错误、网络错误、超时、每一次重试都各记一行（`result` = `ok` / `business_fail` /
+  `http_error` / `network_error` / `timeout` / `dry_run`），带表名、批次、行数、景区、日期、
+  HTTP 状态码、耗时和**响应体原文**。只记响应，不记请求头和请求体。跑批报告最后会打印这个文件的路径。
+
+  ```
+  {"time": "2026-10-19 08:12:03", "table": "ads_trf_social_opinion_drill_analysis_di", "push_table": "ads_trf_social_opinion_drill_analysis_di", "url": "https://…/data/sync", "batch": 1, "batches": 4, "rows": 500, "scenic": ["PFTSCA01016184"], "travel_dates": ["20261016", "20261017"], "attempt": 1, "status": 200, "response": "{\"status\": true, \"code\": 200, \"msg\": \"ok\", \"trace_id\": \"…\"}", "result": "ok", "error": "", "elapsed": 0.412}
+  ```
+
+  查某天某张表推得怎么样：`grep 20261019 logs/push_20261019.log | grep drill_analysis`；
+  查失败的：`grep -v '"result": "ok"' logs/push_20261019.log`。
 - **HTTP 200 不等于成功**：网关把业务失败写在响应体里（`{"status": false, "code", "msg", "trace_id"}`）。
   响应体是 JSON 且带 `push_success_field`（默认 `status`）时，它为假就算该批失败、不重试，
   报告带上 code / msg / trace_id。字段名可配（`push_code_field` / `push_message_field` /
