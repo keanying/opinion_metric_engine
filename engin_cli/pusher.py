@@ -38,6 +38,8 @@
 
 from __future__ import annotations
 
+import datetime as _dt
+import decimal
 import errno
 import json
 import logging
@@ -152,8 +154,13 @@ def _jsonable(v: Any) -> Any:
         return f if np.isfinite(f) else None
     if isinstance(v, (np.bool_,)):
         return bool(v)
-    if isinstance(v, (pd.Timestamp,)):
+    if isinstance(v, (pd.Timestamp, _dt.datetime)):
         return v.strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(v, _dt.date):
+        return v.strftime("%Y-%m-%d")
+    if isinstance(v, decimal.Decimal):           # 从库里读出来的 DECIMAL 列（mock 等）
+        f = float(v)
+        return f if np.isfinite(f) else None
     if v is pd.NaT or (isinstance(v, float) and pd.isna(v)):
         return None
     if isinstance(v, (np.ndarray, list, tuple)):

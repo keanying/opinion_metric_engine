@@ -498,6 +498,23 @@ python -m engin_cli.cli push --tables core                         # 从 CSV 补
 - `np.int64` / `NaN` / `Timestamp` 在发出去之前统一转成原生类型，
   `NaN` 转 `null`：裸 `NaN` 是非法 JSON，下游解析必挂。
 
+### 11b. 演示数据（`mock.py`，命令 `mock`）
+
+`mock` 从本地 ADS 库取出一个景区某段日期的结果，把景区编号和名称换成新的，
+然后用 `push_all` 推出去，不写本地库：
+
+```
+python -m engin_cli.cli mock --from-scenic PFTSCA01016184 --to-scenic PFTSCA09999999 \
+    --to-name 演示景区 --start-date 20260701 --end-date 20261019 --tables drill,macro
+```
+
+- 每张表只取 `TABLE_COLUMNS`（各 builder 的 `COLUMNS`）与库表列的交集，所以报文和跑批直推的一致。
+  客户在表上加的列不推。
+- 下钻表的 `detail_uk` 用与 `drill_analysis._expand` 相同的公式按新景区重算，避免和原景区 pkId 相撞。
+  `etl_time` 记为执行时间。
+- 新编号和原编号相同时拒绝执行。
+- 从库里读出来的 `DECIMAL` / `datetime` / `date` 由 `pusher._jsonable` 转成数字和字符串。
+
 ### 12. 大盘 KPI 表（需求 2.0，`builders/macro.py`）
 
 新表 `ads_trf_social_opinion_macro_gran_metric_di`，建表语句见 `sql/ads_macro_gran_metric_ddl.sql`。

@@ -687,6 +687,79 @@ def cmd_push(args) -> int:
     return 0
 
 
+def cmd_mock(args) -> int:
+    """造演示数据：把一个景区在本地 ADS 库里的结果复制给新景区编号，推给下游（不写本地库）。"""
+    from .mock import build_mock
+    from .pusher import DEFAULT_PUSH_PK, _table_config, build_payload, push_all
+
+    st = load_settings()
+    _apply_push_args(st, args)
+    _setup_log(args.log_level or st.log_level)
+    dates = _explicit_dates(args)
+    if not dates:
+        print("要指定日期：--date yyyyMMdd，或 --start-date / --end-date")
+        return 2
+    preview = bool(args.preview)
+    if not st.push_url and not preview and not st.push_dry_run:
+        print("未配置推送地址：在 settings_local.py 里填 push_url，"
+              "或设环境变量 OPINION_PUSH_URL，或用 --push-url 传入")
+        return 2
+    names = _resolve_tables(args.tables) or list(DEFAULT_PUSH_PK)
+
+    db = MySQL(st.db)
+    try:
+        tables, notes = build_mock(db, args.from_scenic, args.to_scenic, args.to_name,
+                                   dates[0], dates[-1], names)
+    except ValueError as e:
+        print(f"✗ {e}")
+        return 2
+    finally:
+        db.close()
+
+    print("=" * 72)
+    print(f"演示数据：{args.from_scenic} → {args.to_scenic}（{args.to_name}），"
+          f"日期 {dates[0]}~{dates[-1]}")
+    print("=" * 72)
+    for n in notes:
+        print(f"  · {n}")
+    if not tables:
+        print("没有可推送的数据。")
+        return 2
+    for t, df in tables.items():
+        print(f"  {t:<52} {len(df):>9,} 行  {df['travel_date'].min()}~{df['travel_date'].max()}")
+
+    if preview:
+        print(f"\n报文预览（不发送）→ {st.push_url or '（未配置 push_url）'}")
+        for name, df in tables.items():
+            cfg = _table_config(name, st)
+            body = build_payload(name, df.head(2), cfg["pk"],
+                                 body_fields=st.push_body_fields, table_name=cfg["name"],
+                                 extra=st.push_extra_fields)
+            print(f"\n# {name}：前 2 行")
+            print(json.dumps(body, ensure_ascii=False, indent=2))
+        return 0
+
+    st.push_enabled, st.push_tables = True, None
+    print(f"\n推送 → {st.push_url}" + ("   [dry-run 只组报文不发送]" if st.push_dry_run else ""),
+          flush=True)
+    factory = None if args.no_progress else push_progress_factory()
+    rep = push_all(tables, settings=st, progress_factory=factory)
+    for r in rep.results:
+        if factory is None or r.skipped:
+            print(f"  {r.table:<52} {r.rows:>8,} 行  [{r.batches} 批 {r.elapsed:.1f}s]"
+                  + ("" if r.ok else f"  ✗ {r.error}"))
+    for n in rep.notes():
+        if n.startswith("推送响应记录："):
+            print(f"  {n}")
+    if not rep.ok:
+        print("\n推送未全部成功：")
+        for e in rep.errors:
+            print(f"  ✗ {e}")
+        return 1
+    print("\n推送完成 ✓")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="engin_cli", description="舆情指标引擎：源表 → 四张 ADS 指标表 + 下钻明细表")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -760,6 +833,24 @@ def build_parser() -> argparse.ArgumentParser:
                    help="推送卡住 / 超时时用：拿 1 行数据排查域名解析、代理、逐个地址、报文差异，给出结论")
     u.add_argument("--log-level")
     u.set_defaults(func=cmd_push)
+
+    m = sub.add_parser("mock", help="造演示数据：把一个景区的结果复制给新景区编号并推送（不写本地库）")
+    m.add_argument("--from-scenic", required=True, help="从哪个景区复制，如 PFTSCA01016184")
+    m.add_argument("--to-scenic", required=True, help="新景区编号（不能和原景区一样）")
+    m.add_argument("--to-name", required=True, help="新景区名称")
+    m.add_argument("--date", help="只复制这一天 yyyyMMdd")
+    m.add_argument("--start-date", help="复制这段日期：起 yyyyMMdd")
+    m.add_argument("--end-date", help="复制这段日期：止 yyyyMMdd")
+    m.add_argument("--tables", metavar="表名",
+                   help="表名，逗号分隔；不填或 all=全部。"
+                        "简写：core/platform/dimension/content/drill/macro")
+    m.add_argument("--push-url", help="推送地址，覆盖配置")
+    m.add_argument("--push-dry-run", action="store_true", help="只组报文不真发（只统计批次）")
+    m.add_argument("--preview", action="store_true",
+                   help="打印每张表前 2 行报文，不发送")
+    m.add_argument("--no-progress", action="store_true", help="不显示推送进度条")
+    m.add_argument("--log-level")
+    m.set_defaults(func=cmd_mock)
 
     x = sub.add_parser("repair", help="按新口径重刷历史分数（只改得分字段）")
     x.add_argument("--start-date", required=True, help="修正区间起 yyyyMMdd")
