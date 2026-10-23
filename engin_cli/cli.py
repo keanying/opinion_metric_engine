@@ -272,10 +272,15 @@ def _run_one_scenic(st, scenic: str, dates: List[str], db, comments_df, works_df
                 print(f"  {n}")
         push_note = "推送 ✓" if res.push.ok else f"推送 ✗（{len(res.push.errors)} 张表失败，可用 push 补推）"
         if any(r.unreachable for r in res.push.results):
-            # 地址连不上，后面的景区推也是白等：只算、只落库，事后用 push 补推
+            # 地址连不上 / 证书校验失败，后面的景区推也是白等：只算、只落库，事后用 push 补推
             st.push_enabled = False
-            push_note = "推送 ✗（地址连不上或没有响应，后面的景区不再推送，修好后用 push 补推）"
-            print(f"  ✗ 推送地址连不上或没有响应：{st.push_url}，后面的景区只计算、落库，不再推送")
+            if any(r.cert_error for r in res.push.results):
+                push_note = "推送 ✗（对方 HTTPS 证书校验失败，后面的景区不再推送，修好后用 push 补推）"
+                print(f"  ✗ {st.push_url} 的 HTTPS 证书校验失败，后面的景区只计算、落库，不再推送。\n"
+                      "    证书过期 / 证书链不完整要找对方运维；也检查本机时间和根证书是否太旧")
+            else:
+                push_note = "推送 ✗（地址连不上或没有响应，后面的景区不再推送，修好后用 push 补推）"
+                print(f"  ✗ 推送地址连不上或没有响应：{st.push_url}，后面的景区只计算、落库，不再推送")
     if res.errors:
         for e in res.errors:
             print(f"  ✗ {e}")
@@ -670,6 +675,13 @@ def cmd_push(args) -> int:
         if st.push_cleanup_local and not st.push_dry_run:
             _cleanup_pushed_rows(sc, rep.results, origins)
         failed += [f"{sc} · {e}" for e in rep.errors]
+        if any(r.cert_error for r in rep.results):
+            print(f"\n✗ {st.push_url} 的 HTTPS 证书校验失败，重试没有用：\n"
+                  "  · 证书过期 / 证书链不完整：请对方运维续签或修正证书\n"
+                  "  · 浏览器访问正常、只有这台机器报错：检查本机时间（date），"
+                  "以及根证书是否太旧（更新 ca-certificates）\n"
+                  "  后面的景区不再推送，修好后重新执行这条 push 补推。")
+            return 1
         if any(r.unreachable for r in rep.results):
             print(f"\n✗ 推送地址连不上或没有响应：{st.push_url}\n"
                   "  · 连不上：确认地址是否正确（settings_local.py 的 push_url / 环境变量 OPINION_PUSH_URL），"

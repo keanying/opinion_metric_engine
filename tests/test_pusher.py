@@ -831,3 +831,87 @@ def test_push_log_path_is_in_the_run_report(server, tmp_path, monkeypatch):
     rep = push_all({CORE: _core_df(1)}, settings=_settings(srv))
     assert any(n.startswith("推送响应记录：") and str(tmp_path / "logs") in n
                for n in rep.notes())
+
+
+# ══════════════════════════════════════════════════════════════════
+# HTTPS 证书校验失败：不重试，整次推送立即停止
+# ══════════════════════════════════════════════════════════════════
+@pytest.fixture
+def bad_cert_server(tmp_path):
+    """本机 HTTPS 服务，证书是自签名的 —— 跟过期证书一样过不了校验（CERTIFICATE_VERIFY_FAILED）。"""
+    import shutil
+    import ssl
+    import subprocess
+    if not shutil.which("openssl"):
+        pytest.skip("没有 openssl，生成不了测试证书")
+    key, crt = tmp_path / "k.pem", tmp_path / "c.pem"
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                    "-subj", "/CN=127.0.0.1", "-keyout", str(key), "-out", str(crt)],
+                   check=True, capture_output=True)
+    hits = []
+
+    class _H(BaseHTTPRequestHandler):
+        def do_POST(self):                               # noqa: N802
+            hits.append(1)
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), _H)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(str(crt), str(key))
+    srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    yield f"https://127.0.0.1:{srv.server_address[1]}/sync", hits
+    srv.shutdown()
+    srv.server_close()
+
+
+def test_certificate_error_stops_at_once_without_retry(bad_cert_server, tmp_path, monkeypatch):
+    import time
+    monkeypatch.setenv("OPINION_PUSH_LOG_DIR", str(tmp_path / "logs"))
+    url, hits = bad_cert_server
+    st = EtlSettings()
+    st.push_enabled, st.push_url = True, url
+    st.push_retries, st.push_retry_backoff, st.push_batch_size = 3, 1.0, 1
+    t0 = time.time()
+    rep = push_all({CORE: _core_df(5), "ads_trf_social_opinion_comment_platform_di": _core_df(2)},
+                   settings=st)
+    assert time.time() - t0 < 3, "证书错误重试没有用，不该按 push_retries 退避重试"
+    first, second = rep.results
+    assert first.cert_error and first.unreachable
+    assert first.batches == 0 and first.failed_batches == 5
+    assert "证书校验失败" in first.error
+    assert second.skipped and "未推送" in second.error
+    assert not hits                                      # 握手就失败了，请求没发出去
+    from engin_cli.pusher import push_log_path
+    with open(push_log_path(st), encoding="utf-8") as f:
+        lines = [json.loads(x) for x in f]
+    assert len(lines) == 1 and lines[0]["result"] == "ssl_error"
+
+
+def test_certificate_error_text_is_readable():
+    import ssl
+    from engin_cli.pusher import _is_cert_error, _reason_text
+    e = ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+                                        "certificate has expired (_ssl.c:1000)")
+    e.verify_message = "certificate has expired"
+    assert _is_cert_error(e)
+    assert "证书已过期" in _reason_text(e) and "CERTIFICATE_VERIFY_FAILED" in _reason_text(e)
+    assert not _is_cert_error(ConnectionRefusedError())
+
+
+def test_cli_push_explains_certificate_error(bad_cert_server, tmp_path, capsys):
+    import engin_cli.cli as cli_mod
+    url, _ = bad_cert_server
+    d = tmp_path / "out" / "S1"
+    d.mkdir(parents=True)
+    _core_df(2).to_csv(d / f"{CORE}.csv", index=False, encoding="utf-8-sig")
+    rc = cli_mod.main(["push", "--output-dir", str(tmp_path / "out"), "--push-url", url,
+                       "--no-progress", "--keep-local"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "HTTPS 证书校验失败" in out and "对方运维" in out

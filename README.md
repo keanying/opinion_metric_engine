@@ -480,9 +480,12 @@ python -m engin_cli.cli push --tables core                         # 从 CSV 补
   网络错误 / 5xx / 429 才重试，指数退避。
 - **一批失败不影响其余批次**，失败批次数会如实报出来。
 - **日志不打请求头** —— `Authorization` 里是密钥，落进日志文件就等于泄露。
+- **HTTPS 证书校验失败不重试，整次推送立即停止**（`CertificateError`，跟连不上一样处理）：
+  证书过期、证书链不完整、本机时间不对、本机根证书太旧，重试多少次都一样。
+  报告直接写「对方 HTTPS 证书校验失败：证书已过期」，修好后用 `push` 补推。
 - **每次请求的真实响应都记下来**：`logs/push_<日期>.log`，一行一个 JSON。成功、业务失败、
   HTTP 错误、网络错误、超时、每一次重试都各记一行（`result` = `ok` / `business_fail` /
-  `http_error` / `network_error` / `timeout` / `dry_run`），带表名、批次、行数、景区、日期、
+  `http_error` / `network_error` / `ssl_error` / `timeout` / `dry_run`），带表名、批次、行数、景区、日期、
   HTTP 状态码、耗时和**响应体原文**。只记响应，不记请求头和请求体。跑批报告最后会打印这个文件的路径。
 
   ```

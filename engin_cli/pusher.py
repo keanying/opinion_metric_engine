@@ -45,6 +45,7 @@ import json
 import logging
 import os
 import socket
+import ssl
 import threading
 import time
 import http.client
@@ -95,6 +96,7 @@ class PushResult:
     failed_batches: int = 0
     skipped: bool = False       # 未配置/被开关关掉/空表
     unreachable: bool = False   # 推送地址连不上（拒绝连接 / 域名解析失败），后面的表不再推
+    cert_error: bool = False    # 对方 HTTPS 证书校验失败（unreachable 也为 True）
     error: str = ""
     elapsed: float = 0.0
     # pkId 有重复 / 空值时的提示（照常发送，只是提醒），以及示例请求和完整请求文件
@@ -204,6 +206,14 @@ class UnreachableError(RuntimeError):
     """
 
 
+class CertificateError(UnreachableError):
+    """对方 HTTPS 证书校验失败（过期 / 证书链不完整 / 本机时间不对 / 本机根证书太旧）。
+
+    跟连不上一样：重试多少次结果都一样，后面每一批、每张表、每个景区也一样失败，
+    所以第一次就停止整次推送，不重试。
+    """
+
+
 # 超时最多只重试这么多次：对方连得上却一直不回，再等几轮 push_timeout 也大概率一样，
 # 按 push_retries（默认 3 次、每次 120s）重试到底，一批就要白等 8 分钟。
 TIMEOUT_RETRIES = 1
@@ -223,8 +233,24 @@ def _is_unreachable(reason: Any) -> bool:
     return isinstance(reason, OSError) and getattr(reason, "errno", None) in _UNREACHABLE_ERRNO
 
 
+def _is_cert_error(reason: Any) -> bool:
+    """URLError.reason 是不是 HTTPS 证书校验失败。"""
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return True
+    return isinstance(reason, ssl.SSLError) and "CERTIFICATE_VERIFY_FAILED" in str(reason)
+
+
 def _reason_text(reason: Any) -> str:
     """把常见网络错误翻成人话，原文附在后面方便查。"""
+    if _is_cert_error(reason):
+        why = getattr(reason, "verify_message", "") or ""
+        why = {"certificate has expired": "证书已过期",
+               "unable to get local issuer certificate": "找不到签发者证书（证书链不完整或本机根证书太旧）",
+               "self signed certificate": "自签名证书",
+               "self-signed certificate": "自签名证书",
+               "certificate is not yet valid": "证书还没生效（本机时间可能不对）",
+               }.get(why, why)
+        return f"对方 HTTPS 证书校验失败{f'：{why}' if why else ''} [{reason}]"
     if isinstance(reason, ConnectionRefusedError):
         return f"连接被拒绝（地址上没有服务在监听）[{reason}]"
     if isinstance(reason, socket.gaierror):
@@ -555,7 +581,12 @@ def _post_with_retry(url: str, body: Dict[str, Any], headers: Dict[str, str],
             _report(n, t0, e.code, text, "http_error", last)
             if e.code not in RETRYABLE_STATUS:
                 raise RuntimeError(last) from None
-        except urllib.error.URLError as e:
+        except (urllib.error.URLError, ssl.SSLCertVerificationError) as e:
+            reason = getattr(e, "reason", e)
+            if _is_cert_error(reason):
+                last = f"网络错误：{_reason_text(reason)}"
+                _report(n, t0, result="ssl_error", error=last)
+                raise CertificateError(f"{last}（地址 {url}）") from None
             timed_out = isinstance(e.reason, (socket.timeout, TimeoutError))
             unreachable = unreachable and (timed_out or _is_unreachable(e.reason))
             last = f"网络错误：{_reason_text(e.reason)}"
@@ -735,10 +766,12 @@ def push_table(table: str, df: pd.DataFrame, *, settings, progress=None) -> Push
             if progress is not None:
                 progress.batch_done(len(chunk), ok=True)
         except UnreachableError as e:
-            # 连不上：剩下的批次一样会失败，别再一批一批地白等重试
+            # 连不上 / 证书校验失败：剩下的批次一样会失败，别再一批一批地白等重试
             res.unreachable = True
+            res.cert_error = isinstance(e, CertificateError)
             res.failed_batches += total - res.batches
-            res.error = f"推送地址连不上或没有响应，已停止推送：{e}"
+            res.error = (f"对方 HTTPS 证书校验失败，已停止推送：{e}" if res.cert_error
+                         else f"推送地址连不上或没有响应，已停止推送：{e}")
             if progress is not None:
                 progress.batch_failed(batch_no, str(e))
             else:
@@ -755,7 +788,8 @@ def push_table(table: str, df: pd.DataFrame, *, settings, progress=None) -> Push
                 log.warning("推送 %s 第 %d 批失败：%s", table, batch_no, e)
     res.elapsed = time.time() - t0
     if progress is not None:
-        progress.finish("✓" if res.ok else "✗ 连不上或没有响应，已停止" if res.unreachable
+        progress.finish("✓" if res.ok else "✗ 证书校验失败，已停止" if res.cert_error
+                        else "✗ 连不上或没有响应，已停止" if res.unreachable
                         else f"✗ {res.failed_batches} 批失败")
     return res
 
@@ -830,6 +864,6 @@ def push_all(tables: Dict[str, pd.DataFrame], *, settings,
         if r.unreachable:
             for t2, _ in todo[k + 1:]:
                 rep.results.append(PushResult(table=t2, skipped=True,
-                                              error="未推送：推送地址连不上或没有响应（见上一张表的报错）"))
+                                              error="未推送：推送已停止（见上一张表的报错）"))
             break
     return rep
