@@ -45,7 +45,7 @@ from .progress import push_progress_factory
 from .repair import (CORE_SCORE_FIELDS, DIM_SCORE_FIELDS, repair_core,
                      repair_dimension)
 from .settings import load_settings
-from .source import fetch_comments_csv, fetch_works_csv
+from .source import fetch_comments_csv, fetch_scenic_keywords_csv, fetch_works_csv
 
 
 def _setup_log(level: str):
@@ -164,6 +164,10 @@ def cmd_run(args) -> int:
         st.backfill_lookback = _parse_lookback(args.backfill_lookback)
     if args.no_drill_analysis:
         st.enable_drill_analysis = False
+    if args.drill_keyword_filter:
+        st.drill_keyword_filter = True
+    if args.no_drill_keyword_filter:
+        st.drill_keyword_filter = False
     if args.no_macro:
         st.enable_macro_metric = False
     _apply_push_args(st, args)
@@ -181,10 +185,18 @@ def cmd_run(args) -> int:
     dates = _with_rerun(dates, rerun)
     comments_df = fetch_comments_csv(args.comments_csv) if args.comments_csv else None
     works_df = fetch_works_csv(args.works_csv) if args.works_csv else None
+    drill_keywords = None
+    if args.drill_keywords_csv:
+        drill_keywords = fetch_scenic_keywords_csv(args.drill_keywords_csv)
 
     db = None
     if comments_df is None or st.write_db:
         db = MySQL(st.db)
+    if st.drill_keyword_filter and st.enable_drill_analysis and db is None \
+            and drill_keywords is None:
+        print("开启了下钻表采集关键字过滤（--drill-keyword-filter），但没有连数据库："
+              "用 --drill-keywords-csv 给关键字（scenic_id, word 两列），或去掉 --skip-db")
+        return 2
 
     from . import __version__
     from .pipeline import compute_load_range
@@ -211,12 +223,16 @@ def cmd_run(args) -> int:
         if len(dates) > len(asked):
             print(f"（含往前重跑 {len(dates) - len(asked)} 天：评论会晚到，前几天的数据一起刷新；"
                   f"--rerun-days 0 可关闭）")
+        if st.drill_keyword_filter and st.enable_drill_analysis:
+            print("下钻表：只写入原文包含本景区采集关键字的评论"
+                  "（src_opinion_scenic_keyword ∪ src_opinion_scenic_filter_word）")
         print("=" * 72)
         for i, sc in enumerate(scenics, 1):
             print(f"\n[{i}/{len(scenics)}] 景区 {sc}")
             ok, line = _run_one_scenic(st, sc, dates, db, comments_df, works_df,
                                        verbose=bool(args.verbose),
-                                       no_progress=bool(args.no_progress))
+                                       no_progress=bool(args.no_progress),
+                                       drill_keywords=drill_keywords)
             summary.append((sc, ok, line))
             if not ok and args.fail_fast:
                 print("  --fail-fast：停止，后面的景区不再跑")
@@ -233,7 +249,8 @@ def cmd_run(args) -> int:
 
 
 def _run_one_scenic(st, scenic: str, dates: List[str], db, comments_df, works_df,
-                    verbose: bool = False, no_progress: bool = False) -> tuple:
+                    verbose: bool = False, no_progress: bool = False,
+                    drill_keywords=None) -> tuple:
     """跑一个景区。返回 (是否成功, 汇总行文字)。"""
     s1 = replace(st, output_dir=os.path.join(st.output_dir, scenic))
     c = w = None
@@ -244,7 +261,8 @@ def _run_one_scenic(st, scenic: str, dates: List[str], db, comments_df, works_df
     try:
         res = run_pipeline(s1, dates, scenic_codes=[scenic], db=db,
                            comments_df=c, works_df=w,
-                           push_progress=None if no_progress else push_progress_factory())
+                           push_progress=None if no_progress else push_progress_factory(),
+                           drill_keywords=drill_keywords)
     except Exception as e:                      # noqa: BLE001 —— 一个景区炸了不拖累其他景区
         logging.getLogger(__name__).exception("景区 %s 跑批异常", scenic)
         print(f"  ✗ 异常：{e}")
@@ -795,6 +813,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="补明细时最多往前找几天：写一个数（如 5）= 所有周期统一；"
                         "写 1:5,7:10,30:20 = 按窗口分档，只写要改的档")
     r.add_argument("--no-drill-analysis", action="store_true", help="不产出 5.2 下钻明细表")
+    kwg = r.add_mutually_exclusive_group()
+    kwg.add_argument("--drill-keyword-filter", action="store_true",
+                     help="下钻表只写入原文包含本景区采集关键字的评论（关键字取 "
+                          "src_opinion_scenic_keyword ∪ src_opinion_scenic_filter_word，按 scenic_id）")
+    kwg.add_argument("--no-drill-keyword-filter", action="store_true",
+                     help="关闭上面的过滤（原逻辑，评论全收），覆盖 settings 里的 drill_keyword_filter")
+    r.add_argument("--drill-keywords-csv",
+                   help="离线 / 不连库时的采集关键字 CSV（scenic_id, word 两列），配合 --drill-keyword-filter")
     r.add_argument("--no-macro", action="store_true",
                    help="不产出 2.0 大盘 KPI 表（也就不会为同比多取去年同期的数据）")
     r.add_argument("--push", nargs="?", const="all", metavar="表名",

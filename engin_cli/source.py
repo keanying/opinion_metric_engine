@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import pandas as pd
 
@@ -26,6 +26,9 @@ log = logging.getLogger(__name__)
 
 TABLE_COMMENT = "src_opinion_social_work_comment_di"
 TABLE_WORK = "src_opinion_social_work_di"
+# 采集关键字（下钻表关键字过滤用，--drill-keyword-filter）
+TABLE_SCENIC_KEYWORD = "src_opinion_scenic_keyword"          # keyword 列
+TABLE_SCENIC_FILTER_WORD = "src_opinion_scenic_filter_word"  # word 列
 
 COMMENT_COLS = [
     "scenic_id", "scenic_name", "channel", "work_id",
@@ -105,6 +108,49 @@ def list_scenic_codes(db: MySQL, start: str, end: str,
         f"SELECT DISTINCT scenic_id FROM `{db.cfg.src_db()}`.`{table}` "
         f"WHERE publish_time >= %s AND publish_time < %s", [lo, hi])
     return [str(x) for x in df["scenic_id"].tolist()] if not df.empty else []
+
+
+def _keyword_map(df: pd.DataFrame) -> Dict[str, List[str]]:
+    """(scenic_id, word) 行 → {景区: [去空格、去重后的关键字]}。"""
+    out: Dict[str, List[str]] = {}
+    if df is None or df.empty:
+        return out
+    for sc, w in zip(df["scenic_id"], df["word"]):
+        sc, w = str(sc or "").strip(), str(w or "").strip()
+        if sc and w and w not in out.setdefault(sc, []):
+            out[sc].append(w)
+    return out
+
+
+def fetch_scenic_keywords(db: MySQL, scenic_codes: Sequence[str]) -> Dict[str, List[str]]:
+    """景区的采集关键字：src_opinion_scenic_keyword.keyword ∪ src_opinion_scenic_filter_word.word。
+
+    出参：{景区: [关键字]}；查的景区没有关键字就不在结果里。
+    """
+    codes = [str(c).strip() for c in scenic_codes if str(c).strip()]
+    if not codes:
+        return {}
+    marks = ",".join(["%s"] * len(codes))
+    src = db.cfg.src_db()
+    sql = (f"SELECT scenic_id, keyword AS word FROM `{src}`.`{TABLE_SCENIC_KEYWORD}` "
+           f"WHERE scenic_id IN ({marks})\n"
+           f"UNION\n"
+           f"SELECT scenic_id, word FROM `{src}`.`{TABLE_SCENIC_FILTER_WORD}` "
+           f"WHERE scenic_id IN ({marks})")
+    out = _keyword_map(db.query_df(sql, codes + codes))
+    log.info("采集关键字：%s", "，".join(f"{k} {len(v)} 个" for k, v in out.items()) or "无")
+    return out
+
+
+def fetch_scenic_keywords_csv(path: str) -> Dict[str, List[str]]:
+    """离线源：采集关键字 CSV，两列 scenic_id, word（列名也认 keyword）。"""
+    df = _read_src_csv(path)
+    if "word" not in df.columns and "keyword" in df.columns:
+        df = df.rename(columns={"keyword": "word"})
+    missing = [c for c in ("scenic_id", "word") if c not in df.columns]
+    if missing:
+        raise ValueError(f"采集关键字 CSV 缺少列：{missing}（要 scenic_id, word 两列）")
+    return _keyword_map(df)
 
 
 # ============================================================

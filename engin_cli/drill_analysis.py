@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import List
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -84,8 +84,16 @@ def _uk(*parts) -> str:
 
 
 def build_drill_analysis(comment_facts: pd.DataFrame, works: pd.DataFrame,
-                         ctx: RunContext) -> pd.DataFrame:
-    """评论明细 + 作品表 → 下钻分析表（词 → 评论 → 作品）。"""
+                         ctx: RunContext,
+                         keywords: Optional[Dict[str, List[str]]] = None) -> pd.DataFrame:
+    """评论明细 + 作品表 → 下钻分析表（词 → 评论 → 作品）。
+
+    keywords：{景区: [采集关键字]}，None = 不过滤（原逻辑）。
+      给了就只收**评论原文包含本景区任一采集关键字**的评论（不分大小写），其余评论不进下钻表；
+      本景区一个关键字都没有 → 这个景区下钻表 0 行。
+      过滤放在补齐之后：渠道当天有没有评论、要不要往前补，仍按全部评论判断，
+      补过来的评论同样要包含关键字才收。
+    """
     if comment_facts.empty:
         return pd.DataFrame(columns=COLUMNS)
 
@@ -106,8 +114,17 @@ def build_drill_analysis(comment_facts: pd.DataFrame, works: pd.DataFrame,
                and getattr(ctx.settings, "drill_mask_scope", "") == DRILL_MASK_SCOPE_WORD
                else None)
     n_masked = n_no_match = 0
+    kw_lower = None if keywords is None else {
+        str(sc): [k.lower() for k in ks if k] for sc, ks in keywords.items()}
+    n_kw_in = n_kw_out = 0
     rows = []
     for r in df.itertuples(index=False):
+        if kw_lower is not None:
+            full = str(getattr(r, "content", "") or "").lower()
+            if not any(k in full for k in kw_lower.get(str(r.scenic_spot_code), ())):
+                n_kw_out += 1
+                continue
+            n_kw_in += 1
         words = parse_json_array(getattr(r, "keyword_tags", None))
         etype = SENTIMENT_TYPE.get(int(r.sentiment), "neutral")
         # 维度只取第一条，作为「这条评论主要在说哪个维度」的定位信息；
@@ -179,6 +196,12 @@ def build_drill_analysis(comment_facts: pd.DataFrame, works: pd.DataFrame,
                 "src_date": r.src_date,
             })
 
+    if kw_lower is not None:
+        empty = [str(sc) for sc in df["scenic_spot_code"].astype(str).unique()
+                 if not kw_lower.get(sc)]
+        ctx.warn(f"下钻表采集关键字过滤：收 {n_kw_in:,} 条评论，"
+                 f"原文不含采集关键字的 {n_kw_out:,} 条不写入"
+                 + (f"；⚠ 景区 {'、'.join(empty)} 没有采集关键字，下钻表 0 行" if empty else ""))
     if not rows:
         return pd.DataFrame(columns=COLUMNS)
     out = pd.DataFrame(rows)

@@ -229,6 +229,13 @@ ETL = {
     # 【是什么】下钻表里评论摘要截断到多少字。
     # 【什么时候改】前端展示不下那么长就调小；要看全文就调大（表会变大）。
     # "drill_content_limit": 200,
+    #
+    # 【是什么】下钻表只收「原文包含本景区采集关键字」的评论。采集关键字取
+    #   src_opinion_scenic_keyword.keyword ∪ src_opinion_scenic_filter_word.word（按 scenic_id）。
+    #   只影响下钻表，其余表照常按全部评论算。
+    # 【什么时候改】一般用命令行 --drill-keyword-filter 按需开启；想默认开启就写 True，
+    #   临时关闭用 --no-drill-keyword-filter。
+    # "drill_keyword_filter": False,
 
 
     # ══════════════════════════════════════════════════════════════

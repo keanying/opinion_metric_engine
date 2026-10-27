@@ -818,6 +818,16 @@ python -m engin_cli.cli repair --tables core --start-date 20260101 --end-date 20
   `"mask_all"`。字数按截断后的摘要（`drill_content_limit`，默认 200 字）计算，表情码 `[赞]` 按 3 个字符算。
   **每次跑批都会在报告里打印掩码了多少条、其中多少条一个词都没对上。**
 
+**采集关键字过滤**（`drill_keyword_filter`，命令行 `--drill-keyword-filter` / `--no-drill-keyword-filter`，默认关）：
+开启后，下钻表只收原文包含本景区采集关键字的评论。采集关键字来自 `source.fetch_scenic_keywords`，
+取 `src_opinion_scenic_keyword.keyword ∪ src_opinion_scenic_filter_word.word`，按 `scenic_id` 筛；
+离线跑时用 `--drill-keywords-csv`。
+
+- 过滤放在 `build_drill_analysis` 的逐条评论循环里，位置在补数计划之后。这样「渠道当天有没有评论、要不要往前补」
+  仍按全部评论判断，补过来的评论也要过同一道过滤。
+- 匹配用评论全文，不区分大小写。
+- 开启后下钻表是大盘表评论的子集，`validate_drill`（下钻 ↔ 大盘逐周期对账）跳过不做。
+
 ---
 
 ## 自检

@@ -148,6 +148,11 @@ class EtlSettings:
     # ---- 5.2 下钻分析表（ads_trf_social_opinion_drill_analysis_di）----
     enable_drill_analysis: bool = True
     drill_content_limit: int = 200   # 评论摘要截断长度
+    # 下钻表只收「评论原文包含本景区采集关键字」的评论（命令行 --drill-keyword-filter 开启）。
+    # 采集关键字 = src_opinion_scenic_keyword.keyword ∪ src_opinion_scenic_filter_word.word，
+    # 按 scenic_id 取本景区的。关闭（默认）= 原来的逻辑，评论全收。
+    # 只影响下钻表，其余各表照常按全部评论算。
+    drill_keyword_filter: bool = False
 
     # content_snippet 掩码：除命中的关键词外，其余内容一律隐藏（口径见 domain 第 9 章）
     #   原文    我是体力一般，来回两个半小时左右

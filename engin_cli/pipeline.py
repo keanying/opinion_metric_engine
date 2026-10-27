@@ -40,7 +40,7 @@ from .metric_calc_domain import PLATFORM_WINDOWS as D_PLATFORM_WINDOWS
 from .normalize import (build_comment_facts, build_dimension_facts, build_keyword_facts)
 from .pusher import PushReport, cleanup_pushed_csv, push_all
 from .settings import EtlSettings
-from .source import fetch_comments, fetch_works
+from .source import fetch_comments, fetch_scenic_keywords, fetch_works
 from .validate import validate_all
 from .windows import fill_source_dates
 
@@ -95,11 +95,14 @@ def run(settings: EtlSettings,
         db: Optional[MySQL] = None,
         comments_df: Optional[pd.DataFrame] = None,
         works_df: Optional[pd.DataFrame] = None,
-        push_progress=None) -> PipelineResult:
+        push_progress=None,
+        drill_keywords: Optional[Dict[str, List[str]]] = None) -> PipelineResult:
     """跑一次批。
 
     dates          要产出的目标日期（yyyyMMdd）
     comments_df    直接喂源数据（测试/离线用）；为 None 则从 MySQL 取
+    drill_keywords settings.drill_keyword_filter 打开时用的采集关键字 {景区: [词]}（测试/离线用）；
+                   为 None 则从 MySQL 的 src_opinion_scenic_keyword / filter_word 取
     push_progress  推送进度条工厂（见 progress.push_progress_factory），None 不显示
     """
     t0 = time.time()
@@ -181,8 +184,18 @@ def run(settings: EtlSettings,
             works_df = fetch_works(db, fill_start, load_end, scenic_codes,
                                    work_ids.dropna().unique().tolist()
                                    if work_ids is not None else None)
+        kw = None
+        if getattr(settings, "drill_keyword_filter", False):
+            kw = drill_keywords
+            if kw is None:
+                if db is None:
+                    raise ValueError("开启了下钻表采集关键字过滤（--drill-keyword-filter），"
+                                     "但没有数据库也没有给关键字 CSV（--drill-keywords-csv）")
+                codes = scenic_codes or sorted(
+                    cf_all["scenic_spot_code"].astype(str).unique().tolist())
+                kw = fetch_scenic_keywords(db, codes)
         drill = build_drill_analysis(
-            cf_all, works_df if works_df is not None else pd.DataFrame(), ctx)
+            cf_all, works_df if works_df is not None else pd.DataFrame(), ctx, keywords=kw)
         res.tables[TABLE_DRILL_ANALYSIS] = drill
         res.notes.append(f"下钻明细（词→评论→作品）{len(drill):,} 行")
 
@@ -210,7 +223,8 @@ def run(settings: EtlSettings,
         if len(set(ctx.backfill_lookback().values())) <= 1:
             checks["macro_period_specs"] = ctx.macro_granularities
         # 下钻表（按天）↔ 大盘表逐周期对账（评论数 / 地域 / 词云），按 travel_date 区间
-        if TABLE_DRILL_ANALYSIS in res.tables:
+        # 开了采集关键字过滤，下钻表只是大盘表评论的一个子集，逐条对账必然对不上，不做
+        if TABLE_DRILL_ANALYSIS in res.tables and not getattr(settings, "drill_keyword_filter", False):
             checks["drill"] = res.tables[TABLE_DRILL_ANALYSIS]
             checks["macro_specs"] = ctx.macro_granularities
             checks["output_dates"] = ctx.output_dates
