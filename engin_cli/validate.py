@@ -198,7 +198,7 @@ def validate_content(content: pd.DataFrame, core: pd.DataFrame) -> List[str]:
 
 
 def validate_drill(drill: pd.DataFrame, macro: pd.DataFrame, specs: list,
-                   output_dates, uniform: bool) -> List[str]:
+                   output_dates, uniform: bool, words_only: bool = False) -> List[str]:
     """下钻表与大盘表对账（客户要求：几个地方的数据都要能对上）。
 
     下钻表按天存；大盘表 (景区, 日期 T, 周期 g, 渠道) 这一格对应下钻表
@@ -211,6 +211,8 @@ def validate_drill(drill: pd.DataFrame, macro: pd.DataFrame, specs: list,
 
     只核对区间里每一天都在本次输出日期里的格子；补数上限分档（uniform=False）时
     长周期补得比下钻表（当日档）远，只核对当日周期。
+    words_only=True（开了采集关键字过滤，下钻表只是评论子集）：只核对词云里的词查得到，
+    评论数 / 地域本来就对不上，不核对。
     """
     errs: List[str] = []
     if drill is None or macro is None or macro.empty or not specs:
@@ -244,7 +246,7 @@ def validate_drill(drill: pd.DataFrame, macro: pd.DataFrame, specs: list,
             key = (r.scenic_id, r.travel_date, spec["name"], r.channel)
             keys = [(r.scenic_id, r.channel, d) for d in win]
             n = sum(cnt.get(x, 0) for x in keys)
-            if n != int(r.comment_total):
+            if n != int(r.comment_total) and not words_only:
                 bad_cnt += 1
                 sample.setdefault("cnt", (key, n, int(r.comment_total)))
             got = {}
@@ -256,7 +258,7 @@ def validate_drill(drill: pd.DataFrame, macro: pd.DataFrame, specs: list,
                 cloud = {e["word"] for g in json.loads(r.wordcloud_map).values() for e in g}
             except (ValueError, TypeError, KeyError, AttributeError):   # JSON 错误由 validate_macro 报
                 continue
-            if got != heat:
+            if got != heat and not words_only:
                 bad_reg += 1
                 sample.setdefault("reg", key)
             have = set().union(*(words.get(x, set()) for x in keys))
@@ -328,7 +330,8 @@ def validate_all(tables: dict) -> List[str]:
     if "macro" in tables and "drill" in tables:
         errs += validate_drill(tables["drill"], tables["macro"],
                                tables.get("macro_specs", []), tables.get("output_dates", []),
-                               bool(tables.get("macro_period_specs")))
+                               bool(tables.get("macro_period_specs")),
+                               words_only=bool(tables.get("drill_words_only")))
     if "macro" in tables and tables.get("macro_period_specs"):
         errs += validate_period_sums(tables["macro"], tables["macro_period_specs"])
     if "macro" in tables:

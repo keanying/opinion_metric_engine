@@ -85,12 +85,16 @@ def _uk(*parts) -> str:
 
 def build_drill_analysis(comment_facts: pd.DataFrame, works: pd.DataFrame,
                          ctx: RunContext,
-                         keywords: Optional[Dict[str, List[str]]] = None) -> pd.DataFrame:
+                         keywords: Optional[Dict[str, List[str]]] = None,
+                         cloud_words: Optional[Dict[str, set]] = None) -> pd.DataFrame:
     """评论明细 + 作品表 → 下钻分析表（词 → 评论 → 作品）。
 
     keywords：{景区: [采集关键字]}，None = 不过滤（原逻辑）。
-      给了就只收**评论原文包含本景区任一采集关键字**的评论（不分大小写），其余评论不进下钻表；
-      本景区一个关键字都没有 → 这个景区下钻表 0 行。
+      给了就只收下面两种评论（满足一个就收），其余评论不进下钻表：
+        · 评论原文包含本景区任一采集关键字（不分大小写）
+        · 评论的关键词（keyword_tags）有出现在本景区大盘表 wordcloud_map 里的（cloud_words）
+          —— 词云里的词点进下钻表要查得到
+      本景区一个采集关键字都没有、词云也对不上 → 这个景区下钻表 0 行。
       过滤放在补齐之后：渠道当天有没有评论、要不要往前补，仍按全部评论判断，
       补过来的评论同样要包含关键字才收。
     """
@@ -116,16 +120,28 @@ def build_drill_analysis(comment_facts: pd.DataFrame, works: pd.DataFrame,
     n_masked = n_no_match = 0
     kw_lower = None if keywords is None else {
         str(sc): [k.lower() for k in ks if k] for sc, ks in keywords.items()}
-    n_kw_in = n_kw_out = 0
+    cloud = {str(sc): set(ws) for sc, ws in (cloud_words or {}).items()}
+    n_kw_in = n_cloud_in = n_kw_out = 0
     rows = []
     for r in df.itertuples(index=False):
+        words = parse_json_array(getattr(r, "keyword_tags", None))
+        clean = []
+        for w in words:
+            if isinstance(w, dict):
+                w = w.get("word") or w.get("value") or w.get("keyword")
+            word = str(w or "").strip()
+            if word and word not in clean:
+                clean.append(word)
         if kw_lower is not None:
+            sc = str(r.scenic_spot_code)
             full = str(getattr(r, "content", "") or "").lower()
-            if not any(k in full for k in kw_lower.get(str(r.scenic_spot_code), ())):
+            if any(k in full for k in kw_lower.get(sc, ())):
+                n_kw_in += 1
+            elif cloud.get(sc) and not cloud[sc].isdisjoint(clean):
+                n_cloud_in += 1                  # 不含采集关键字，但它的词在词云里
+            else:
                 n_kw_out += 1
                 continue
-            n_kw_in += 1
-        words = parse_json_array(getattr(r, "keyword_tags", None))
         etype = SENTIMENT_TYPE.get(int(r.sentiment), "neutral")
         # 维度只取第一条，作为「这条评论主要在说哪个维度」的定位信息；
         # 完整维度分布在维度表里，明细表不重复承载。
@@ -153,13 +169,6 @@ def build_drill_analysis(comment_facts: pd.DataFrame, works: pd.DataFrame,
         # 与大盘热力图同口径：没地域记「未知」
         region = str(getattr(r, "region", "") or "") or REGION_UNKNOWN
 
-        clean = []
-        for w in words:
-            if isinstance(w, dict):
-                w = w.get("word") or w.get("value") or w.get("keyword")
-            word = str(w or "").strip()
-            if word and word not in clean:
-                clean.append(word)
         # 没有关键词的评论也出一行（空词），下钻表的评论数才能和大盘表 comment_total 对上
         for word in clean or [""]:
             row_snippet = snippet
@@ -199,9 +208,9 @@ def build_drill_analysis(comment_facts: pd.DataFrame, works: pd.DataFrame,
     if kw_lower is not None:
         empty = [str(sc) for sc in df["scenic_spot_code"].astype(str).unique()
                  if not kw_lower.get(sc)]
-        ctx.warn(f"下钻表采集关键字过滤：收 {n_kw_in:,} 条评论，"
-                 f"原文不含采集关键字的 {n_kw_out:,} 条不写入"
-                 + (f"；⚠ 景区 {'、'.join(empty)} 没有采集关键字，下钻表 0 行" if empty else ""))
+        ctx.warn(f"下钻表采集关键字过滤：原文含采集关键字 {n_kw_in:,} 条、"
+                 f"关键词在词云里 {n_cloud_in:,} 条写入，其余 {n_kw_out:,} 条不写入"
+                 + (f"；⚠ 景区 {'、'.join(empty)} 没有采集关键字，只收词云相关的评论" if empty else ""))
     if not rows:
         return pd.DataFrame(columns=COLUMNS)
     out = pd.DataFrame(rows)
@@ -240,6 +249,21 @@ def build_drill_analysis(comment_facts: pd.DataFrame, works: pd.DataFrame,
                     if n_no_match else "，关键词全部命中"))
     return out[COLUMNS].sort_values(
         ["scenic_id", "travel_date", "time_granularity", "emotion_word"]).reset_index(drop=True)
+
+
+def wordcloud_words(macro: Optional[pd.DataFrame]) -> Dict[str, set]:
+    """大盘表 wordcloud_map 里出现过的词，按景区汇总：{景区: {词}}（全部日期 / 周期 / 渠道 / 情感组）。"""
+    out: Dict[str, set] = {}
+    if macro is None or macro.empty or "wordcloud_map" not in macro.columns:
+        return out
+    for sc, raw in zip(macro["scenic_id"].astype(str), macro["wordcloud_map"]):
+        try:
+            groups = json.loads(raw) if isinstance(raw, str) else (raw or {})
+            ws = {str(e.get("word") or "").strip() for g in groups.values() for e in g}
+        except (ValueError, TypeError, AttributeError):
+            continue
+        out.setdefault(sc, set()).update(w for w in ws if w)
+    return out
 
 
 def _day_granularity(ctx: RunContext) -> str:

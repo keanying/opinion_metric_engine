@@ -148,7 +148,8 @@ class EtlSettings:
     # ---- 5.2 下钻分析表（ads_trf_social_opinion_drill_analysis_di）----
     enable_drill_analysis: bool = True
     drill_content_limit: int = 200   # 评论摘要截断长度
-    # 下钻表只收「评论原文包含本景区采集关键字」的评论（命令行 --drill-keyword-filter 开启）。
+    # 下钻表只收「评论原文包含本景区采集关键字」的评论（命令行 --drill-keyword-filter 开启），
+    # 外加「关键词出现在本景区大盘表 wordcloud_map 里」的评论（词云的词点进下钻表要查得到）。
     # 采集关键字 = src_opinion_scenic_keyword.keyword ∪ src_opinion_scenic_filter_word.word，
     # 按 scenic_id 取本景区的。关闭（默认）= 原来的逻辑，评论全收。
     # 只影响下钻表，其余各表照常按全部评论算。

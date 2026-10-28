@@ -31,7 +31,7 @@ from .builders.macro import build_macro, macro_data_ranges
 from .builders.platform import build_platform
 from .context import RunContext
 from .db import MySQL
-from .drill_analysis import build_drill_analysis
+from .drill_analysis import build_drill_analysis, wordcloud_words
 from .loader import (TABLE_CONTENT, TABLE_CORE, TABLE_DIMENSION, TABLE_DRILL_ANALYSIS,
                      TABLE_MACRO, TABLE_PLATFORM, load_all)
 from .metric_calc_domain import (CORE_WINDOWS, daily_channel_presence,
@@ -176,7 +176,16 @@ def run(settings: EtlSettings,
     res.tables = {TABLE_CORE: core, TABLE_PLATFORM: platform,
                   TABLE_DIMENSION: dimension, TABLE_CONTENT: content}
 
-    # ---- 4. 5.2 下钻分析表（词 → 评论 → 作品）----
+    # ---- 4. 需求 2.0 大盘表（景区 × 日期 × 周期粒度 × 渠道）----
+    # 先于下钻表算：开了采集关键字过滤时，词云里的词对应的评论也要写进下钻表
+    macro = None
+    if settings.enable_macro_metric:
+        macro = build_macro(cf_all, dim_all, kw_all, ctx)
+        res.tables[TABLE_MACRO] = macro
+        res.notes.append(f"大盘 KPI（{len(ctx.macro_granularities)} 个周期 × 渠道）"
+                         f"{len(macro):,} 行")
+
+    # ---- 4b. 5.2 下钻分析表（词 → 评论 → 作品）----
     if settings.enable_drill_analysis:
         # 下钻表按大盘表的周期出数（qtd / 近90日 往前补得更远），所以用和大盘表一样的 cf_all
         if works_df is None and db is not None:
@@ -195,17 +204,13 @@ def run(settings: EtlSettings,
                     cf_all["scenic_spot_code"].astype(str).unique().tolist())
                 kw = fetch_scenic_keywords(db, codes)
         drill = build_drill_analysis(
-            cf_all, works_df if works_df is not None else pd.DataFrame(), ctx, keywords=kw)
+            cf_all, works_df if works_df is not None else pd.DataFrame(), ctx, keywords=kw,
+            cloud_words=wordcloud_words(macro) if kw is not None else None)
         res.tables[TABLE_DRILL_ANALYSIS] = drill
         res.notes.append(f"下钻明细（词→评论→作品）{len(drill):,} 行")
-
-    # ---- 4b. 需求 2.0 大盘表（景区 × 日期 × 周期粒度 × 渠道）----
-    macro = None
-    if settings.enable_macro_metric:
-        macro = build_macro(cf_all, dim_all, kw_all, ctx)
-        res.tables[TABLE_MACRO] = macro
-        res.notes.append(f"大盘 KPI（{len(ctx.macro_granularities)} 个周期 × 渠道）"
-                         f"{len(macro):,} 行")
+    if TABLE_MACRO in res.tables:
+        # 表的顺序（写库 / CSV / 推送的先后）保持原来的：下钻表在前、大盘表在后
+        res.tables[TABLE_MACRO] = res.tables.pop(TABLE_MACRO)
 
     # ---- 5. 校验 ----
     from .builders.platform import platform_scope
@@ -223,11 +228,13 @@ def run(settings: EtlSettings,
         if len(set(ctx.backfill_lookback().values())) <= 1:
             checks["macro_period_specs"] = ctx.macro_granularities
         # 下钻表（按天）↔ 大盘表逐周期对账（评论数 / 地域 / 词云），按 travel_date 区间
-        # 开了采集关键字过滤，下钻表只是大盘表评论的一个子集，逐条对账必然对不上，不做
-        if TABLE_DRILL_ANALYSIS in res.tables and not getattr(settings, "drill_keyword_filter", False):
+        # 开了采集关键字过滤：下钻表只是大盘表评论的一个子集，评论数 / 地域对不上是预期的，
+        # 只核对「词云里的词下钻表查得到」
+        if TABLE_DRILL_ANALYSIS in res.tables:
             checks["drill"] = res.tables[TABLE_DRILL_ANALYSIS]
             checks["macro_specs"] = ctx.macro_granularities
             checks["output_dates"] = ctx.output_dates
+            checks["drill_words_only"] = bool(getattr(settings, "drill_keyword_filter", False))
     res.errors = validate_all(checks)
 
     # 回补可见化：输出日期里有多少「景区·渠道·日」是复制来的明细

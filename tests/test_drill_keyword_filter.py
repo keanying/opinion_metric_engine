@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """下钻表采集关键字过滤（--drill-keyword-filter）。
 
-开启：只有原文包含本景区采集关键字（src_opinion_scenic_keyword ∪ src_opinion_scenic_filter_word）
-的评论写入下钻表；关闭（默认）：原逻辑，评论全收。其余各表不受影响。
+开启：下钻表只写入两种评论（满足一个就写）
+  · 原文包含本景区采集关键字（src_opinion_scenic_keyword ∪ src_opinion_scenic_filter_word）
+  · 关键词出现在本景区大盘表 wordcloud_map 里 —— 词云里的词点进下钻表要查得到
+关闭（默认）：原逻辑，评论全收。其余各表不受影响。
 """
 
 import json
@@ -38,70 +40,107 @@ def _rows():
     rows = []
     for d in pd.date_range("2026-09-01", "2026-09-12"):
         ds = d.strftime("%Y%m%d")
-        rows.append(_comment(f"hit{ds}", "去了九嶷山，景色很好玩", ds))
-        rows.append(_comment(f"miss{ds}", "苏州平江路很好玩", ds))
-        rows.append(_comment(f"case{ds}", "舜帝陵 yyds", ds, words=()))
-    # 9/12 小红书只有一条不含关键字的评论 → 这个渠道当天有数据，不该被当成「缺数」去补
-    rows.append(_comment("xhs_miss", "无关内容", "20260912", platform="xiaohongshu"))
+        rows.append(_comment(f"hit{ds}", "去了九嶷山，景色很好玩", ds))      # 含采集关键字
+        rows.append(_comment(f"cloud{ds}", "苏州平江路很好玩", ds))          # 不含，但「好玩」在词云里
+        rows.append(_comment(f"none{ds}", "苏州平江路", ds, words=()))       # 不含、也没有词 → 不写
+        rows.append(_comment(f"case{ds}", "舜帝陵 yyds", ds, words=()))      # 含采集关键字（没有词）
+    rows.append(_comment("rare", "平江路夜景", "20260912", words=("夜景超美",)))
+    # 9/12 小红书只有一条不相关的评论 → 这个渠道当天有数据，不该被当成「缺数」去补
+    rows.append(_comment("xhs_miss", "无关内容", "20260912", platform="xiaohongshu", words=()))
     return pd.DataFrame(rows)
 
 
-def _run(filter_on, keywords=None, **kw):
+def _run(filter_on, keywords=None, rows=None, dates=("20260911", "20260912"), **kw):
     st = EtlSettings()
     st.write_db = st.write_csv = False
     st.lookback_days = 30
     st.drill_keyword_filter = filter_on
     for k, v in kw.items():
         setattr(st, k, v)
-    return run(st, ["20260911", "20260912"], comments_df=_rows(), drill_keywords=keywords)
+    return run(st, list(dates), comments_df=_rows() if rows is None else rows,
+               drill_keywords=keywords)
+
+
+def _ids(res):
+    return set(res.tables[DRILL]["comment_id"])
+
+
+def _cloud(res):
+    return {e["word"] for raw in res.tables[TABLE_MACRO]["wordcloud_map"]
+            for g in json.loads(raw).values() for e in g}
 
 
 def test_off_by_default_keeps_every_comment():
     assert EtlSettings().drill_keyword_filter is False
-    d = _run(False).tables[DRILL]
-    assert {c[:3] for c in d["comment_id"]} >= {"hit", "mis", "cas"}
+    ids = _ids(_run(False))
+    assert {i.rstrip("0123456789") for i in ids} >= {"hit", "cloud", "none", "case", "rare"}
 
 
-def test_on_only_keeps_comments_containing_a_collection_keyword():
+def test_on_keeps_keyword_comments_and_wordcloud_comments():
     res = _run(True, KW)
-    d = res.tables[DRILL]
-    ids = set(d["comment_id"])
-    assert ids, "含关键字的评论应该写入"
-    assert all(i.startswith(("hit", "case")) for i in ids), ids
-    assert not any(i.startswith("miss") or i == "xhs_miss" for i in ids)
+    kinds = {i.rstrip("0123456789") for i in _ids(res)}
+    assert kinds == {"hit", "case", "cloud", "rare"}       # rare：「夜景超美」也进了词云
+    assert not any(i.startswith("none") or i == "xhs_miss" for i in _ids(res))
+    # 词云里的每个词，下钻表都查得到
+    assert _cloud(res) <= set(res.tables[DRILL]["emotion_word"])
     # 其余表不受影响：大盘表仍按全部评论算
     off = _run(False)
     pd.testing.assert_frame_equal(
         res.tables[TABLE_MACRO].drop(columns=["etl_time"]).reset_index(drop=True),
         off.tables[TABLE_MACRO].drop(columns=["etl_time"]).reset_index(drop=True))
-    assert not res.errors, res.errors          # 下钻 ↔ 大盘对账在过滤开启时不做
-    assert any("采集关键字过滤" in n and "不写入" in n for n in res.notes)
+    assert not res.errors, res.errors
+    assert any("采集关键字过滤" in n and "词云" in n and "不写入" in n for n in res.notes)
+
+
+def test_comment_whose_words_are_not_in_the_wordcloud_is_not_written():
+    """词云每组只取前 N 个词：没进词云的词所在的评论（又不含采集关键字）不写。"""
+    res = _run(True, KW, macro_wordcloud_top_n=1)
+    assert _cloud(res) == {"好玩"}
+    assert "rare" not in _ids(res)
+    assert {i.rstrip("0123456789") for i in _ids(res)} == {"hit", "case", "cloud"}
+    assert not res.errors, res.errors
+
+
+def test_output_order_is_unchanged():
+    assert list(_run(True, KW).tables)[-2:] == [DRILL, TABLE_MACRO]
 
 
 def test_matching_is_case_insensitive_and_on_full_content():
     rows = _rows()
     long = "开头" + "填" * 300 + "Jiuyi Mountain"         # 关键字在 200 字摘要之外也算
     rows.loc[len(rows)] = _comment("long", long, "20260912", words=())
-    st = EtlSettings()
-    st.write_db = st.write_csv = False
-    st.lookback_days = 30
-    st.drill_keyword_filter = True
-    d = run(st, ["20260912"], comments_df=rows,
-            drill_keywords={"S1": ["jiuyi mountain"]}).tables[DRILL]
-    assert set(d["comment_id"]) == {"long"}
+    ids = _ids(_run(True, {"S1": ["jiuyi mountain"]}, rows=rows, dates=("20260912",)))
+    assert "long" in ids
+    assert not any(i.startswith(("case", "none")) for i in ids)   # 没词、不含这个关键字
 
 
 def test_fill_still_judged_on_all_comments():
-    """小红书 9/12 有评论（只是不含关键字）→ 不触发补数，下钻表也不该出现 9/11 复制来的小红书评论。"""
+    """小红书 9/12 有评论（只是不相关）→ 不触发补数，下钻表也不该出现 9/11 复制来的小红书评论。"""
     d = _run(True, KW).tables[DRILL]
-    xhs = d[(d["channel"] == "xiaohongshu")]
-    assert xhs.empty
+    assert d[d["channel"] == "xiaohongshu"].empty
 
 
-def test_scenic_without_keywords_gets_no_drill_rows():
+def test_scenic_without_keywords_only_gets_wordcloud_comments():
     res = _run(True, {})
-    assert res.tables[DRILL].empty
+    kinds = {i.rstrip("0123456789") for i in _ids(res)}
+    assert kinds == {"hit", "cloud", "rare"}                # 都是有词、词在词云里的
     assert any("没有采集关键字" in n for n in res.notes)
+    assert not res.errors, res.errors
+
+
+def test_word_check_catches_a_missing_wordcloud_word():
+    """开启过滤时仍核对「词云里的词下钻表查得到」；评论数 / 地域不核对。"""
+    from engin_cli.validate import validate_drill
+    from engin_cli import metric_calc_domain as D
+    res = _run(True, KW)
+    drill, macro = res.tables[DRILL], res.tables[TABLE_MACRO]
+    specs = D.macro_granularities(None)
+    dates = ["20260911", "20260912"]
+    assert validate_drill(drill, macro, specs, dates, True, words_only=True) == []
+    errs = validate_drill(drill[drill["emotion_word"] != "好玩"], macro, specs, dates, True,
+                          words_only=True)
+    assert any("词云里的词下钻表查不到" in e for e in errs)
+    assert not any("评论数" in e or "地域" in e for e in errs)
 
 
 def test_on_without_db_or_keywords_fails_clearly():
@@ -165,13 +204,14 @@ def test_cli_switch_on_with_keywords_csv(tmp_path):
     kw.write_text("scenic_id,word\nS1,九嶷山\n", encoding="utf-8-sig")
     rc, d = _cli(tmp_path, "--drill-keyword-filter", "--drill-keywords-csv", str(kw))
     assert rc == 0
-    assert set(d["comment_id"].str[:3]) == {"hit"}
+    kinds = {i.rstrip("0123456789") for i in d["comment_id"]}
+    assert kinds == {"hit", "cloud", "rare"}      # case 只含舜帝陵（不在这份关键字里）、没有词
 
 
 def test_cli_switch_off_is_original_logic(tmp_path):
     rc, d = _cli(tmp_path, "--no-drill-keyword-filter")
     assert rc == 0
-    assert {"hit", "mis", "cas"} <= set(d["comment_id"].str[:3])
+    assert {"hit", "cloud", "none", "case"} <= {i.rstrip("0123456789") for i in d["comment_id"]}
 
 
 def test_cli_on_without_db_or_csv_is_refused(tmp_path, capsys):
