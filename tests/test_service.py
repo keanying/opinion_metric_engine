@@ -10,6 +10,7 @@ import datetime as dt
 import json
 import os
 import re
+import secrets
 import stat
 import sys
 import threading
@@ -51,6 +52,13 @@ def _rows():
         rows.append(_comment(f"a{ds}", ds))
         rows.append(_comment(f"b{ds}", ds, "人不多", "xiaohongshu"))
     return pd.DataFrame(rows)
+
+
+# 测试用的假密码 / 假令牌：运行时随机生成，不在代码里写死（免得被密钥扫描当成泄露）
+FAKE_DB_PW = "db-" + secrets.token_hex(6)
+FAKE_TOKEN = "tok-" + secrets.token_hex(8)
+FAKE_HOOK = "hook-" + secrets.token_hex(8)
+FAKE_SVC_PW = "svc-" + secrets.token_hex(6)
 
 
 def _sqlite_settings():
@@ -352,9 +360,9 @@ def server(tmp_path, macro):
     holder = {"macro": macro.copy()}
     st = EtlSettings()
     st.service_store = "sqlite"
-    st.notify_feishu_webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/secret-token-xyz"
-    st.db.password = "dbpass"
-    st.push_headers = {"Authorization": "Bearer sk_supersecret"}
+    st.notify_feishu_webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/" + FAKE_HOOK
+    st.db.password = FAKE_DB_PW
+    st.push_headers = {"Authorization": "Bearer " + FAKE_TOKEN}
     app = App(st, data_dir=str(tmp_path / "svc"), scheduler_enabled=False,
               db_factory=lambda: FakeDB(holder["macro"]))
     srv = make_server(app, "127.0.0.1", 0, password="")
@@ -476,7 +484,7 @@ def test_config_view_masks_secrets(server):
     base, _, _ = server
     code, cfg = _call(base, "/api/config")
     text = json.dumps(cfg, ensure_ascii=False)
-    assert "dbpass" not in text and "sk_supersecret" not in text and "secret-token-xyz" not in text
+    assert FAKE_DB_PW not in text and FAKE_TOKEN not in text and FAKE_HOOK not in text
     assert cfg["数据库"]["password"] == "已配置"
 
 
@@ -497,7 +505,7 @@ def test_maintenance_actions(server, tmp_path):
 
 def test_password_protection(tmp_path):
     app = App(_sqlite_settings(), data_dir=str(tmp_path / "svc"), scheduler_enabled=False)
-    srv = make_server(app, "127.0.0.1", 0, password="p@ss")
+    srv = make_server(app, "127.0.0.1", 0, password=FAKE_SVC_PW)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{srv.server_address[1]}"
     try:
@@ -505,7 +513,7 @@ def test_password_protection(tmp_path):
         assert _call(base, "/", raw=True)[0] == 401
         bad = base64.b64encode(b"admin:wrong").decode()
         assert _call(base, "/api/health", headers={"Authorization": "Basic " + bad})[0] == 401
-        ok = base64.b64encode("admin:p@ss".encode()).decode()
+        ok = base64.b64encode(("admin:" + FAKE_SVC_PW).encode()).decode()
         assert _call(base, "/api/health", headers={"Authorization": "Basic " + ok})[0] == 200
     finally:
         srv.shutdown()
@@ -568,7 +576,7 @@ def test_runner_push_switch_and_overrides_reach_subprocess(runner, tmp_path):
 def test_push_settings_and_logs_api(server, tmp_path, monkeypatch):
     base, app, _ = server
     code, v = _call(base, "/api/push/settings")
-    assert v["settings"]["enabled"] and "sk_supersecret" not in json.dumps(v)
+    assert v["settings"]["enabled"] and FAKE_TOKEN not in json.dumps(v)
     code, e = _call(base, "/api/push/settings", "PUT", {"push_url": "ftp://x"})
     assert code == 400
     code, v = _call(base, "/api/push/settings", "PUT", {"enabled": False, "push_batch_size": "100"})
