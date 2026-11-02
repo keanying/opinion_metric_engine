@@ -1,5 +1,5 @@
 // 通用 UI 组件：图标、表格（仿 Semi Design Table）、标签、头像、空状态、开关
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 // ── 图标（24×24 线性图标，stroke 绘制）────────────────────────────────
 const ICONS = {
@@ -127,6 +127,27 @@ export const STable = {
   </div>`,
 }
 
+// ── 说明图标：灰色「!」，鼠标移上去 / 键盘聚焦时浮出说明（挂到 body，不会被卡片裁掉）──────
+export const Tip = {
+  props: { text: String, wide: Boolean },
+  setup(p) {
+    const el = ref(null), pos = ref(null)
+    const show = () => {
+      const r = el.value.getBoundingClientRect(), w = p.wide ? 420 : 300
+      const left = Math.min(Math.max(r.left + r.width / 2, w / 2 + 12), window.innerWidth - w / 2 - 12)
+      pos.value = r.top < 120 ? { left, top: r.bottom + 8, below: true } : { left, top: r.top - 8, below: false }
+    }
+    const hide = () => { pos.value = null }
+    return { el, pos, show, hide }
+  },
+  template: `<span ref="el" class="tip" tabindex="0" role="note" :aria-label="text"
+      @mouseenter="show" @mouseleave="hide" @focus="show" @blur="hide">
+    <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><circle cx="8" cy="8" r="8" fill="currentColor"/>
+      <path d="M8 4.3v4.9" stroke="#fff" stroke-width="1.9" stroke-linecap="round"/><circle cx="8" cy="11.6" r="1.05" fill="#fff"/></svg>
+    <Teleport to="body"><div v-if="pos" class="tip-pop" :class="{below: pos.below, wide}" :style="{left: pos.left+'px', top: pos.top+'px'}">{{ text }}</div></Teleport>
+  </span>`,
+}
+
 // ── 开关 ──────────────────────────────────────────────────────────────
 export const Switch = {
   props: { modelValue: Boolean, disabled: Boolean, size: String },
@@ -137,5 +158,5 @@ export const Switch = {
 
 // 全局注册（app.js 调用）
 export function installUI(app) {
-  for (const [n, c] of Object.entries({ Icon, Tag, StatusTag, Avatar, Empty, STable, Switch })) app.component(n, c)
+  for (const [n, c] of Object.entries({ Icon, Tag, StatusTag, Avatar, Empty, STable, Switch, Tip })) app.component(n, c)
 }

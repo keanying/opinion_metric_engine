@@ -61,15 +61,13 @@ export default {
   <div v-if="view">
     <div class="card banner">
       <Switch :model-value="form.enabled" @change="setMaster"/>
-      <div class="grow"><b>启用推送</b>
-        <p>任务算完、写库后按任务里勾的表推给下游。关掉后所有任务<b>只算不推</b>（下面的「补推」照常能用）；
-          失败不影响跑批成败，推送记录写在 {{ view.log_dir || '（未开启记录）' }}。</p></div>
+      <div class="grow"><b>启用推送</b><Tip wide :text="'任务算完、写库后，按任务里勾的表推给下游。关掉后所有任务只算不推（「补推」照常能用）。推送失败不影响跑批成败。推送记录写在 ' + (view.log_dir || '（未开启记录）')"/></div>
       <Tag :color="form.enabled ? 'green' : 'grey'" :icon="form.enabled ? 'tickCircle' : 'minus'">{{ form.enabled ? '已启用' : '已关闭' }}</Tag>
     </div>
 
     <div class="grid two">
       <div class="card sect">
-        <div class="sect-head"><h3>推送设置<small>留空 = 用 settings_local.py 里的；保存后下一次执行生效</small></h3></div>
+        <div class="sect-head"><h3>推送设置<Tip text="留空 = 用 settings_local.py 里的配置；保存后下一次执行生效"/></h3></div>
         <div class="sect-body">
           <div class="frow"><label>推送地址</label>
             <input v-model="form.push_url" class="grow" :placeholder="view.base.push_url || '未配置'" /></div>
@@ -77,16 +75,16 @@ export default {
             <label class="l2">超时</label><input v-model="form.push_timeout" class="w100" :placeholder="view.base.push_timeout + ' 秒'"/>
             <label class="l2">重试</label><input v-model="form.push_retries" class="w100" :placeholder="view.base.push_retries + ' 次'"/></div>
           <div class="opts compact">
-            <div class="opt"><div><b>试推</b><p>只组报文不真发，验证配置用（推送记录里结果是「试推」）</p></div><Switch v-model="form.push_dry_run"/></div>
-            <div class="opt"><div><b>推送失败算执行失败</b><p>默认推失败不影响跑批成败（数据已落库，可补推）</p></div><Switch v-model="form.push_strict"/></div>
-            <div class="opt"><div><b>推成功后删本地 CSV</b><p>推失败的 CSV 会留着，补推用</p></div><Switch v-model="form.push_cleanup_local"/></div>
+            <div class="opt"><div><b>试推</b><Tip text="只组报文不真发，验证配置用（推送记录里结果是「试推」）"/></div><Switch v-model="form.push_dry_run"/></div>
+            <div class="opt"><div><b>推送失败算执行失败</b><Tip text="默认推失败不影响跑批成败（数据已落库，可以补推）"/></div><Switch v-model="form.push_strict"/></div>
+            <div class="opt"><div><b>推成功后删本地 CSV</b><Tip text="推失败的 CSV 会留着，补推用"/></div><Switch v-model="form.push_cleanup_local"/></div>
           </div>
           <div class="frow ro"><label>请求头</label><div class="chips">
             <span v-for="(v,k) in view.headers" :key="k" class="chip grey">{{ k }}: {{ v }}</span>
-            <span v-if="!Object.keys(view.headers).length" class="hint">未配置（在 settings_local.py 的 push_headers 或 OPINION_PUSH_TOKEN 配，页面不显示明文）</span></div></div>
+            <span v-if="!Object.keys(view.headers).length" class="hint">未配置<Tip text="在 settings_local.py 的 push_headers 或环境变量 OPINION_PUSH_TOKEN 里配，页面不显示明文"/></span></div></div>
           <div class="frow ro" v-if="Object.keys(view.table_names).length"><label>表名映射</label><div class="chips">
             <span v-for="(v,k) in view.table_names" :key="k" class="chip grey" :title="k">{{ TABLE_LABEL[k] || k }} → {{ v }}</span></div></div>
-          <div class="actions"><span class="hint">当前生效地址：{{ view.effective.push_url || '未配置' }}</span>
+          <div class="actions"><span class="hint">生效地址<Tip :text="view.effective.push_url || '未配置'"/></span>
             <button class="btn primary" :disabled="saving" @click="save()">{{ saving ? '保存中…' : '保存推送设置' }}</button></div>
         </div>
       </div>
@@ -105,7 +103,7 @@ export default {
           </div>
         </div>
         <div class="card sect">
-          <div class="sect-head"><h3>补推<small>不重算，把之前算好、推失败的 CSV 再推一遍</small></h3></div>
+          <div class="sect-head"><h3>补推<Tip text="不重算，把之前算好、推失败的 CSV 再推一遍"/></h3></div>
           <div class="sect-body">
             <div class="frow"><label>景区</label><input v-model="re.scenics" class="grow" placeholder="不填 = 全部" /></div>
             <div class="frow"><label>表</label><div class="chips">
@@ -120,7 +118,7 @@ export default {
     </div>
 
     <div class="card">
-      <div class="card-head"><h3>推送记录<small>每个请求一行：推了哪个表、哪个景区、对方怎么回的</small></h3>
+      <div class="card-head"><h3>推送记录<Tip text="每个请求一行：推了哪个表、哪个景区、对方怎么回的；点右边的眼睛看完整响应"/></h3>
         <div class="toolbar">
           <select v-model="q.date" @change="loadLogs"><option v-for="d in (logs ? logs.dates : [])" :key="d" :value="d">{{ ymd(d) }}</option>
             <option v-if="!logs || !logs.dates.length" value="">暂无记录</option></select>

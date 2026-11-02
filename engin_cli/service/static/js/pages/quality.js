@@ -54,9 +54,7 @@ export default {
         </div>
       </div>
       <div class="card sect">
-        <div class="sect-head"><h3>在线检测库里的数据<small>只读，不改数据</small></h3></div>
-        <p class="hint" style="margin:0 0 14px">对 ADS 大盘表已有的数据做检测：区间相同的行指标一致（td@T-1 = latest_1d@T …）、
-          各周期评论数 = 每天 td 之和。用来发现历史数据里的不一致（例如晚到的评论导致前后几天对不上）。</p>
+        <div class="sect-head"><h3>在线检测库里的数据<Tip wide text="只读，不改数据。对 ADS 大盘表已有的数据做检测：区间相同的行指标一致（td@T-1 = latest_1d@T …）、各周期评论数 = 每天 td 之和。用来发现历史数据里的不一致（例如晚到的评论导致前后几天对不上）"/></h3></div>
         <div class="sect-body">
           <div class="frow"><label>景区</label>
             <select v-if="scenics.length" v-model="chk.scenic" class="grow">
@@ -75,7 +73,7 @@ export default {
     </div>
 
     <div class="card">
-      <div class="card-head"><h3>检测记录<small>每次跑批算完都检测；不通过先重算，还不通过就回退并发飞书通知</small></h3>
+      <div class="card-head"><h3>检测记录<Tip text="每次跑批算完都检测；不通过先重算，还不通过就回退（不写库、不推送）并发飞书通知"/></h3>
         <div class="toolbar">
           <div class="seg"><button v-for="d in [7,14,30]" :key="d" :class="{on: days===d}" @click="days=d; load()">近 {{ d }} 天</button></div>
           <span class="search"><Icon name="search" :size="15"/><input v-model="kw" placeholder="景区 / 问题"/></span>

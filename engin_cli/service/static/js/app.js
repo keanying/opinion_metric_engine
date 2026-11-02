@@ -1,5 +1,5 @@
 // 入口：外框 + 图标侧栏 + 顶栏 + 极简 hash 路由（#/tasks、#/runs/12 …）。新增页面：在 ROUTES 里加一行即可。
-import { createApp, reactive, computed, h, ref, onMounted, onUnmounted } from 'vue'
+import { createApp, reactive, computed, h, watchEffect, onMounted, onUnmounted } from 'vue'
 import { toast, sched, refreshSched } from './api.js'
 import { installUI } from './ui.js'
 import Overview from './pages/overview.js'
@@ -53,6 +53,7 @@ const App = {
       return { r: ROUTES[0], props: {} }
     })
     let timer
+    watchEffect(() => { document.title = `${current.value.r.title} · 舆情指标计算服务` })
     onMounted(() => { refreshSched(); timer = setInterval(refreshSched, 15000) })
     onUnmounted(() => clearInterval(timer))
     const pill = computed(() => {
@@ -80,7 +81,7 @@ const App = {
     </aside>
     <main class="main">
       <header class="topbar">
-        <div class="tb-title"><h1>{{ current.r.title }}</h1><p>{{ current.r.crumb }}</p></div>
+        <span class="tb-space"></span>
         <div class="tb-right">
           <a href="#/tasks/new" class="btn primary pill"><Icon name="plus" :size="15" :sw="2.4"/>新建任务</a>
           <a v-if="pill" href="#/tasks" class="status-pill" :class="pill.cls"><i></i>{{ pill.text }}</a>

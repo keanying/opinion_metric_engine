@@ -53,6 +53,12 @@ def _rows():
     return pd.DataFrame(rows)
 
 
+def _sqlite_settings():
+    st = EtlSettings()
+    st.service_store = "sqlite"
+    return st
+
+
 def _wait(fn, timeout=60):
     t0 = time.time()
     while time.time() - t0 < timeout:
@@ -172,7 +178,7 @@ def test_scheduler_tick_fires_once(tmp_path):
 def test_scheduler_switch_and_missed_slots_are_logged(tmp_path):
     store = Store(str(tmp_path / "s.db"))
     tid = store.create_task("每日", {}, {"times": ["08:10"]})
-    store._exec("update tasks set updated_at='2026-11-01 00:00:00'")
+    store._exec(f"update {store.t_task} set update_time='2026-11-01 00:00:00'")
     fr = _FakeRunner()
     s = SC.Scheduler(store, fr)
     s.set_enabled(False)
@@ -345,6 +351,7 @@ def macro():
 def server(tmp_path, macro):
     holder = {"macro": macro.copy()}
     st = EtlSettings()
+    st.service_store = "sqlite"
     st.notify_feishu_webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/secret-token-xyz"
     st.db.password = "dbpass"
     st.push_headers = {"Authorization": "Bearer sk_supersecret"}
@@ -489,7 +496,7 @@ def test_maintenance_actions(server, tmp_path):
 
 
 def test_password_protection(tmp_path):
-    app = App(EtlSettings(), data_dir=str(tmp_path / "svc"), scheduler_enabled=False)
+    app = App(_sqlite_settings(), data_dir=str(tmp_path / "svc"), scheduler_enabled=False)
     srv = make_server(app, "127.0.0.1", 0, password="p@ss")
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{srv.server_address[1]}"
@@ -506,7 +513,7 @@ def test_password_protection(tmp_path):
 
 
 def test_refuses_public_bind_without_password(tmp_path):
-    app = App(EtlSettings(), data_dir=str(tmp_path / "svc"), scheduler_enabled=False)
+    app = App(_sqlite_settings(), data_dir=str(tmp_path / "svc"), scheduler_enabled=False)
     with pytest.raises(ValueError, match="访问密码"):
         make_server(app, "0.0.0.0", 0, password="")
 
@@ -595,3 +602,127 @@ def test_scheduler_api_and_task_preview(server):
     assert not pv["ok"] and "日期方式" in pv["error"]
     code, ov = _call(base, "/api/overview")
     assert "durations" in ov and len(ov["durations"]) == 14 and "today_slots" in ov
+
+
+# ══════════════════════════════════════════════════════════════════
+# 系统表存 MySQL（数仓规范的表名）。设 OPINION_TEST_MYSQL=host:port:user:password 才跑，
+# 账号要能建库：会建 omx_t_db 临时库（模拟计算指标用的那个库），跑完删掉
+# ══════════════════════════════════════════════════════════════════
+def _mysql_cfg():
+    spec = os.environ.get("OPINION_TEST_MYSQL")
+    if not spec:
+        pytest.skip("没设 OPINION_TEST_MYSQL，跳过 MySQL 系统表测试")
+    from engin_cli.settings import DBConfig
+    host, port, user, pw = spec.split(":", 3)
+    return DBConfig(host=host, port=int(port), user=user, password=pw, database="omx_t_db")
+
+
+@pytest.fixture
+def mysql_store():
+    import pymysql
+    cfg = _mysql_cfg()
+    conn = pymysql.connect(host=cfg.host, port=cfg.port, user=cfg.user, password=cfg.password, autocommit=True)
+    with conn.cursor() as c:
+        c.execute("drop database if exists omx_t_db")
+        c.execute("create database omx_t_db default charset utf8mb4")
+    st = Store.mysql(cfg)
+    yield st, conn
+    st.close()
+    with conn.cursor() as c:
+        c.execute("drop database if exists omx_t_db")
+    conn.close()
+
+
+def test_mysql_tables_follow_naming_rules(mysql_store):
+    st, conn = mysql_store
+    from engin_cli.service.store import TABLE_RUN, TABLE_SCHEDULE_LOG, TABLE_SETTING, TABLE_TASK
+    with conn.cursor() as c:
+        c.execute("select table_schema, table_name, table_comment from information_schema.tables "
+                  "where table_schema='omx_t_db' order by table_name")
+        tables = c.fetchall()
+        c.execute("select table_name, column_name, column_comment from information_schema.columns "
+                  "where table_schema='omx_t_db'")
+        cols = c.fetchall()
+    assert {t[1] for t in tables} == {TABLE_TASK, TABLE_SETTING, TABLE_RUN, TABLE_SCHEDULE_LOG}   # 同一个库
+    assert all(t[2] for t in tables)                                     # 表注释
+    assert [c for c in cols if not c[2]] == []                           # 每个字段都有注释
+    assert all(re.fullmatch(r"[a-z][a-z0-9_]*", c[1]) for c in cols)     # snake_case
+    names = {c[0]: set() for c in cols}
+    for t, c, _ in cols:
+        names[t].add(c)
+    assert "travel_date" in names[TABLE_RUN] and "travel_date" in names[TABLE_SCHEDULE_LOG]
+    status = [c for c in cols if c[1].endswith("_status")]
+    assert status and all("-" in c[2] for c in status)                    # 状态字段注释写清每个取值
+
+
+def test_mysql_store_round_trip(mysql_store):
+    st, conn = mysql_store
+    tid = st.create_task("每日", {"scenics": "S1"}, {"times": ["08:10"]})
+    st.set_last_fired(tid, {"08:10": "2026-11-02"})
+    t = st.get_task(tid)
+    assert t["name"] == "每日" and t["enabled"] and t["last_fired"] == {"08:10": "2026-11-02"}
+    assert len(t["created_at"]) == 19
+    st.set_kv("push", {"enabled": False})
+    st.set_kv("push", {"enabled": True, "push_url": "https://x"})              # upsert
+    assert st.get_kv("push") == {"enabled": True, "push_url": "https://x"}
+    st.add_event("08:10 到点", st.get_task(tid))
+    st.add_event("定时总开关已关闭", level="warn")
+    assert [e["text"] for e in st.list_events(tid)] == ["定时总开关已关闭", "08:10 到点"]
+    rid = st.create_run("run", ["run", "--date", "20261102"], "S1 · 20261102", "schedule", st.get_task(tid))
+    st.update_run(rid, status="running", started_at=now_str_(), log_path="/tmp/x.log")
+    st.update_run(rid, status="blocked", finished_at=now_str_(), exit_code=1,
+                  summary={"scenics": [{"scenic": "S1", "ok": False, "quality_blocked": True}]}, message="回退")
+    r = st.get_run(rid)
+    assert r["status"] == "blocked" and r["command"][0] == "run" and r["quality_blocked"] == 1
+    assert st.list_runs(status="blocked")["total"] == 1 and st.last_run_of(tid)["id"] == rid
+    assert [x["id"] for x in st.runs_between("2000-01-01")] == [rid]
+    with conn.cursor() as c:                                              # 分区字段 = 创建当天
+        c.execute("select travel_date, run_type, trigger_type from omx_t_db.dwd_trf_social_opinion_task_run_di")
+        td, rt, tt = c.fetchone()
+    assert td == int(time.strftime("%Y%m%d")) and (rt, tt) == ("run", "schedule")
+    rid2 = st.create_run("push", ["push"], "补推", "manual")
+    assert st.mark_interrupted() == 1 and st.get_run(rid2)["status"] == "failed"
+    st.update_task(tid, "改名", {}, {"times": []}, False)
+    assert not st.get_task(tid)["enabled"]
+    assert st.delete_runs_before("2999-01-01") == ["/tmp/x.log"]
+    st.delete_task(tid)
+    assert st.list_tasks() == []
+
+
+def test_mysql_store_reconnects(mysql_store):
+    st, conn = mysql_store
+    with conn.cursor() as c:                                              # 模拟 wait_timeout 把连接断了
+        c.execute("kill %s", (st._db.thread_id(),))
+    time.sleep(0.2)
+    assert st.create_task("断线后", {}, {}) > 0
+    assert st.list_tasks()[0]["name"] == "断线后"
+
+
+def test_mysql_ddl_renders_database_names():
+    from engin_cli.service.store import render_mysql_ddl
+    stmts = render_mysql_ddl("opinion")
+    assert len(stmts) == 9
+    heads = [s.split("(")[0] for s in stmts]                             # 建表 / 建索引的表名都带库名
+    assert all("`opinion`." in h for h in heads)
+    assert any("`opinion`.dim_trf_social_opinion_task_f" in h for h in heads)
+    assert any("`opinion`.dwd_trf_social_opinion_task_run_di" in h for h in heads)
+    assert "（dim_trf_social_opinion_task_f.task_id）" in "".join(stmts)   # 注释里的表名不动
+
+
+def test_service_store_setting(tmp_path):
+    from engin_cli.service.server import open_store
+    from engin_cli.service.store import StoreError
+    st = EtlSettings()
+    st.service_store = "sqlite"
+    assert open_store(st, str(tmp_path)).kind == "sqlite"
+    st.service_store = "oracle"
+    with pytest.raises(StoreError):
+        open_store(st, str(tmp_path))
+    st.service_store = "mysql"
+    st.db.database = "bad-name;drop"
+    with pytest.raises(StoreError, match="库名"):
+        open_store(st, str(tmp_path))
+
+
+def now_str_():
+    return time.strftime("%Y-%m-%d %H:%M:%S")

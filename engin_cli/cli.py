@@ -992,7 +992,7 @@ def build_parser() -> argparse.ArgumentParser:
     v = sub.add_parser("serve", help="启动指标计算服务（页面：任务 / 定时 / 执行日志 / 数据质量 / 指标）")
     v.add_argument("--host", help="监听地址，默认 settings.service_host=127.0.0.1（只本机）")
     v.add_argument("--port", type=int, help="端口，默认 settings.service_port=8765")
-    v.add_argument("--data-dir", help="任务 / 执行记录 / 日志放哪，默认 service_data/")
+    v.add_argument("--data-dir", help="执行日志放哪，默认 service_data/（任务、执行记录存 MySQL 系统表）")
     v.add_argument("--no-scheduler", action="store_true", help="不启动定时（只能手动执行）")
     v.add_argument("--log-level")
     v.set_defaults(func=cmd_serve)

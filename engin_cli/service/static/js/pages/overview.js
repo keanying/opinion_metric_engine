@@ -89,8 +89,6 @@ export default {
           <div v-for="s in stats" :key="s.l"><span class="cap">{{ s.l }}</span><b>{{ s.p }}%</b>
             <i class="ubar"><em :style="{width: Math.max(s.p, 4)+'%', background: s.c}"></em></i></div>
         </div>
-        <p class="ov-note"><span class="star"><Icon name="star" :size="12" :sw="2.2"/></span>
-          <span>数据质量检测不通过会自动<b>回退</b>：不写库、不推送，并发飞书通知。</span></p>
       </section>
 
       <!-- 中：执行耗时曲线 + 执行次数柱 -->

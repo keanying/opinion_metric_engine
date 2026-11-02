@@ -163,7 +163,11 @@ class EtlSettings:
     service_host: str = "127.0.0.1"
     service_port: int = 8765
     service_password: str = ""               # 页面访问密码（OPINION_SERVICE_PASSWORD）
-    service_data_dir: str = "service_data"   # 任务 / 执行记录（SQLite）和执行日志放这里
+    service_data_dir: str = "service_data"   # 执行日志（runs/<id>.log）放这里
+    # 任务、设置、执行记录、调度日志存哪：
+    #   "mysql"（默认）= 建在计算指标用的同一个库（db.database）里的系统表，见 sql/sys_trf_social_opinion_service_ddl.sql
+    #   "sqlite" = service_data_dir/service.db，没有库时本机试用
+    service_store: str = "mysql"
 
     # 本次产出哪些表（写库 / 出 CSV / 推送）。None = 全部。
     # 命令行 run --tables drill,macro；服务页面的任务里勾「计算哪些表」。
@@ -299,6 +303,7 @@ def load_settings() -> EtlSettings:
     s.db.database = _env("OPINION_DB_NAME", s.db.database)
     s.db.src_database = _env("OPINION_SRC_DB", s.db.src_database)
     s.db.ads_database = _env("OPINION_ADS_DB", s.db.ads_database)
+    s.service_store = _env("OPINION_SERVICE_STORE", s.service_store)
 
     s.lookback_days = _env("OPINION_LOOKBACK_DAYS", s.lookback_days, int)
     s.log_level = _env("OPINION_LOG_LEVEL", s.log_level)

@@ -18,7 +18,7 @@ export const EventLog = {
   props: { events: Array, title: { type: String, default: '调度日志' }, sub: { type: String, default: '定时触发了谁、跳过了谁、为什么' } },
   template: `
   <div class="card dark-card">
-    <div class="card-head"><h3>{{ title }}<small>{{ sub }}</small></h3><slot/></div>
+    <div class="card-head"><h3>{{ title }}<Tip :text="sub"/></h3><slot/></div>
     <div class="evlog">
       <div v-for="e in events" :key="e.id" class="ev" :class="e.level">
         <span class="ev-ts">{{ e.ts.slice(5,16) }}</span>
@@ -54,7 +54,7 @@ export const TaskBody = {
   template: `
   <div class="tb">
     <div class="card sect">
-      <div class="sect-head"><h3>日期范围<small>这次算哪几天（按服务器日期）</small></h3></div>
+      <div class="sect-head"><h3>日期范围<Tip text="这次算哪几天，按服务器日期算；「当天」= 执行那天"/></h3></div>
       <div class="sect-body">
         <div class="frow"><label>目标日期</label>
           <div class="seg"><button v-for="m in DATE_MODES" :key="m[0]" :class="{on: cfg.date_mode===m[0]}"
@@ -70,43 +70,42 @@ export const TaskBody = {
     </div>
 
     <div class="card sect">
-      <div class="sect-head"><h3>计算哪些表<small>没选的下钻表 / 大盘表不计算；基础四表照算（质量检测要用），但不写库、不推送</small></h3>
+      <div class="sect-head"><h3>计算哪些表<Tip text="没选的下钻表 / 大盘表不计算；基础四表照算（质量检测要用），但不写库、不推送"/></h3>
         <div class="btn-group"><button class="btn xs" @click="preset(KEYS)">全选</button>
           <button class="btn xs" @click="preset(['drill','macro'])">只要下钻 + 大盘</button></div></div>
       <div class="tiles">
         <div v-for="t in TABLES" :key="t.key" class="tile" :class="{on: calc.has(t.key)}" @click="setCalc(t.key, !calc.has(t.key))">
           <Avatar square :icon="t.icon" :color="t.color" :size="34"/>
-          <div class="grow"><b>{{ t.label }}</b><small :title="t.table">{{ t.table }}</small><p>{{ t.desc }}</p></div>
+          <div class="grow"><b>{{ t.label }}<Tip :text="t.desc + '（' + t.table + '）'"/></b></div>
           <Switch :model-value="calc.has(t.key)" size="sm" @change="v => setCalc(t.key, v)"/>
         </div>
       </div>
     </div>
 
     <div class="card sect">
-      <div class="sect-head"><h3>推送<small>算完推给下游；推送地址、批大小、试推在「推送」页设置</small></h3>
+      <div class="sect-head"><h3>推送<Tip text="算完推给下游；推送地址、批大小、试推在「推送」页设置；都不选 = 不推送"/></h3>
         <a href="#/push" class="btn xs light">推送设置 →</a></div>
       <div v-if="pushOff" class="alert orange">推送总开关已关闭：这个任务现在只算不推（推送页可以打开）</div>
       <div class="push-row">
         <label v-for="t in TABLES" :key="t.key" class="pchk" :class="{off: !calc.has(t.key), on: push.has(t.key)}">
           <Switch :model-value="push.has(t.key)" :disabled="!calc.has(t.key)" size="sm" @change="v => setPush(t.key, v)"/>
           {{ t.label }}</label>
-        <span class="hint">{{ cfg.push ? '' : '都不选 = 不推送' }}</span>
       </div>
     </div>
 
     <div class="card sect">
       <div class="sect-head"><h3>数据质量与选项</h3></div>
       <div class="opts">
-        <div class="opt"><div><b>质量检测不通过就回退</b><p>先重算，还不通过：不写库、不推送，发飞书通知</p></div>
+        <div class="opt"><div><b>质量检测不通过就回退</b><Tip text="先重算（次数不填 = 用 settings），还不通过：不写库、不推送，发飞书通知"/></div>
           <div class="opt-r"><span class="hint">重算</span><input v-model="cfg.quality_retries" class="w64" placeholder="默认"/><span class="hint">次</span>
             <Switch v-model="cfg.quality_gate"/></div></div>
-        <div class="opt"><div><b>下钻表按采集关键字过滤</b><p>只收评论包含本景区采集关键字（及词云词）的评论</p></div>
+        <div class="opt"><div><b>下钻表按采集关键字过滤</b><Tip text="下钻表只收评论包含本景区采集关键字（及词云里的词）的评论"/></div>
           <Switch v-model="cfg.drill_keyword_filter"/></div>
-        <div class="opt"><div><b>只算不写库</b><p>不写 ADS 表（只算 + 推送），一般不用</p></div><Switch v-model="cfg.skip_db"/></div>
-        <div class="opt"><div><b>往前重跑 / 补数上限</b><p>覆盖延迟产出的数据；不填 = 用 settings 里的</p></div>
+        <div class="opt"><div><b>只算不写库</b><Tip text="不写 ADS 表（只算 + 推送），一般不用"/></div><Switch v-model="cfg.skip_db"/></div>
+        <div class="opt"><div><b>往前重跑 / 补数上限</b><Tip text="往前多重跑几天，覆盖延迟产出的数据；不填 = 用 settings 里的"/></div>
           <div class="opt-r"><input v-model="cfg.rerun_days" class="w64" placeholder="默认"/><span class="hint">天</span>
             <input v-model="cfg.backfill_lookback" class="w100" placeholder="补数上限"/></div></div>
-        <div class="opt"><div><b>详细日志</b><p>执行日志里打印每一步的明细（-v）</p></div><Switch v-model="cfg.verbose"/></div>
+        <div class="opt"><div><b>详细日志</b><Tip text="执行日志里打印每一步的明细（-v）"/></div><Switch v-model="cfg.verbose"/></div>
       </div>
     </div>
   </div>`,
@@ -159,9 +158,7 @@ export const TaskList = {
   <div>
     <div class="card banner">
       <Switch :model-value="!!(sched.data && sched.data.enabled)" :disabled="sched.data && !sched.data.available" @change="setMaster"/>
-      <div class="grow"><b>启用定时执行</b>
-        <p>到点按任务配置跑批：计算 → 质量检测 → 写入 ADS → 推送下游；同一时间只跑一个，后到的排队。
-          服务停机错过超过 {{ sched.data ? sched.data.grace_minutes : 30 }} 分钟的不补跑。</p></div>
+      <div class="grow"><b>启用定时执行</b><Tip wide :text="'到点按任务配置跑批：计算 → 质量检测 → 写入 ADS → 推送下游。同一时间只跑一个，后到的排队；服务停机错过超过 ' + (sched.data ? sched.data.grace_minutes : 30) + ' 分钟的不补跑。关掉后只能手动执行'"/></div>
       <Tag v-if="sched.data" :color="sched.data.enabled ? 'green' : 'grey'" :icon="sched.data.enabled ? 'tickCircle' : 'minus'">
         {{ !sched.data.available ? '未启动' : sched.data.enabled ? '已启用' : '已暂停' }}</Tag>
     </div>
@@ -251,28 +248,26 @@ export const TaskEdit = {
   template: `
   <div v-if="loaded" class="te">
     <div class="card banner">
-      <Switch v-model="f.enabled"/>
+      <Switch v-model="f.enabled"/><Tip text="启用后按下面的定时自动执行；停用也能在列表里手动执行"/>
       <div class="grow"><input v-model="f.name" class="name-input" placeholder="任务名称，如：九嶷山每日跑批" />
-        <p>启用后按下面的定时自动执行；停用也能在列表里手动执行。</p></div>
+        </div>
       <Tag :color="f.enabled ? 'green' : 'grey'" :icon="f.enabled ? 'tickCircle' : 'minus'">{{ f.enabled ? '已启用' : '已停用' }}</Tag>
     </div>
 
     <div class="te-grid">
       <div class="card sect">
-        <div class="sect-head"><h3>定时<small>每天几点自动执行</small></h3></div>
+        <div class="sect-head"><h3>定时<Tip text="每天几点自动执行（服务器时间）。不加时间 = 只手动执行；多个时间各跑一次，例如 08:10 跑完、20:10 再补一遍晚到的评论"/></h3></div>
         <div class="sect-body">
           <div class="frow"><label>每天</label>
             <div class="chips">
               <span v-for="(t,i) in f.times" :key="t" class="time-chip">{{ t }}<a @click="f.times.splice(i,1)">×</a></span>
               <span class="time-add"><input v-model="newTime" type="time" @keyup.enter="addTime"/><Icon name="clock" :size="14"/></span>
               <button class="btn light sm" @click="addTime">添加</button></div></div>
-          <div class="frow"><label></label><span class="hint">不加时间 = 只手动执行。多个时间各跑一次（例如 08:10 跑完、20:10 再补一遍晚到的评论）</span></div>
-          <div class="frow"><label>状态</label><span class="hint" v-if="sched.data && !sched.data.enabled" style="color:var(--orange)">定时总开关已暂停，到点不会执行（任务页顶上可以打开）</span>
-            <span class="hint" v-else>定时总开关已开启</span></div>
+          <div v-if="sched.data && !sched.data.enabled" class="alert orange small">定时总开关已暂停，到点不会执行</div>
         </div>
       </div>
       <div class="card sect">
-        <div class="sect-head"><h3>预览<small>这次定时会跑什么</small></h3></div>
+        <div class="sect-head"><h3>预览<Tip text="按当前设置，这次定时会跑什么"/></h3></div>
         <div v-if="preview && preview.ok" class="preview">
           <div class="pv-row"><span>下次运行</span><b>{{ preview.next_fires.length ? preview.next_fires.join('、') : '仅手动' }}</b></div>
           <div class="pv-row"><span>目标日期</span><b>{{ preview.start === preview.end ? preview.start : preview.start + ' ~ ' + preview.end }}</b><em>（按今天算）</em></div>

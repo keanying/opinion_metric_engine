@@ -119,7 +119,7 @@ export default {
       </div>
 
       <div class="grid two">
-        <div class="card"><div class="card-head"><h3>维度得分<small>条 = 本期，竖线 = 上期</small></h3></div>
+        <div class="card"><div class="card-head"><h3>维度得分<Tip text="条 = 本期，橙色竖线 = 上期"/></h3></div>
           <div v-for="d in dims" :key="d.dimension1" class="hbar"><span class="hbar-label">{{ d.dimension1 }}</span>
             <div class="hbar-track"><div class="hbar-fill" :style="{width: (d.dimension1Score/5*100)+'%'}"></div>
               <div class="hbar-prev" :style="{left: (d.preDimension1Score/5*100)+'%'}"></div></div>
@@ -128,7 +128,7 @@ export default {
           <Wave :points="scorePts" :height="190" :labels="false" :ticks="7" :colors="['#16b87f', '#4fd1d9']" :fmt="v => fmtNum(v, 2)" /></div>
       </div>
 
-      <div class="card"><div class="card-head"><h3>各渠道对比<small>点一行切换渠道</small></h3></div>
+      <div class="card"><div class="card-head"><h3>各渠道对比<Tip text="点一行切换上面图表的渠道"/></h3></div>
         <STable :columns="chCols" :data="cell.rows" row-key="channel" clickable @row-click="r => q.channel = r.channel">
           <template #channel="{ row }"><span class="s-name"><Avatar :text="CHANNELS[row.channel] || row.channel" :color="row.channel==='all' ? 'indigo' : null"/>
             <b :class="{'t-primary': row.channel===q.channel}">{{ CHANNELS[row.channel] || row.channel }}</b></span></template>

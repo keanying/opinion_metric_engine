@@ -434,7 +434,10 @@ ETL = {
     # "service_host": "127.0.0.1",
     # "service_port": 8765,
     # "service_password": "",           # 也可以用环境变量 OPINION_SERVICE_PASSWORD
-    # "service_data_dir": "service_data",  # 任务、执行记录（SQLite）、执行日志放这里
+    # "service_data_dir": "service_data",  # 执行日志放这里
+    # 任务 / 设置 / 执行记录 / 调度日志存哪："mysql"（默认，建在上面 DB 的 database 同一个库里，
+    #   表见 sql/sys_trf_social_opinion_service_ddl.sql，缺表自动建）；"sqlite" = 没有库时本机试用
+    # "service_store": "mysql",
 
 
     # ══════════════════════════════════════════════════════════════

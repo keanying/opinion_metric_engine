@@ -56,7 +56,8 @@ python -m pytest -q
 ## 指标计算服务（页面）
 
 `python -m engin_cli.cli serve` 启动后浏览器打开 http://127.0.0.1:8765/ ：编辑任务和定时、选择计算 / 推送哪些表、
-看执行日志、数据质量、历史记录、ADS 指标、推送设置与推送记录。只用标准库（http.server + SQLite），
+看执行日志、数据质量、历史记录、ADS 指标、推送设置与推送记录。只用标准库（http.server）+ 已有的 pymysql；任务 / 设置 / 执行记录 / 调度日志存 MySQL 系统表，和计算指标同一个库
+（`dim_trf_social_opinion_*_f` / `dwd_trf_social_opinion_*_di`，`sql/sys_trf_social_opinion_service_ddl.sql`），
 前端是 Vue 3（`engin_cli/service/static/vendor/`，免构建）。每次执行在子进程里跑 `engin_cli.cli run`，一次一个。
 部署 / 页面说明见《使用说明》第三·五节。
 
@@ -899,7 +900,8 @@ opinion_metric_engine/          项目根
 | `engin_cli/pipeline.py` | 编排 |
 | `engin_cli/cli.py` | 命令行 |
 | `engin_cli/notify.py` | 飞书通知（数据质量不通过、计算异常） |
-| `engin_cli/service/store.py` | 服务存储（SQLite）：任务、执行记录、服务级设置、调度日志 |
+| `engin_cli/service/store.py` | 系统表读写（MySQL；单测 / 本机试用可切 SQLite）：任务、服务级设置、执行记录、调度日志 |
+| `sql/sys_trf_social_opinion_service_ddl.sql` | 指标服务 4 张系统表的建表语句（数仓命名规范，表 / 字段都有注释；服务启动时缺表自动执行） |
 | `engin_cli/service/runner.py` | 执行器：任务配置 → `run` 命令，排队、子进程执行、取消；推送总开关 / 推送设置下发 |
 | `engin_cli/service/scheduler.py` | 定时：每天 HH:MM 触发，30 分钟补触发窗口，定时总开关，调度日志 |
 | `engin_cli/service/server.py` | HTTP 接口 + 静态页面（Basic 认证、防 CSRF） |

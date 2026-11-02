@@ -3,7 +3,8 @@
 
     python -m engin_cli.cli serve            # 默认 http://127.0.0.1:8765
 
-只用标准库（http.server / sqlite3 / threading），不增加依赖。
+只用标准库（http.server / threading）+ 已有的 pymysql，不增加依赖。
+任务、设置、执行记录、调度日志存 MySQL 系统表（store.py，数仓命名规范），执行日志是文件。
 
 安全：
 · 默认只监听本机。监听其他地址（如 0.0.0.0）必须配 service_password，否则拒绝启动 ——
@@ -34,7 +35,7 @@ from .runner import (APP_ROOT, PUSH_DEFAULTS, Runner, TASK_DEFAULTS, apply_push_
                      build_push_argv, build_run_argv, normalize_config, normalize_push_settings,
                      push_overrides, task_dates)
 from .scheduler import GRACE, Scheduler, next_fire, normalize_times
-from .store import Store, now_str
+from .store import Store, StoreError, now_str
 
 log = logging.getLogger(__name__)
 
@@ -80,18 +81,29 @@ def _mask(v: str, keep: int = 6) -> str:
     return v[:keep] + "***" if len(v) > keep else "***"
 
 
+def open_store(settings, data_dir: str) -> Store:
+    """按 settings.service_store 打开系统表存储：mysql（默认，数仓规范的系统表）/ sqlite（本机试用）。"""
+    kind = str(getattr(settings, "service_store", "mysql") or "mysql").lower()
+    if kind == "sqlite":
+        return Store.sqlite(os.path.join(data_dir, "service.db"))
+    if kind != "mysql":
+        raise StoreError(f"service_store 只能是 mysql 或 sqlite，收到 {kind!r}")
+    return Store.mysql(settings.db)                     # 和计算指标用同一个库（db.database）
+
+
 # ══════════════════════════════════════════════════════════════════════
 # 应用：持有 settings / 存储 / 执行器 / 定时，API 的业务逻辑都在这里
 # ══════════════════════════════════════════════════════════════════════
 class App:
     def __init__(self, settings, data_dir: Optional[str] = None, runner: Optional[Runner] = None,
-                 scheduler_enabled: bool = True, db_factory: Optional[Callable] = None):
+                 scheduler_enabled: bool = True, db_factory: Optional[Callable] = None,
+                 store: Optional[Store] = None):
         self.settings = settings
         d = data_dir or getattr(settings, "service_data_dir", "") or "service_data"
         # 相对路径按项目根目录算（执行器的子进程也在项目根目录跑），跟从哪启动服务无关
         self.data_dir = d if os.path.isabs(d) else os.path.join(APP_ROOT, d)
         os.makedirs(self.data_dir, exist_ok=True)
-        self.store = Store(os.path.join(self.data_dir, "service.db"))
+        self.store = store or open_store(settings, self.data_dir)
         self.runner = runner or Runner(self.store, self.data_dir)
         self.scheduler = Scheduler(self.store, self.runner) if scheduler_enabled else None
         self._db_factory = db_factory
@@ -523,7 +535,7 @@ class App:
             "数据质量": {"quality_gate": st.quality_gate, "quality_retries": st.quality_retries,
                      "notify_feishu_webhook": _mask(st.notify_feishu_webhook, 40),
                      "notify_feishu_secret": "已配置" if st.notify_feishu_secret else "未配置"},
-            "服务": {"data_dir": self.data_dir, "push_settings_from_page": push_overrides(
+            "服务": {"store": self.store.describe(), "data_dir": self.data_dir, "push_settings_from_page": push_overrides(
                 self.runner.push_settings()), "app_root": APP_ROOT,
                    "started_at": self.started_at},
         }
@@ -686,7 +698,13 @@ def serve(settings, host: Optional[str] = None, port: Optional[int] = None,
     host = host or getattr(settings, "service_host", "127.0.0.1")
     port = int(port or getattr(settings, "service_port", 8765))
     password = str(getattr(settings, "service_password", "") or "")
-    app = App(settings, scheduler_enabled=scheduler_enabled)
+    try:
+        app = App(settings, scheduler_enabled=scheduler_enabled)
+    except StoreError as e:
+        print(f"✗ 启动失败：{e}")
+        print("  系统表默认建在计算指标用的同一个 MySQL 库里（settings_local.py 的 DB）；"
+              "只想本机试用可以设 service_store = \"sqlite\"")
+        return 2
     try:
         srv = make_server(app, host, port, password)
     except (ValueError, OSError) as e:
@@ -696,7 +714,8 @@ def serve(settings, host: Optional[str] = None, port: Optional[int] = None,
     print("=" * 72)
     print(f"指标计算服务已启动：http://{host}:{port}/"
           + ("   （已开启密码访问）" if password else "   （仅本机可访问）"))
-    print(f"数据目录：{app.data_dir}    定时：{'开启' if scheduler_enabled else '关闭'}")
+    print(f"系统表：{app.store.describe()}")
+    print(f"执行日志：{app.data_dir}    定时：{'开启' if scheduler_enabled else '关闭'}")
     print("按 Ctrl+C 停止")
     print("=" * 72, flush=True)
     try:
