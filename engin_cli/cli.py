@@ -175,6 +175,8 @@ def cmd_run(args) -> int:
         st.drill_keyword_filter = False
     if args.no_macro:
         st.enable_macro_metric = False
+    if getattr(args, "tables", None):
+        st.write_tables = _resolve_tables(args.tables)
     _apply_push_args(st, args)
     _setup_log(args.log_level or st.log_level)
 
@@ -208,6 +210,7 @@ def cmd_run(args) -> int:
     from .source import list_scenic_codes
     t0 = time.time()
     summary = []
+    details: List[dict] = []
     try:
         scenics = _parse_scenic(args.scenic)
         if scenics is None:
@@ -219,6 +222,9 @@ def cmd_run(args) -> int:
                 scenics = sorted(list_scenic_codes(db, lo, hi))
         if not scenics:
             print(f"取数区间内没有任何景区的评论（目标日期 {dates[0]} ~ {dates[-1]}）")
+            _write_summary(args, {"command": "run", "dates": dates, "asked_dates": asked,
+                                  "scenics": [], "exit_code": 1,
+                                  "error": "取数区间内没有任何景区的评论"})
             return 1
 
         print("=" * 72)
@@ -234,10 +240,13 @@ def cmd_run(args) -> int:
         print("=" * 72)
         for i, sc in enumerate(scenics, 1):
             print(f"\n[{i}/{len(scenics)}] 景区 {sc}")
+            detail = {}
             ok, line = _run_one_scenic(st, sc, dates, db, comments_df, works_df,
                                        verbose=bool(args.verbose),
                                        no_progress=bool(args.no_progress),
-                                       drill_keywords=drill_keywords)
+                                       drill_keywords=drill_keywords, detail=detail)
+            detail["line"] = line
+            details.append(detail)
             summary.append((sc, ok, line))
             if not ok and args.fail_fast:
                 print("  --fail-fast：停止，后面的景区不再跑")
@@ -250,13 +259,37 @@ def cmd_run(args) -> int:
     for sc, ok, line in summary:
         print(f"  {sc:<24} {'✓' if ok else '✗'}  {line}")
     stopped = len(summary) < len(scenics)
-    return 0 if all(ok for _, ok, _ in summary) and not stopped else 1
+    rc = 0 if all(ok for _, ok, _ in summary) and not stopped else 1
+    _write_summary(args, {"command": "run", "dates": dates, "asked_dates": asked,
+                          "scenics": details, "elapsed": round(time.time() - t0, 2),
+                          "exit_code": rc})
+    return rc
+
+
+def _write_summary(args, data: dict) -> None:
+    """--summary-json：把这次执行的结果写成 JSON（指标服务据此展示各景区结果、质量检测）。"""
+    path = getattr(args, "summary_json", None)
+    if not path:
+        return
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1, default=str)
+    except OSError as e:
+        print(f"⚠ 写执行结果 JSON 失败：{path}（{e}）")
 
 
 def _run_one_scenic(st, scenic: str, dates: List[str], db, comments_df, works_df,
                     verbose: bool = False, no_progress: bool = False,
-                    drill_keywords=None) -> tuple:
-    """跑一个景区。返回 (是否成功, 汇总行文字)。"""
+                    drill_keywords=None, detail: Optional[dict] = None) -> tuple:
+    """跑一个景区。返回 (是否成功, 汇总行文字)。
+
+    detail：给了就把这个景区的结果明细写进去（--summary-json / 指标服务用）。
+    """
+    detail = {} if detail is None else detail
+    detail.update({"scenic": scenic, "ok": False, "errors": [], "notes": [],
+                   "tables": {}, "loads": [], "push": [],
+                   "quality_attempts": 0, "quality_blocked": False, "exception": ""})
     s1 = replace(st, output_dir=os.path.join(st.output_dir, scenic))
     c = w = None
     if comments_df is not None:
@@ -276,7 +309,21 @@ def _run_one_scenic(st, scenic: str, dates: List[str], db, comments_df, works_df
                     [f"景区：{scenic}", f"目标日期：{ds[0]} ~ {ds[-1]}（{len(ds)} 天）",
                      f"异常：{type(e).__name__}: {e}",
                      "完整堆栈见跑批日志"])
+        detail["exception"] = f"{type(e).__name__}: {e}"
+        detail["errors"] = [f"异常：{e}"]
         return False, f"异常：{e}"
+
+    detail.update({
+        "errors": list(res.errors), "notes": list(res.notes),
+        "tables": {t: int(len(df)) for t, df in res.tables.items()},
+        "loads": [{"table": r.table, "rows": int(r.rows), "strategy": r.strategy,
+                   "deleted": int(r.deleted or 0)} for r in res.load_results],
+        "push": ([{"table": r.table, "rows": int(r.rows), "batches": int(r.batches),
+                   "ok": bool(r.ok), "skipped": bool(r.skipped), "error": r.error}
+                  for r in res.push.results] if res.push is not None else []),
+        "quality_attempts": int(res.quality_attempts),
+        "quality_blocked": bool(res.quality_blocked),
+        "elapsed": round(float(res.elapsed), 2)})
 
     for t, df in res.tables.items():
         print(f"  {t:<52} {len(df):>9,} 行")
@@ -319,6 +366,7 @@ def _run_one_scenic(st, scenic: str, dates: List[str], db, comments_df, works_df
             return False, "已回退（未写库/未推送）：" + head
         return False, head
     print(f"  校验通过 ✓  用时 {res.elapsed:.1f}s")
+    detail["ok"] = True
     return True, push_note
 
 
@@ -805,6 +853,16 @@ def cmd_mock(args) -> int:
     return 0
 
 
+def cmd_serve(args) -> int:
+    """启动指标计算服务：页面上编辑任务、定时、看执行日志 / 数据质量 / 历史 / 指标。"""
+    from .service.server import serve
+    st = load_settings()
+    _setup_log(args.log_level or st.log_level)
+    if args.data_dir:
+        st.service_data_dir = args.data_dir
+    return serve(st, host=args.host, port=args.port, scheduler_enabled=not args.no_scheduler)
+
+
 def cmd_notify_test(args) -> int:
     """发一条测试消息到飞书机器人，确认 webhook 配对了。"""
     st = load_settings()
@@ -858,6 +916,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="数据质量检测不通过时重新取数重算几次，默认 settings.quality_retries=1")
     r.add_argument("--no-macro", action="store_true",
                    help="不产出 2.0 大盘 KPI 表（也就不会为同比多取去年同期的数据）")
+    r.add_argument("--tables", metavar="表名",
+                   help="只产出这几张表（写库 / CSV / 推送），逗号分隔，认简写 "
+                        "drill,macro,core,platform,dimension,content；不填 = 全部。"
+                        "没选的下钻表 / 大盘表不计算")
     r.add_argument("--push", nargs="?", const="all", metavar="表名",
                    help="跑完推送下游。不带值=全部表；也可以只推其中几张，"
                         "如 --push core,platform（简写见下）")
@@ -874,6 +936,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("-v", "--verbose", action="store_true",
                    help="额外打印回补触发情况、补零行数量等说明")
     r.add_argument("--log-level", help="DEBUG/INFO/WARNING")
+    r.add_argument("--summary-json", metavar="PATH",
+                   help="把这次执行的结果（各景区成败、质量检测、写库 / 推送行数）写成 JSON")
     r.set_defaults(func=cmd_run)
 
     p = sub.add_parser("report", help="按规则文档打印看板取数结果")
@@ -924,6 +988,14 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--no-progress", action="store_true", help="不显示推送进度条")
     m.add_argument("--log-level")
     m.set_defaults(func=cmd_mock)
+
+    v = sub.add_parser("serve", help="启动指标计算服务（页面：任务 / 定时 / 执行日志 / 数据质量 / 指标）")
+    v.add_argument("--host", help="监听地址，默认 settings.service_host=127.0.0.1（只本机）")
+    v.add_argument("--port", type=int, help="端口，默认 settings.service_port=8765")
+    v.add_argument("--data-dir", help="任务 / 执行记录 / 日志放哪，默认 service_data/")
+    v.add_argument("--no-scheduler", action="store_true", help="不启动定时（只能手动执行）")
+    v.add_argument("--log-level")
+    v.set_defaults(func=cmd_serve)
 
     n = sub.add_parser("notify-test", help="发一条测试消息到飞书机器人，确认 webhook 配对了")
     n.add_argument("--webhook", help="临时指定 webhook，覆盖配置")

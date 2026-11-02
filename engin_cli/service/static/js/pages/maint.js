@@ -1,0 +1,61 @@
+import { ref, reactive, onMounted } from 'vue'
+import { api, todayYmd, notify } from '../api.js'
+import { TaskBody, blankConfig } from './tasks.js'
+
+export default {
+  components: { TaskBody },
+  setup() {
+    const cfg = reactive({ ...blankConfig(), date_mode: 'range', start_date: todayYmd(-7), end_date: todayYmd() })
+    const cleanDays = ref(90), config = ref(null), pushOff = ref(false)
+    onMounted(async () => {
+      try { config.value = await api('/api/config') } catch (e) { notify(e.message, 'err') }
+      try { pushOff.value = !(await api('/api/push/settings')).settings.enabled } catch (e) { /* 忽略 */ }
+    })
+    const go = id => { location.hash = '/runs/' + id }
+    const doRun = async () => {
+      try { const r = await api('/api/maint/run', { method: 'POST', body: { config: cfg } }); notify(`已提交执行 #${r.run_id}`); go(r.run_id) }
+      catch (e) { notify(e.message, 'err') }
+    }
+    const doNotify = async () => {
+      try { const r = await api('/api/maint/notify-test', { method: 'POST', body: {} }); notify(`已提交 #${r.run_id}`); go(r.run_id) }
+      catch (e) { notify(e.message, 'err') }
+    }
+    const doClean = async () => {
+      if (!confirm(`删除 ${cleanDays.value} 天前的执行记录、日志和调度日志？`)) return
+      try { const r = await api('/api/maint/cleanup', { method: 'POST', body: { days: cleanDays.value } })
+        notify(`已删除 ${r.deleted_runs} 条记录、${r.deleted_files} 个文件`) } catch (e) { notify(e.message, 'err') }
+    }
+    const show = v => typeof v === 'object' && v !== null ? JSON.stringify(v) : (v === '' || v === null ? '（空）' : String(v))
+    return { cfg, cleanDays, config, pushOff, doRun, doNotify, doClean, show }
+  },
+  template: `
+  <div>
+    <div class="grid three-tools">
+      <div class="card tool">
+        <span class="icon-sq grad"><Icon name="refresh" :size="18" :sw="2.2"/></span>
+        <div><h3>重跑一段日期</h3><p>临时执行，不建任务。在下面设置日期、表、推送后点「开始执行」。</p></div>
+        <button class="btn primary" @click="doRun"><Icon name="play" :size="14"/>开始执行</button>
+      </div>
+      <div class="card tool">
+        <span class="icon-sq green"><Icon name="bell" :size="18" :sw="2.2"/></span>
+        <div><h3>飞书通知测试</h3><p>发一条测试消息，确认 notify_feishu_webhook 配对了。</p></div>
+        <button class="btn light" @click="doNotify">发送测试消息</button>
+      </div>
+      <div class="card tool">
+        <span class="icon-sq orange"><Icon name="del" :size="18" :sw="2.2"/></span>
+        <div><h3>清理执行记录</h3><p>删除 <input type="number" min="7" v-model.number="cleanDays" class="w64" /> 天前的执行记录、日志和调度日志（最少保留 7 天）。</p></div>
+        <button class="btn light danger" @click="doClean">清理</button>
+      </div>
+    </div>
+
+    <TaskBody :cfg="cfg" :push-off="pushOff" />
+
+    <div class="card" v-if="config">
+      <div class="card-head"><h3>当前配置<small>只读；修改请编辑 settings_local.py 后重启服务（推送参数可在「推送」页改），密钥已打码</small></h3></div>
+      <div class="grid cards3">
+        <div v-for="(v,k) in config" :key="k" class="cfg"><h4>{{ k }}</h4>
+          <dl class="kv"><template v-for="(vv,kk) in v" :key="kk"><dt>{{ kk }}</dt><dd :title="show(vv)">{{ show(vv) }}</dd></template></dl></div>
+      </div>
+    </div>
+  </div>`,
+}

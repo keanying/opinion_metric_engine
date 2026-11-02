@@ -1,6 +1,7 @@
 #settings_local.py
 output/
 logs/
+service_data/
 sample/
 __pycache__/
 *.pyc

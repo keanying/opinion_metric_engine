@@ -1,0 +1,153 @@
+import { ref, reactive, onMounted, computed } from 'vue'
+import { api, TABLES, TABLE_LABEL, PUSH_RESULT, fmtNum, notify, refreshSched } from '../api.js'
+import { Ring } from '../charts.js'
+
+const RING_C = { ok: ['#8b6cff', '#4f7cff'], dry_run: ['#4fd1d9', '#13b5c8'], business_fail: ['#ff7aa2', '#f2456e'],
+  http_error: ['#ff7a7a', '#e53b3b'], network_error: ['#ffc15e', '#ff8a3d'], timeout: ['#ffd27a', '#ffad33'],
+  ssl_error: ['#3a4699', '#25306f'] }
+
+export default {
+  components: { Ring },
+  setup() {
+    const view = ref(null), form = reactive({}), saving = ref(false)
+    const logs = ref(null), q = reactive({ date: '', result: '', kw: '' }), loadingLogs = ref(true)
+    const re = reactive({ scenics: '', tables: 'drill,macro', start: '', end: '' })
+    const detail = ref(null)
+    const loadView = async () => {
+      try { view.value = await api('/api/push/settings'); Object.assign(form, view.value.settings)
+        for (const k of ['push_batch_size', 'push_timeout', 'push_retries']) if (form[k] === null) form[k] = '' }
+      catch (e) { notify(e.message, 'err') }
+    }
+    const loadLogs = async () => {
+      loadingLogs.value = true
+      try { logs.value = await api('/api/push/logs?' + new URLSearchParams({ date: q.date, result: q.result, q: q.kw }))
+        if (!q.date) q.date = logs.value.date }
+      catch (e) { notify(e.message, 'err') } finally { loadingLogs.value = false }
+    }
+    onMounted(() => { loadView(); loadLogs() })
+    const save = async (patch) => {
+      saving.value = true
+      try { view.value = await api('/api/push/settings', { method: 'PUT', body: { ...form, ...(patch || {}) } })
+        Object.assign(form, view.value.settings)
+        for (const k of ['push_batch_size', 'push_timeout', 'push_retries']) if (form[k] === null) form[k] = ''
+        notify('推送设置已保存，下一次执行生效'); refreshSched() }
+      catch (e) { notify(e.message, 'err') } finally { saving.value = false }
+    }
+    const setMaster = v => save({ enabled: v })
+    const toggleRe = k => {
+      const s = new Set(re.tables.split(',').filter(Boolean))
+      s.has(k) ? s.delete(k) : s.add(k)
+      re.tables = TABLES.map(t => t.key).filter(x => s.has(x)).join(',')
+    }
+    const doRepush = async () => {
+      try { const r = await api('/api/maint/push', { method: 'POST', body: re }); notify(`已提交补推 #${r.run_id}`)
+        location.hash = '/runs/' + r.run_id } catch (e) { notify(e.message, 'err') }
+    }
+    const reset = () => { q.result = ''; q.kw = ''; loadLogs() }
+    const parts = computed(() => Object.entries(logs.value?.counts || {}).map(([k, v]) => ({
+      value: v, label: (PUSH_RESULT[k] || {}).text || k, colors: RING_C[k] || ['#9aa0b8', '#6b7075'] })))
+    const total = computed(() => Object.values(logs.value?.counts || {}).reduce((a, v) => a + v, 0))
+    const okRate = computed(() => total.value ? Math.round(((logs.value.counts.ok || 0) + (logs.value.counts.dry_run || 0)) / total.value * 1000) / 10 : null)
+    const cols = [
+      { key: 'time', title: '时间', width: 100 }, { key: 'table', title: '表', width: 250 },
+      { key: 'scenic', title: '景区', width: 150 }, { key: 'batch', title: '批次', width: 90 },
+      { key: 'rows', title: '行数', width: 80, align: 'r' }, { key: 'result', title: '结果', width: 120 },
+      { key: 'resp', title: '响应', width: 260 }, { key: 'op', title: '', width: 56, align: 'r' }]
+    const ymd = s => s ? `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6)}` : ''
+    return { view, form, saving, save, setMaster, logs, q, loadLogs, loadingLogs, reset, re, toggleRe, doRepush,
+             parts, total, okRate, cols, detail, ymd, TABLES, TABLE_LABEL, PUSH_RESULT, fmtNum }
+  },
+  template: `
+  <div v-if="view">
+    <div class="card banner">
+      <Switch :model-value="form.enabled" @change="setMaster"/>
+      <div class="grow"><b>启用推送</b>
+        <p>任务算完、写库后按任务里勾的表推给下游。关掉后所有任务<b>只算不推</b>（下面的「补推」照常能用）；
+          失败不影响跑批成败，推送记录写在 {{ view.log_dir || '（未开启记录）' }}。</p></div>
+      <Tag :color="form.enabled ? 'green' : 'grey'" :icon="form.enabled ? 'tickCircle' : 'minus'">{{ form.enabled ? '已启用' : '已关闭' }}</Tag>
+    </div>
+
+    <div class="grid two">
+      <div class="card sect">
+        <div class="sect-head"><h3>推送设置<small>留空 = 用 settings_local.py 里的；保存后下一次执行生效</small></h3></div>
+        <div class="sect-body">
+          <div class="frow"><label>推送地址</label>
+            <input v-model="form.push_url" class="grow" :placeholder="view.base.push_url || '未配置'" /></div>
+          <div class="frow"><label>每批行数</label><input v-model="form.push_batch_size" class="w100" :placeholder="String(view.base.push_batch_size)"/>
+            <label class="l2">超时</label><input v-model="form.push_timeout" class="w100" :placeholder="view.base.push_timeout + ' 秒'"/>
+            <label class="l2">重试</label><input v-model="form.push_retries" class="w100" :placeholder="view.base.push_retries + ' 次'"/></div>
+          <div class="opts compact">
+            <div class="opt"><div><b>试推</b><p>只组报文不真发，验证配置用（推送记录里结果是「试推」）</p></div><Switch v-model="form.push_dry_run"/></div>
+            <div class="opt"><div><b>推送失败算执行失败</b><p>默认推失败不影响跑批成败（数据已落库，可补推）</p></div><Switch v-model="form.push_strict"/></div>
+            <div class="opt"><div><b>推成功后删本地 CSV</b><p>推失败的 CSV 会留着，补推用</p></div><Switch v-model="form.push_cleanup_local"/></div>
+          </div>
+          <div class="frow ro"><label>请求头</label><div class="chips">
+            <span v-for="(v,k) in view.headers" :key="k" class="chip grey">{{ k }}: {{ v }}</span>
+            <span v-if="!Object.keys(view.headers).length" class="hint">未配置（在 settings_local.py 的 push_headers 或 OPINION_PUSH_TOKEN 配，页面不显示明文）</span></div></div>
+          <div class="frow ro" v-if="Object.keys(view.table_names).length"><label>表名映射</label><div class="chips">
+            <span v-for="(v,k) in view.table_names" :key="k" class="chip grey" :title="k">{{ TABLE_LABEL[k] || k }} → {{ v }}</span></div></div>
+          <div class="actions"><span class="hint">当前生效地址：{{ view.effective.push_url || '未配置' }}</span>
+            <button class="btn primary" :disabled="saving" @click="save()">{{ saving ? '保存中…' : '保存推送设置' }}</button></div>
+        </div>
+      </div>
+
+      <div class="col-stack">
+        <div class="card sect push-sum">
+          <div class="sect-head"><h3>推送情况<small>{{ ymd(logs && logs.date) || '暂无记录' }}</small></h3></div>
+          <div class="push-sum-body">
+            <Ring :parts="parts" :size="190" :thickness="18" :gap="10" :hole="0.56" :icons="false"
+              :value="okRate === null ? '—' : okRate + '%'" sub="请求成功率" />
+            <div class="legend-list">
+              <div v-for="(v,k) in (logs ? logs.counts : {})" :key="k"><Tag :color="(PUSH_RESULT[k]||{}).color || 'grey'"
+                :icon="(PUSH_RESULT[k]||{}).icon">{{ (PUSH_RESULT[k]||{}).text || k }}</Tag><b>{{ v }}</b></div>
+              <div class="muted small">成功推出 <b>{{ fmtNum(logs ? logs.rows_ok : 0) }}</b> 行 · 共 {{ total }} 个请求</div>
+            </div>
+          </div>
+        </div>
+        <div class="card sect">
+          <div class="sect-head"><h3>补推<small>不重算，把之前算好、推失败的 CSV 再推一遍</small></h3></div>
+          <div class="sect-body">
+            <div class="frow"><label>景区</label><input v-model="re.scenics" class="grow" placeholder="不填 = 全部" /></div>
+            <div class="frow"><label>表</label><div class="chips">
+              <button v-for="t in TABLES" :key="t.key" class="chip-btn" :class="{on: re.tables.split(',').includes(t.key)}"
+                @click="toggleRe(t.key)">{{ t.label }}</button></div></div>
+            <div class="frow"><label>日期</label><input v-model="re.start" class="w140" placeholder="不填 = 全部" /><span class="hint">~</span>
+              <input v-model="re.end" class="w140" placeholder="yyyyMMdd" />
+              <button class="btn primary" @click="doRepush"><Icon name="send" :size="14"/>开始补推</button></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h3>推送记录<small>每个请求一行：推了哪个表、哪个景区、对方怎么回的</small></h3>
+        <div class="toolbar">
+          <select v-model="q.date" @change="loadLogs"><option v-for="d in (logs ? logs.dates : [])" :key="d" :value="d">{{ ymd(d) }}</option>
+            <option v-if="!logs || !logs.dates.length" value="">暂无记录</option></select>
+          <select v-model="q.result" @change="loadLogs"><option value="">全部结果</option>
+            <option v-for="(v,k) in PUSH_RESULT" :key="k" :value="k">{{ v.text }}</option></select>
+          <span class="search"><Icon name="search" :size="15"/><input v-model="q.kw" placeholder="景区 / 表 / 响应内容" @keyup.enter="loadLogs"/></span>
+          <button class="btn light" @click="reset">重置</button></div></div>
+      <STable :columns="cols" :data="logs ? logs.items : []" :loading="loadingLogs" :min-height="350" row-key="__k">
+        <template #time="{ row }">{{ (row.time || '').slice(11) }}</template>
+        <template #table="{ row }"><span class="s-name"><Avatar square icon="db" :color="row.table && row.table.includes('macro') ? 'indigo' : row.table && row.table.includes('drill') ? 'violet' : 'light-blue'"/>
+          <span class="s-ell" :title="row.push_table || row.table"><b>{{ TABLE_LABEL[row.table] || row.table }}</b><small>{{ row.push_table || row.table }}</small></span></span></template>
+        <template #scenic="{ row }"><span class="s-ell" :title="(row.scenic||[]).join(',') + ' ' + (row.travel_dates||[]).join(',')">
+          {{ (row.scenic || []).join(',') || '-' }}<small>{{ (row.travel_dates || []).length ? row.travel_dates[0] + ((row.travel_dates.length > 1) ? ' 等 ' + row.travel_dates.length + ' 天' : '') : '' }}</small></span></template>
+        <template #batch="{ row }">{{ row.batch }}/{{ row.batches }}<small v-if="row.attempt > 1" class="t-orange"> 第{{ row.attempt }}次</small></template>
+        <template #rows="{ row }">{{ fmtNum(row.rows) }}</template>
+        <template #result="{ row }"><Tag :color="(PUSH_RESULT[row.result]||{}).color || 'grey'" :icon="(PUSH_RESULT[row.result]||{}).icon">
+          {{ (PUSH_RESULT[row.result]||{}).text || row.result }}</Tag><small v-if="row.status" class="muted"> {{ row.status }}</small></template>
+        <template #resp="{ row }"><span class="s-ell mono" :title="row.response || row.error">{{ row.response || row.error || '-' }}</span></template>
+        <template #op="{ row }"><button class="s-btn-icon" title="查看完整响应" @click="detail = row"><Icon name="eye" :size="16"/></button></template>
+      </STable>
+    </div>
+
+    <div v-if="detail" class="modal-mask" @click.self="detail=null">
+      <div class="modal">
+        <div class="card-head"><h3>推送记录 · {{ detail.time }}</h3><button class="s-btn-icon" @click="detail=null"><Icon name="clear" :size="18"/></button></div>
+        <pre class="log light">{{ JSON.stringify(detail, null, 2) }}</pre>
+      </div>
+    </div>
+  </div>`,
+}

@@ -180,15 +180,21 @@ def _compute(settings: EtlSettings,
 
     # ---- 4. 需求 2.0 大盘表（景区 × 日期 × 周期粒度 × 渠道）----
     # 先于下钻表算：开了采集关键字过滤时，词云里的词对应的评论也要写进下钻表
+    sel = set(getattr(settings, "write_tables", None) or []) or None
+    want_drill = settings.enable_drill_analysis and (sel is None or TABLE_DRILL_ANALYSIS in sel)
+    # 下钻表开了关键字过滤要用大盘表的词云，所以只选了下钻表时大盘表也得算（只是不输出）
+    want_macro = settings.enable_macro_metric and (
+        sel is None or TABLE_MACRO in sel
+        or (want_drill and getattr(settings, "drill_keyword_filter", False)))
     macro = None
-    if settings.enable_macro_metric:
+    if want_macro:
         macro = build_macro(cf_all, dim_all, kw_all, ctx)
         res.tables[TABLE_MACRO] = macro
         res.notes.append(f"大盘 KPI（{len(ctx.macro_granularities)} 个周期 × 渠道）"
                          f"{len(macro):,} 行")
 
     # ---- 4b. 5.2 下钻分析表（词 → 评论 → 作品）----
-    if settings.enable_drill_analysis:
+    if want_drill:
         # 下钻表按大盘表的周期出数（qtd / 近90日 往前补得更远），所以用和大盘表一样的 cf_all
         if works_df is None and db is not None:
             work_ids = cf_all.get("work_id")
@@ -329,6 +335,13 @@ def run(settings: EtlSettings,
             return res
     elif res.quality_attempts > 1:
         res.notes.append(f"数据质量检测：第 {res.quality_attempts} 次重算后通过")
+    sel = getattr(settings, "write_tables", None)
+    if sel and res.tables:
+        # 只输出选中的表（没选的只参与了数据质量检测）
+        skipped = [t for t in res.tables if t not in set(sel)]
+        res.tables = {t: df for t, df in res.tables.items() if t in set(sel)}
+        if skipped:
+            res.notes.append("本次只输出：" + "、".join(res.tables) + "（其余表不写库、不推送）")
     if not res.tables:
         # 没算出任何表（取数为空等）：不进入落库，免得按景区 × 日期把库里已有的数据删掉
         res.elapsed = time.time() - t0

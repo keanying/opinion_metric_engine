@@ -158,6 +158,19 @@ class EtlSettings:
     notify_feishu_webhook: str = ""
     notify_feishu_secret: str = ""           # 机器人开了「签名校验」才填（OPINION_FEISHU_SECRET）
 
+    # ---- 指标计算服务（python -m engin_cli.cli serve）----
+    # 默认只监听本机；要让别的机器访问就改成 "0.0.0.0"，这时**必须**配 service_password。
+    service_host: str = "127.0.0.1"
+    service_port: int = 8765
+    service_password: str = ""               # 页面访问密码（OPINION_SERVICE_PASSWORD）
+    service_data_dir: str = "service_data"   # 任务 / 执行记录（SQLite）和执行日志放这里
+
+    # 本次产出哪些表（写库 / 出 CSV / 推送）。None = 全部。
+    # 命令行 run --tables drill,macro；服务页面的任务里勾「计算哪些表」。
+    # 没勾的下钻表 / 大盘表直接不算（省时间）；基础四表（core/platform/dimension/content）
+    # 很便宜、而且数据质量检测要用，照算，只是不写不推。
+    write_tables: Optional[List[str]] = None
+
     # ---- 5.2 下钻分析表（ads_trf_social_opinion_drill_analysis_di）----
     enable_drill_analysis: bool = True
     drill_content_limit: int = 200   # 评论摘要截断长度
@@ -296,6 +309,7 @@ def load_settings() -> EtlSettings:
     s.push_enabled = _env("OPINION_PUSH_ENABLED", s.push_enabled, bool)
     s.push_url = _env("OPINION_PUSH_URL", s.push_url)
     s.notify_feishu_webhook = _env("OPINION_FEISHU_WEBHOOK", s.notify_feishu_webhook)
+    s.service_password = _env("OPINION_SERVICE_PASSWORD", s.service_password)
     s.notify_feishu_secret = _env("OPINION_FEISHU_SECRET", s.notify_feishu_secret)
     # 令牌放在哪个请求头、前面带什么前缀，也都能用环境变量指定：
     #   OPINION_PUSH_TOKEN_HEADER=xpftkey  OPINION_PUSH_TOKEN_PREFIX=   → xpftkey: pfk_xxx
@@ -305,4 +319,36 @@ def load_settings() -> EtlSettings:
         header = _env("OPINION_PUSH_TOKEN_HEADER", "Authorization")
         prefix = os.environ.get("OPINION_PUSH_TOKEN_PREFIX", "Bearer ")
         s.push_headers = {**(s.push_headers or {}), header: f"{prefix}{token}"}
+
+    # 指标服务页面上改的配置（推送地址、批大小、超时 …），由服务启动子进程时用
+    # OPINION_SETTINGS_JSON 传进来：{"push_url": "...", "push_batch_size": 500}。
+    # 只认 EtlSettings 里已有的普通字段，优先级最高（命令行参数除外）。
+    apply_overrides(s, _env("OPINION_SETTINGS_JSON"))
     return s
+
+
+# 页面上能改的字段，不允许借 OPINION_SETTINGS_JSON 改数据库连接等
+OVERRIDABLE = ("push_url", "push_batch_size", "push_timeout", "push_retries", "push_retry_backoff",
+               "push_dry_run", "push_strict", "push_cleanup_local")
+
+
+def apply_overrides(s: "EtlSettings", text) -> None:
+    import json
+    if not text:
+        return
+    try:
+        data = json.loads(text) if isinstance(text, str) else dict(text)
+    except ValueError:
+        import sys
+        print("OPINION_SETTINGS_JSON 不是合法 JSON，忽略", file=sys.stderr)
+        return
+    for k, v in (data or {}).items():
+        if k in OVERRIDABLE and v is not None and v != "":
+            cur = getattr(s, k)
+            if isinstance(cur, bool):
+                v = bool(v)
+            elif isinstance(cur, int):
+                v = int(v)
+            elif isinstance(cur, float):
+                v = float(v)
+            setattr(s, k, v)

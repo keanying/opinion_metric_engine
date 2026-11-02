@@ -53,6 +53,13 @@ python -m pytest -q
 
 ---
 
+## 指标计算服务（页面）
+
+`python -m engin_cli.cli serve` 启动后浏览器打开 http://127.0.0.1:8765/ ：编辑任务和定时、选择计算 / 推送哪些表、
+看执行日志、数据质量、历史记录、ADS 指标、推送设置与推送记录。只用标准库（http.server + SQLite），
+前端是 Vue 3（`engin_cli/service/static/vendor/`，免构建）。每次执行在子进程里跑 `engin_cli.cli run`，一次一个。
+部署 / 页面说明见《使用说明》第三·五节。
+
 ## 源字段 → 指标 的映射
 
 这是整套代码的核心，先看懂这张表再看代码。
@@ -865,7 +872,8 @@ python -m engin_cli.cli repair --tables core --start-date 20260101 --end-date 20
 opinion_metric_engine/          项目根
 ├── engin_cli/                  引擎包（跑批入口 python -m engin_cli.cli）
 │   ├── metric_calc_domain.py   ★ 口径唯一真源（公式/阈值/字段命名/计数规则）
-│   └── builders/               四张 ADS 表各自的计算（只搬运，不算口径）
+│   ├── builders/               四张 ADS 表各自的计算（只搬运，不算口径）
+│   └── service/                指标计算服务（serve：任务 / 定时 / 执行器 / HTTP 接口 + Vue 3 页面）
 ├── sql/                        建表语句 + 看板取数参考 SQL
 ├── scripts/                    样例数据生成
 ├── tests/                      单测（98 项，含端到端、口径守卫、历史修正、行存在规则）
@@ -890,6 +898,12 @@ opinion_metric_engine/          项目根
 | `engin_cli/loader.py` | 幂等写入 |
 | `engin_cli/pipeline.py` | 编排 |
 | `engin_cli/cli.py` | 命令行 |
+| `engin_cli/notify.py` | 飞书通知（数据质量不通过、计算异常） |
+| `engin_cli/service/store.py` | 服务存储（SQLite）：任务、执行记录、服务级设置、调度日志 |
+| `engin_cli/service/runner.py` | 执行器：任务配置 → `run` 命令，排队、子进程执行、取消；推送总开关 / 推送设置下发 |
+| `engin_cli/service/scheduler.py` | 定时：每天 HH:MM 触发，30 分钟补触发窗口，定时总开关，调度日志 |
+| `engin_cli/service/server.py` | HTTP 接口 + 静态页面（Basic 认证、防 CSRF） |
+| `engin_cli/service/static/` | 页面（Vue 3，免构建；表格 / 标签仿 Semi Design 风格） |
 | `sql/ads_ddl_reference.sql` | 四张目标表的建表语句（原样保留，测试据此断言） |
 | `sql/ads_drill_analysis_ddl.sql` | 5.2 下钻分析表建表语句（含 2.0 新增的 region / entity_tags、time_granularity） |
 | `sql/api_drill_list.sql` | 看板下钻列表接口 SQL：按 :qTime + :timeTag 换算区间、按评论×天去重、分页 |
