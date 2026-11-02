@@ -287,16 +287,25 @@ def build_macro(comment_facts: pd.DataFrame, dim_facts: pd.DataFrame,
     plan = _FillPlan(comments)
     lookbacks = [_lookback(ctx, spec) for spec in specs]
 
+    heat_cache: Dict[tuple, np.ndarray] = {}
+
+    def _heat(sc: str, hi: int) -> np.ndarray:
+        """词云并列排序用的近期热度：该景区截至本期最后一天、近 heat_days 天的真实词频
+        （不补齐、全渠道）。截止日取**本期最后一天**而不是 travel_date：本期区间相同的两行
+        （如 td@T-1 与 latest_1d@T）热度一样，词云才一样。"""
+        key = (sc, hi)
+        if key not in heat_cache:
+            raw = word_sum.sum(sc, [(ch, hi - heat_days + 1, hi) for ch in codes])
+            heat_cache[key] = (np.bincount(w_code, weights=raw)[w_code] if len(w_code)
+                               else raw)
+        return heat_cache[key]
+
     rows: List[dict] = []
     for sc, dates in emit.items():
         for t in dates:
-            # 词云并列排序用的近期热度：该景区近 heat_days 天的真实词频（不补齐、全渠道）
-            hi_t = _day(pd.to_datetime(t, format=D.DATE_FMT))
-            raw = word_sum.sum(sc, [(ch, hi_t - heat_days + 1, hi_t) for ch in codes])
-            heat = (np.bincount(w_code, weights=raw)[w_code] if len(w_code)
-                    else raw)
             for si, spec in enumerate(specs):
                 r = _ranges(si, t)
+                heat = _heat(sc, r["cur"][1])
                 lb = lookbacks[si]
                 per_ch = {}
                 for ch in codes:

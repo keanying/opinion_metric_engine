@@ -356,8 +356,10 @@ MACRO_CHANNEL_ALL_NAME = "整体"
 
 # 词云：好/中/差各取 Top N（需求「各30个」）
 MACRO_WORDCLOUD_TOP_N = 30
-# 词云并列时的排序：本期次数相同 → 看「近期热度」= 这个词在该景区近 N 天（截至 travel_date，
+# 词云并列时的排序：本期次数相同 → 看「近期热度」= 这个词在该景区近 N 天（截至**本期最后一天**，
 # 真实明细、不补齐、不分渠道和情感）一共出现了多少次，多的排前面；再并列才按词排序。
+# 截止日跟着本期走、不跟 travel_date：本期区间相同的两行（td@T-1 与 latest_1d@T、周一的 wtd 与
+# 当天 td、1 号的 mtd 与当天 td）词云必须一样。
 # 单日样本少时大量词只出现 1 次，按字符顺序截断等于随机挑，常见词（环境优美、空气清新）反而被挤掉。
 MACRO_WORDCLOUD_HEAT_DAYS = 90
 MACRO_WORD_GROUP_KEY = {POSITIVE: "positiveWord", NEUTRAL: "neutralWord",
