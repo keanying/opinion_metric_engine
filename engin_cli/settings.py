@@ -145,6 +145,19 @@ class EtlSettings:
     push_log_dir: str = "logs"
     push_log_max_chars: int = 0              # 响应体最多记多少字；0 = 原文全记
 
+    # ---- 数据质量检测 + 飞书通知 ----
+    # 每次算完都做数据质量检测（validate.py：各表恒等关系、下钻↔大盘对账、
+    # 区间相同的行指标一致 —— 如 td@T-1 = latest_1d@T）。不通过时：
+    #   1. 重新取数、重新计算，最多 quality_retries 次；
+    #   2. 还不通过 → quality_gate=True（默认）就回退：本次结果不写库、不推送，
+    #      库里和下游保留上一次的数据；并发飞书通知。
+    quality_gate: bool = True
+    quality_retries: int = 1
+    # 飞书机器人 webhook：数据质量检测不通过、指标计算异常时发通知。"" = 不发。
+    # 写在 settings_local.py 或环境变量 OPINION_FEISHU_WEBHOOK（别提交进代码库）。
+    notify_feishu_webhook: str = ""
+    notify_feishu_secret: str = ""           # 机器人开了「签名校验」才填（OPINION_FEISHU_SECRET）
+
     # ---- 5.2 下钻分析表（ads_trf_social_opinion_drill_analysis_di）----
     enable_drill_analysis: bool = True
     drill_content_limit: int = 200   # 评论摘要截断长度
@@ -282,6 +295,8 @@ def load_settings() -> EtlSettings:
     # 想用别的头就直接在 settings_local 的 push_headers 里写全。
     s.push_enabled = _env("OPINION_PUSH_ENABLED", s.push_enabled, bool)
     s.push_url = _env("OPINION_PUSH_URL", s.push_url)
+    s.notify_feishu_webhook = _env("OPINION_FEISHU_WEBHOOK", s.notify_feishu_webhook)
+    s.notify_feishu_secret = _env("OPINION_FEISHU_SECRET", s.notify_feishu_secret)
     # 令牌放在哪个请求头、前面带什么前缀，也都能用环境变量指定：
     #   OPINION_PUSH_TOKEN_HEADER=xpftkey  OPINION_PUSH_TOKEN_PREFIX=   → xpftkey: pfk_xxx
     # 前缀**设成空串也算设了**（= 不加前缀），所以这里不能用 _env（它把空串当没设）。

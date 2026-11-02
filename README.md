@@ -844,8 +844,18 @@ python -m engin_cli.cli repair --tables core --start-date 20260101 --end-date 20
   词频不超过当日评论数 / 每组都有 rank=1
 - macro：(景区,日期,周期,渠道) 不重复 / 好+中+差 = 总数 / all 行 = 各渠道之和 /
   各渠道 comment_rate 合计 = 100 / 每个周期都有 all + 全部渠道 / 三个 JSON 列可解析
+- macro **区间相同的行指标一致**（`validate_macro_same_range`）：同景区 × 渠道、补数上限相同时，
+  只要算某个指标用到的区间相同，这个指标就必须相等。例如 td@T-1 = latest_1d@T、
+  周一 wtd = 当天 td、1 号 mtd = 当天 td。按依赖的区间分三组（`MACRO_SAME_RANGE_GROUPS`）：
+  只看本期（总数、好中差数和率、得分、词云、热力图）/ 本期 + 上期（环比、上期得分、维度得分）/
+  本期 + 去年同期（同比）
+- 下钻 ↔ 大盘逐周期对账（评论数 / 地域 / 词云的词），近 N 日 = 每天 td 之和（补数上限统一时）
 
-任一项不通过说明**计算逻辑**有问题，不是数据问题。退出码 1，可直接接 CI。
+任一项不通过说明**计算逻辑**有问题，不是数据问题。
+
+**质量闸门**（`pipeline.run`）：检测不通过 → 重新取数重算（`quality_retries`，默认 1 次）→
+还不通过且 `quality_gate`（默认开）→ **回退**：本次结果不写库、不推送，库里和下游保留上一次的数据，
+发飞书通知（`notify.send_feishu`，`notify_feishu_webhook`）。指标计算抛异常也发通知。退出码 1，可直接接 CI。
 
 ---
 

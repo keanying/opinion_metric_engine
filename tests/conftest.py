@@ -16,5 +16,6 @@ def _isolate_local_settings(monkeypatch, tmp_path_factory):
     # （单独的临时目录：测试自己的 tmp_path 常被当作输出目录，会去数里面有几个文件）
     monkeypatch.setenv("OPINION_PUSH_LOG_DIR", str(tmp_path_factory.mktemp("push_logs")))
     for k in ("OPINION_PUSH_URL", "OPINION_PUSH_TOKEN", "OPINION_PUSH_ENABLED",
-              "OPINION_PUSH_TOKEN_HEADER", "OPINION_PUSH_TOKEN_PREFIX"):
+              "OPINION_PUSH_TOKEN_HEADER", "OPINION_PUSH_TOKEN_PREFIX",
+              "OPINION_FEISHU_WEBHOOK", "OPINION_FEISHU_SECRET"):    # 测试绝不发到真实飞书群
         monkeypatch.delenv(k, raising=False)

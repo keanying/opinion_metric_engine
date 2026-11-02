@@ -413,6 +413,17 @@ ETL = {
     #   不记请求头（密钥）和请求体。"" = 不记。
     # "push_log_dir": "logs",
     # "push_log_max_chars": 0,          # 响应体最多记多少字，0 = 原文全记
+    #
+    # 【数据质量检测】每次算完都检测（恒等关系、下钻↔大盘对账、区间相同的行指标一致）。
+    #   不通过 → 重新取数重算 quality_retries 次 → 还不通过：quality_gate=True 就回退
+    #   （不写库、不推送，保留上一次的数据）并发飞书通知。
+    # "quality_gate": True,
+    # "quality_retries": 1,
+    #
+    # 【飞书通知】数据质量检测不通过、指标计算异常时发。不填不发。
+    #   配好后执行 python -m engin_cli.cli notify-test 发一条测试消息。
+    # "notify_feishu_webhook": "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx",
+    # "notify_feishu_secret": "",       # 机器人开了「签名校验」才填
 
 
     # ══════════════════════════════════════════════════════════════

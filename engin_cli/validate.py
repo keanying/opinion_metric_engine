@@ -275,6 +275,76 @@ def validate_drill(drill: pd.DataFrame, macro: pd.DataFrame, specs: list,
     return errs
 
 
+# 大盘表里「本期区间相同」的行必须相等的指标，按它们依赖哪几段区间分组
+_P = list(D.MACRO_SENTIMENT_PREFIX.values())
+MACRO_SAME_RANGE_GROUPS = [
+    # 只看本期
+    (("cur",), ["comment_total", "comment_rate", "overall_sentiment_score"]
+     + [f"{p}_comment_cnt" for p in _P] + [f"{p}_comment_rate" for p in _P]
+     + ["wordcloud_map", "period_comment_heatmap"]),
+    # 本期 + 上期（环比、上期得分、维度得分）
+    (("cur", "prev"), ["pre_overall_sentiment_score", "comment_total_mom"]
+     + [f"{p}_comment_mom" for p in _P] + ["dimension_breakdown"]),
+    # 本期 + 去年同期（同比）
+    (("cur", "yoy"), ["comment_total_yoy"] + [f"{p}_comment_yoy" for p in _P]),
+]
+
+
+def validate_macro_same_range(macro: pd.DataFrame, specs: list,
+                              lookbacks: dict = None) -> List[str]:
+    """大盘表里区间相同的行，指标必须一样。
+
+    同景区 × 渠道，不同日期 / 周期粒度的两行，只要算某个指标用到的区间相同，这个指标就必须相等。
+    例如 td@T-1 与 latest_1d@T，本期都是 T-1；还有周一的 wtd 与当天 td、1 号的 mtd 与当天 td。
+    哪些指标用哪几段区间见 MACRO_SAME_RANGE_GROUPS。
+    lookbacks {周期名: 补数上限}：上限不同的两个周期补出来的明细本来就可能不同，不放在一起比。
+    """
+    errs: List[str] = []
+    if macro is None or macro.empty or not specs:
+        return errs
+    by_name = {g["name"]: g for g in specs}
+    m = macro[macro["time_granularity"].isin(by_name)].copy()
+    if m.empty:
+        return errs
+    cache = {}
+    keys = {"cur": [], "prev": [], "yoy": []}
+    for g, t in zip(m["time_granularity"], m["travel_date"].astype(str)):
+        if (g, t) not in cache:
+            r = D.macro_period_ranges(by_name[g], t)
+            cache[(g, t)] = {k: f"{r[k][0]:%Y%m%d}-{r[k][1]:%Y%m%d}" for k in keys}
+        for k in keys:
+            keys[k].append(cache[(g, t)][k])
+    for k, v in keys.items():
+        m[f"_rng_{k}"] = v
+    m["_lb"] = m["time_granularity"].map(lambda g: (lookbacks or {}).get(g, 0))
+    m["_who"] = m["time_granularity"] + "@" + m["travel_date"].astype(str)
+
+    bad, sample = 0, None
+    for parts, cols in MACRO_SAME_RANGE_GROUPS:
+        cols = [c for c in cols if c in m.columns]
+        gkeys = ["scenic_id", "channel", "_lb"] + [f"_rng_{p}" for p in parts]
+        dup = m[m.duplicated(gkeys, keep=False)]
+        if dup.empty:
+            continue
+        for _, g in dup.groupby(gkeys, sort=False):
+            for c in cols:
+                v = g[c]
+                if pd.api.types.is_numeric_dtype(v):
+                    differs = (v.astype("float64") - float(v.iloc[0])).abs() > 1e-6
+                else:
+                    differs = v.astype(str) != str(v.iloc[0])
+                if differs.any():
+                    bad += 1
+                    if sample is None:
+                        who = g["_who"]
+                        sample = (f"景区 {g['scenic_id'].iloc[0]} 渠道 {g['channel'].iloc[0]}："
+                                  f"{who.iloc[0]} 与 {who[differs].iloc[0]} 的 {c} 不同")
+                    break
+    _fail(errs, bad == 0,
+          f"macro: 区间相同的行指标不一致，{bad} 处" + (f"（例如 {sample}）" if sample else ""))
+    return errs
+
+
 def validate_period_sums(macro: pd.DataFrame, specs: list) -> List[str]:
     """补数上限统一时（settings.backfill_lookback 是一个数）：每天只有一份补齐结果，
     所以任意周期的 comment_total == 本期区间内每天 td 的 comment_total 之和（每个渠道、all 都是）。
@@ -332,6 +402,9 @@ def validate_all(tables: dict) -> List[str]:
                                tables.get("macro_specs", []), tables.get("output_dates", []),
                                bool(tables.get("macro_period_specs")),
                                words_only=bool(tables.get("drill_words_only")))
+    if "macro" in tables and tables.get("macro_specs_all"):
+        errs += validate_macro_same_range(tables["macro"], tables["macro_specs_all"],
+                                          tables.get("macro_spec_lookback"))
     if "macro" in tables and tables.get("macro_period_specs"):
         errs += validate_period_sums(tables["macro"], tables["macro_period_specs"])
     if "macro" in tables:

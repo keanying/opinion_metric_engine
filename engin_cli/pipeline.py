@@ -27,6 +27,7 @@ import pandas as pd
 from .builders.content import build_content
 from .builders.core import build_core
 from .builders.dimension import build_dimension
+from .builders.macro import _lookback as macro_lookback
 from .builders.macro import build_macro, macro_data_ranges
 from .builders.platform import build_platform
 from .context import RunContext
@@ -38,6 +39,7 @@ from .metric_calc_domain import (CORE_WINDOWS, daily_channel_presence,
                                  daily_core_facts_by_platform)
 from .metric_calc_domain import PLATFORM_WINDOWS as D_PLATFORM_WINDOWS
 from .normalize import (build_comment_facts, build_dimension_facts, build_keyword_facts)
+from .notify import send_feishu
 from .pusher import PushReport, cleanup_pushed_csv, push_all
 from .settings import EtlSettings
 from .source import fetch_comments, fetch_scenic_keywords, fetch_works
@@ -55,6 +57,8 @@ class PipelineResult:
     load_results: List = field(default_factory=list)
     push: Optional[PushReport] = None      # 推送结果，未开启推送时为 None
     elapsed: float = 0.0
+    quality_attempts: int = 0              # 计算了几次（数据质量检测不过会重新取数重算）
+    quality_blocked: bool = False          # 检测最终没过 → 本次结果没写库、没推送（已回退）
 
     @property
     def ok(self) -> bool:
@@ -89,21 +93,19 @@ def compute_load_range(output_dates: List[str], settings: EtlSettings) -> tuple:
     return load_start, max(output_dates)
 
 
-def run(settings: EtlSettings,
+def _compute(settings: EtlSettings,
         dates: List[str],
         scenic_codes: Optional[List[str]] = None,
         db: Optional[MySQL] = None,
         comments_df: Optional[pd.DataFrame] = None,
         works_df: Optional[pd.DataFrame] = None,
-        push_progress=None,
-        drill_keywords: Optional[Dict[str, List[str]]] = None) -> PipelineResult:
-    """跑一次批。
+        drill_keywords: Optional[Dict[str, List[str]]] = None) -> tuple:
+    """取数 + 计算 + 数据质量检测（不落库、不推送）。出参：(PipelineResult, 本次涉及的景区)。
 
     dates          要产出的目标日期（yyyyMMdd）
     comments_df    直接喂源数据（测试/离线用）；为 None 则从 MySQL 取
     drill_keywords settings.drill_keyword_filter 打开时用的采集关键字 {景区: [词]}（测试/离线用）；
                    为 None 则从 MySQL 的 src_opinion_scenic_keyword / filter_word 取
-    push_progress  推送进度条工厂（见 progress.push_progress_factory），None 不显示
     """
     t0 = time.time()
     res = PipelineResult()
@@ -136,7 +138,7 @@ def run(settings: EtlSettings,
     if comments_df is None or comments_df.empty:
         res.errors.append(f"取数区间 {load_start}~{load_end} 没有任何评论数据")
         res.elapsed = time.time() - t0
-        return res
+        return res, scenic_codes
 
     # ---- 2. 标准化（全部在内存，不落中间表）----
     cf_all = build_comment_facts(comments_df)
@@ -156,7 +158,7 @@ def run(settings: EtlSettings,
     if not cf["travel_date"].between(load_start, load_end).any():
         res.errors.append(f"取数区间 {load_start}~{load_end} 内没有评论数据")
         res.elapsed = time.time() - t0
-        return res
+        return res, scenic_codes
     dim_all = build_dimension_facts(cf_all, settings.unknown_dimension_policy)
     kw_all = build_keyword_facts(cf_all)
     dim_facts = dim_all[dim_all["travel_date"].between(fill_start, load_end)]
@@ -224,6 +226,10 @@ def run(settings: EtlSettings,
     if macro is not None:
         checks["macro"] = macro
         checks["macro_granularities"] = [g["name"] for g in ctx.macro_granularities]
+        # 区间相同的行指标必须一样（td@T-1 = latest_1d@T、周一 wtd = 当天 td …）
+        checks["macro_specs_all"] = ctx.macro_granularities
+        checks["macro_spec_lookback"] = {g["name"]: macro_lookback(ctx, g)
+                                         for g in ctx.macro_granularities}
         # 补数上限统一（一个数）时：任意周期 == 区间内每天 td 之和
         if len(set(ctx.backfill_lookback().values())) <= 1:
             checks["macro_period_specs"] = ctx.macro_granularities
@@ -271,13 +277,69 @@ def run(settings: EtlSettings,
     # ctx.warn() 攒下来的告警统一在这里出口，别散在各处 print
     res.notes.extend(ctx.warnings)
 
+    scenics = scenic_codes or sorted(cf["scenic_spot_code"].astype(str).unique())
+    res.elapsed = time.time() - t0
+    return res, scenics
+
+
+def run(settings: EtlSettings,
+        dates: List[str],
+        scenic_codes: Optional[List[str]] = None,
+        db: Optional[MySQL] = None,
+        comments_df: Optional[pd.DataFrame] = None,
+        works_df: Optional[pd.DataFrame] = None,
+        push_progress=None,
+        drill_keywords: Optional[Dict[str, List[str]]] = None) -> PipelineResult:
+    """跑一次批：计算 → 数据质量检测 →（通过）落库 → 推送。
+
+    dates          要产出的目标日期（yyyyMMdd）
+    comments_df    直接喂源数据（测试/离线用）；为 None 则从 MySQL 取
+    drill_keywords settings.drill_keyword_filter 打开时用的采集关键字 {景区: [词]}（测试/离线用）；
+                   为 None 则从 MySQL 的 src_opinion_scenic_keyword / filter_word 取
+    push_progress  推送进度条工厂（见 progress.push_progress_factory），None 不显示
+
+    数据质量检测（validate.py，含「区间相同的行指标一致」）不通过时：
+      · 重新取数、重新计算，最多 quality_retries 次（默认 1）；
+      · 还不通过 → quality_gate 开着（默认）就**回退**：本次结果不写库、不推送，
+        库里和下游保留上一次的数据；同时发飞书通知（notify_feishu_webhook）。
+    """
+    t0 = time.time()
+    gate = bool(getattr(settings, "quality_gate", True))
+    tries = 1 + max(int(getattr(settings, "quality_retries", 1) or 0), 0)
+    retry_notes: List[str] = []
+    for attempt in range(1, tries + 1):
+        res, scenics = _compute(settings, dates, scenic_codes, db, comments_df, works_df,
+                                drill_keywords)
+        res.quality_attempts = attempt
+        if not res.errors:
+            break
+        if attempt < tries:
+            msg = (f"数据质量检测不通过（{len(res.errors)} 项，例如：{res.errors[0]}），"
+                   f"第 {attempt} 次计算的结果作废，重新取数重算")
+            log.warning(msg)
+            retry_notes.append(msg)
+    res.notes = retry_notes + res.notes
+    if res.errors:
+        _notify_quality(settings, res, scenics, dates, blocked=gate)
+        if gate:
+            res.quality_blocked = True
+            res.notes.append(f"数据质量检测 {res.quality_attempts} 次都不通过，已回退："
+                             "本次结果不写库、不推送（库里和下游保留上一次的数据）")
+            res.elapsed = time.time() - t0
+            return res
+    elif res.quality_attempts > 1:
+        res.notes.append(f"数据质量检测：第 {res.quality_attempts} 次重算后通过")
+    if not res.tables:
+        # 没算出任何表（取数为空等）：不进入落库，免得按景区 × 日期把库里已有的数据删掉
+        res.elapsed = time.time() - t0
+        return res
+
     # ---- 6. 落库 ----
     if settings.write_csv or settings.write_db:
         # 写库前按「本次景区 × 本次日期」先删再插（见 loader 模块说明）。
         # 景区取命令行指定的；没指定就取这次数据里出现的全部景区。
-        scenics = scenic_codes or sorted(cf["scenic_spot_code"].astype(str).unique())
         res.load_results = load_all(db, res.tables, settings=settings,
-                                    scenics=scenics, dates=ctx.output_dates)
+                                    scenics=scenics, dates=sorted(dates))
 
     # ---- 7. 推送下游（默认关闭；失败不改变跑批成败，除非 push_strict）----
     # 放在落库**之后**：先保证数据落定，再推。推失败了数据还在库里，
@@ -300,3 +362,15 @@ def run(settings: EtlSettings,
 
     res.elapsed = time.time() - t0
     return res
+
+
+def _notify_quality(settings, res: PipelineResult, scenics, dates, blocked: bool) -> None:
+    """数据质量检测最终不通过 → 飞书通知（没配 webhook 就不发）。"""
+    ds = sorted(str(d) for d in dates)
+    title = ("【舆情指标】数据质量检测不通过，已回退（未写库、未推送）" if blocked
+             else "【舆情指标】数据质量检测不通过（quality_gate 已关闭，照常写库 / 推送）")
+    lines = [f"景区：{'、'.join(map(str, scenics or [])) or '-'}",
+             f"目标日期：{ds[0]} ~ {ds[-1]}（{len(ds)} 天）" if ds else "目标日期：-",
+             f"计算次数：{res.quality_attempts}",
+             "问题："] + [f"· {e}" for e in res.errors]
+    send_feishu(settings, title, lines)

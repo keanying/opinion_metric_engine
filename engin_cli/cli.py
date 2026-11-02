@@ -44,6 +44,7 @@ from .pipeline import run as run_pipeline
 from .progress import push_progress_factory
 from .repair import (CORE_SCORE_FIELDS, DIM_SCORE_FIELDS, repair_core,
                      repair_dimension)
+from .notify import send_feishu
 from .settings import load_settings
 from .source import fetch_comments_csv, fetch_scenic_keywords_csv, fetch_works_csv
 
@@ -164,6 +165,10 @@ def cmd_run(args) -> int:
         st.backfill_lookback = _parse_lookback(args.backfill_lookback)
     if args.no_drill_analysis:
         st.enable_drill_analysis = False
+    if args.no_quality_gate:
+        st.quality_gate = False
+    if args.quality_retries is not None:
+        st.quality_retries = max(int(args.quality_retries), 0)
     if args.drill_keyword_filter:
         st.drill_keyword_filter = True
     if args.no_drill_keyword_filter:
@@ -266,6 +271,11 @@ def _run_one_scenic(st, scenic: str, dates: List[str], db, comments_df, works_df
     except Exception as e:                      # noqa: BLE001 —— 一个景区炸了不拖累其他景区
         logging.getLogger(__name__).exception("景区 %s 跑批异常", scenic)
         print(f"  ✗ 异常：{e}")
+        ds = sorted(dates)
+        send_feishu(st, "【舆情指标】指标计算异常（该景区本次未写库、未推送）",
+                    [f"景区：{scenic}", f"目标日期：{ds[0]} ~ {ds[-1]}（{len(ds)} 天）",
+                     f"异常：{type(e).__name__}: {e}",
+                     "完整堆栈见跑批日志"])
         return False, f"异常：{e}"
 
     for t, df in res.tables.items():
@@ -302,7 +312,12 @@ def _run_one_scenic(st, scenic: str, dates: List[str], db, comments_df, works_df
     if res.errors:
         for e in res.errors:
             print(f"  ✗ {e}")
-        return False, "；".join(res.errors[:2]) + (f" 等 {len(res.errors)} 项" if len(res.errors) > 2 else "")
+        head = "；".join(res.errors[:2]) + (f" 等 {len(res.errors)} 项" if len(res.errors) > 2 else "")
+        if res.quality_blocked:
+            print(f"  ✗ 数据质量检测 {res.quality_attempts} 次都不通过，已回退：本次结果未写库、未推送"
+                  + ("，已发飞书通知" if st.notify_feishu_webhook else ""))
+            return False, "已回退（未写库/未推送）：" + head
+        return False, head
     print(f"  校验通过 ✓  用时 {res.elapsed:.1f}s")
     return True, push_note
 
@@ -790,6 +805,22 @@ def cmd_mock(args) -> int:
     return 0
 
 
+def cmd_notify_test(args) -> int:
+    """发一条测试消息到飞书机器人，确认 webhook 配对了。"""
+    st = load_settings()
+    _setup_log(args.log_level or st.log_level)
+    if args.webhook:
+        st.notify_feishu_webhook = args.webhook
+    if not st.notify_feishu_webhook:
+        print("未配置飞书 webhook：在 settings_local.py 里填 notify_feishu_webhook，"
+              "或设环境变量 OPINION_FEISHU_WEBHOOK，或用 --webhook 传入")
+        return 2
+    ok = send_feishu(st, "【舆情指标】通知测试", ["这是一条测试消息：数据质量检测不通过、"
+                                                 "指标计算异常时会发到这个群。"])
+    print("已发送 ✓" if ok else "发送失败 ✗（看上面的 warning）")
+    return 0 if ok else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="engin_cli", description="舆情指标引擎：源表 → 四张 ADS 指标表 + 下钻明细表")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -821,6 +852,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="关闭上面的过滤（原逻辑，评论全收），覆盖 settings 里的 drill_keyword_filter")
     r.add_argument("--drill-keywords-csv",
                    help="离线 / 不连库时的采集关键字 CSV（scenic_id, word 两列），配合 --drill-keyword-filter")
+    r.add_argument("--no-quality-gate", action="store_true",
+                   help="数据质量检测不通过也照常写库、推送（默认不通过就回退：不写库、不推送，并发飞书通知）")
+    r.add_argument("--quality-retries", type=int,
+                   help="数据质量检测不通过时重新取数重算几次，默认 settings.quality_retries=1")
     r.add_argument("--no-macro", action="store_true",
                    help="不产出 2.0 大盘 KPI 表（也就不会为同比多取去年同期的数据）")
     r.add_argument("--push", nargs="?", const="all", metavar="表名",
@@ -889,6 +924,11 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--no-progress", action="store_true", help="不显示推送进度条")
     m.add_argument("--log-level")
     m.set_defaults(func=cmd_mock)
+
+    n = sub.add_parser("notify-test", help="发一条测试消息到飞书机器人，确认 webhook 配对了")
+    n.add_argument("--webhook", help="临时指定 webhook，覆盖配置")
+    n.add_argument("--log-level")
+    n.set_defaults(func=cmd_notify_test)
 
     x = sub.add_parser("repair", help="按新口径重刷历史分数（只改得分字段）")
     x.add_argument("--start-date", required=True, help="修正区间起 yyyyMMdd")
