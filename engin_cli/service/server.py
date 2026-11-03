@@ -43,6 +43,12 @@ log = logging.getLogger(__name__)
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 LOOPBACK = {"127.0.0.1", "::1", "::ffff:127.0.0.1"}
+_req = threading.local()                       # 当前请求的登录用户（处理函数里要记操作人时用）
+
+
+def current_user_name() -> str:
+    u = getattr(_req, "user", None) or {}
+    return str(u.get("display_name") or u.get("username") or "")
 
 
 class ApiError(Exception):
@@ -496,7 +502,7 @@ class App:
         from ..builders.macro import _lookback
         from ..context import RunContext
         from ..loader import TABLE_MACRO
-        from ..validate import validate_macro_same_range, validate_period_sums
+        from ..validate import run_check, validate_macro_same_range, validate_period_sums
         import pandas as pd
 
         scenic = str(body.get("scenic") or "").strip()
@@ -506,7 +512,12 @@ class App:
         rows = self._query(f"select * from {self._ads(TABLE_MACRO)} where scenic_id=%s "
                            f"and travel_date between %s and %s", (scenic, int(start), int(end)))
         if not rows:
-            return {"rows": 0, "errors": [], "checks": [], "message": "这段日期库里没有大盘表数据"}
+            msg = "这段日期库里没有大盘表数据"
+            cid = self.store.add_check(check_type="manual", trigger="page", scenic=scenic, start=start, end=end,
+                                       status="fail", attempts=1, items=0, issues=0, summary=msg,
+                                       operator=current_user_name(),
+                                       detail={"attempts": [], "dates": [start, end], "rows": 0, "source": msg})
+            return {"rows": 0, "errors": [], "checks": [], "message": msg, "check_id": cid}
         df = pd.DataFrame(rows)
         df["travel_date"] = pd.to_numeric(df["travel_date"]).astype("int64")
         st = self.settings
@@ -515,14 +526,30 @@ class App:
         lb = {g["name"]: _lookback(ctx, g) for g in specs}
         checks = ["区间相同的行指标一致（td@T-1 = latest_1d@T、周一 wtd = 当天 td …）"]
         issues: List[dict] = []
-        errs = validate_macro_same_range(df, specs, lb, issues=issues)
+        trace: List[dict] = []                         # 检测过程：存进检测记录，点进去能看
+        errs = run_check(trace, "same_range", len(df), validate_macro_same_range, df, specs, lb, issues=issues)
         if len(set(ctx.backfill_lookback().values())) <= 1:
             checks.append("各周期评论数 = 区间内每天 td 之和")
-            errs += validate_period_sums(df, specs, issues=issues)
+            errs += run_check(trace, "period_sum", len(df), validate_period_sums, df, specs, issues=issues)
         days = _issues_by_day(issues)
+        message = "全部通过" if not errs else f"{len(days)} 天有问题，共 {len(issues)} 处"
+        check_id = self.store.add_check(
+            check_type="manual", trigger="page", scenic=scenic, start=start, end=end,
+            status="fail" if errs else "pass", attempts=1, items=len(trace), issues=len(issues),
+            summary=message, operator=current_user_name(),
+            detail={"attempts": [{"attempt": 1, "at": now_str(), "ok": not errs, "errors": errs[:30], "steps": trace}],
+                    "dates": [start, end], "rows": len(df),
+                    "source": f"库里已有的大盘表 {self._ads(TABLE_MACRO)}，景区 {scenic}，{start}~{end}，共 {len(df)} 行",
+                    "days": days})
         return {"scenic": scenic, "start": start, "end": end, "rows": len(df), "errors": errs,
-                "checks": checks, "days": days, "push_ready": self.push_ready(),
-                "message": "全部通过" if not errs else f"{len(days)} 天有问题，共 {len(issues)} 处"}
+                "checks": checks, "days": days, "push_ready": self.push_ready(), "message": message,
+                "check_id": check_id}
+
+    def get_check(self, check_id: int) -> dict:
+        c = self.store.get_check(check_id)
+        if not c:
+            raise ApiError(404, "检测记录不存在")
+        return c
 
     def push_ready(self) -> bool:
         """推送能用：总开关开着、且配了推送地址（页面设置或 settings_local）。"""
@@ -646,6 +673,7 @@ class App:
         before = (dt.datetime.now() - dt.timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
         paths = self.store.delete_runs_before(before)
         self.store.delete_events_before(before)
+        self.store.delete_checks_before(before)
         removed = 0
         for p in paths:
             for f in (p, p.replace(".log", ".summary.json")):
@@ -718,6 +746,11 @@ def _route_table(app: App):
         ("POST", r"/api/runs/(\d+)/cancel", lambda m, q, b: {"ok": app.runner.cancel(I(m[1]))}),
         ("GET", r"/api/quality", lambda m, q, b: app.quality(I(q1(q, "days", "14")))),
         ("POST", r"/api/quality/check", lambda m, q, b: app.quality_check(b)),
+        ("GET", r"/api/quality/checks", lambda m, q, b: app.store.list_checks(
+            status=q1(q, "status"), check_type=q1(q, "type"), scenic=q1(q, "scenic"), kw=q1(q, "q"),
+            since=(dt.datetime.now() - dt.timedelta(days=max(I(q1(q, "days", "30") or 30), 1) - 1)).strftime("%Y-%m-%d"),
+            limit=min(I(q1(q, "limit", "30")), 200), offset=I(q1(q, "offset", "0")))),
+        ("GET", r"/api/quality/checks/(\d+)", lambda m, q, b: app.get_check(I(m[1]))),
         ("POST", r"/api/quality/repair", lambda m, q, b: app.quality_repair(b)),
         ("GET", r"/api/metrics/scenics", lambda m, q, b: app.metric_scenics()),
         ("GET", r"/api/scenics", lambda m, q, b: app.scenic_options()),
@@ -809,6 +842,7 @@ def make_handler(app: App):
                 return self._json(401, {"error": "请先登录", "login": True})
             if path == "/api/me":
                 return self._json(200, {"user": user})
+            _req.user = user
             why = denied_reason(user["role"], self.command, path) if user else ""
             if why:
                 return self._json(403, {"error": why})

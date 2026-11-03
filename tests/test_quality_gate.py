@@ -97,11 +97,11 @@ def _fail_validate(monkeypatch, times):
     calls = {"n": 0}
     real = P.validate_all
 
-    def fake(checks):
+    def fake(checks, **kw):
         calls["n"] += 1
         if times is None or calls["n"] <= times:
             return ["macro: 区间相同的行指标不一致，1 处（测试注入）"]
-        return real(checks)
+        return real(checks, **kw)
 
     monkeypatch.setattr(P, "validate_all", fake)
     return calls

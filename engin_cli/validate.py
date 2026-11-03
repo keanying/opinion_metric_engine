@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from typing import List, Optional
 
 import numpy as np
@@ -23,9 +25,94 @@ from .metric_calc_domain import (BACKFILL_MODE_FILL, CORE_SUFFIX, CORE_WINDOWS,
                                  V1_SCORE_MAX, sentiment_score_from_counts)
 
 
+# ── 检测过程记录（页面「数据质量 → 检测记录」点进去看）────────────────────────────
+# validate_all(tables, trace=[...]) 时，每一项检查记一条：查了什么（规则）、核对了多少行、
+# 断言了几次、哪些不对；区间一致 / 周期合计两项还记下对比的具体数值。不传 trace 时什么都不记。
+# 单独跑某一项并记录过程：run_check(trace, key, 行数, 校验函数, 参数…)
+CHECK_INFO = {
+    "core": ("核心表", [
+        "好评 + 中评 + 差评 = 评论总数",
+        "各窗口情感得分在值域内；好评率 + 中评率 + 差评率 = 1，各率在 0~1",
+        "日评分在 1~5",
+        "情感得分 = 按表内计数重新算出的值（偏差不超过 0.001）",
+        "景区 × 日期不重复"]),
+    "platform": ("渠道表", [
+        "各渠道评论数之和 = 核心表评论总数",
+        "各渠道评论占比合计 = 1；好评率等比例在 0~1",
+        "景区 × 渠道 × 日期不重复",
+        "全平台口径字段同一天各渠道行取值一致，且等于各渠道之和",
+        "每个（景区, 日期）都有配置的全部渠道"]),
+    "dimension": ("维度表", [
+        "各级维度得分在值域内",
+        "同一天同一个一级 / 二级维度只有一个得分",
+        "维度路径不重复"]),
+    "content": ("内容表", [
+        "景区 × 日期 × 词不重复",
+        "情感类型只有 好 / 中 / 差",
+        "各项计数不为负；词频不超过当日评论总数",
+        "每个分组都有排名第 1 的词"]),
+    "drill": ("下钻表 ↔ 大盘表对账", [
+        "大盘每一格（景区 × 日期 × 周期 × 渠道）的评论数 = 下钻表本期区间内去重后的评论数",
+        "按地域计数 = 大盘热力图各地域热度",
+        "大盘词云里的词，下钻表都查得到",
+        "开了采集关键字过滤时只核对词云（下钻表只是评论的子集）"]),
+    "same_range": ("大盘表：区间相同的行指标一致", [
+        "td@T-1 = latest_1d@T（本期都是 T-1 这一天）",
+        "周一的 wtd = 当天 td，1 号的 mtd = 当天 td",
+        "上期 / 同比区间相同的行，上期 / 同比指标也一致"]),
+    "period_sum": ("大盘表：各周期评论数 = 区间内每天 td 之和", [
+        "近 N 日 / 本周 / 本月等周期的 comment_total = 本期区间里每天 td 的 comment_total 相加",
+        "每个渠道和整体（all）都核对；区间里有日期不在本次结果里的格子跳过"]),
+    "macro": ("大盘表恒等关系", [
+        "景区 × 日期 × 周期 × 渠道不重复",
+        "好 + 中 + 差 = 评论总数；占比在 0~100；得分在值域内",
+        "整体（all）行各项计数 = 各渠道相加；各渠道评论占比合计 = 100",
+        "每个（景区, 日期）每个周期都有整体 + 全部渠道",
+        "三个 JSON 列都能解析"]),
+}
+_local = threading.local()
+
+
 def _fail(errs: List[str], cond: bool, msg: str):
+    cur = getattr(_local, "cur", None)
+    if cur is not None:
+        cur["asserts"] += 1
     if not cond:
         errs.append(msg)
+
+
+def _stat(key: str, value) -> None:
+    """检测过程里补一个数字（如「共核对多少格」），只在记录过程时生效。"""
+    cur = getattr(_local, "cur", None)
+    if cur is not None:
+        cur[key] = value
+
+
+def _rows(df) -> int:
+    return 0 if df is None else int(len(df))
+
+
+def run_check(trace: Optional[list], key: str, rows: int, fn, *a, **k) -> List[str]:
+    """跑一项检查；trace 不为 None 时把过程记进去。"""
+    if trace is None:
+        return fn(*a, **k)
+    title, rules = CHECK_INFO[key]
+    item = {"key": key, "title": title, "rules": rules, "rows": rows, "asserts": 0}
+    issues: list = []
+    if key in ("same_range", "period_sum"):
+        issues = k.setdefault("issues", issues)      # 调用方自己要全部明细时传进来，这里共用同一个 list
+    prev, _local.cur = getattr(_local, "cur", None), item
+    t0 = time.time()
+    try:
+        errs = fn(*a, **k)
+    finally:
+        _local.cur = prev
+    item.update(ok=not errs, errors=list(errs), ms=int((time.time() - t0) * 1000))
+    if issues:                                   # 对比的数值：最多留 30 处，够看清是哪几天哪几个字段
+        item["issue_total"] = len(issues)
+        item["issues"] = [{kk: v for kk, v in it.items()} for it in issues[:30]]
+    trace.append(item)
+    return errs
 
 
 def validate_core(core: pd.DataFrame, formula: str = DEFAULT_SCORE_FORMULA,
@@ -330,7 +417,7 @@ def validate_macro_same_range(macro: pd.DataFrame, specs: list,
     m["_lb"] = m["time_granularity"].map(lambda g: (lookbacks or {}).get(g, 0))
     m["_who"] = m["time_granularity"] + "@" + m["travel_date"].astype(str)
 
-    bad, sample = 0, None
+    bad, sample, compared = 0, None, 0
     for parts, cols in MACRO_SAME_RANGE_GROUPS:
         cols = [c for c in cols if c in m.columns]
         gkeys = ["scenic_id", "channel", "_lb"] + [f"_rng_{p}" for p in parts]
@@ -339,6 +426,7 @@ def validate_macro_same_range(macro: pd.DataFrame, specs: list,
             continue
         for _, g in dup.groupby(gkeys, sort=False):
             for c in cols:
+                compared += 1
                 v = g[c]
                 if pd.api.types.is_numeric_dtype(v):
                     differs = (v.astype("float64") - float(v.iloc[0])).abs() > 1e-6
@@ -357,6 +445,7 @@ def validate_macro_same_range(macro: pd.DataFrame, specs: list,
                         sample = (f"景区 {g['scenic_id'].iloc[0]} 渠道 {g['channel'].iloc[0]}："
                                   f"{who.iloc[0]} 与 {who[differs].iloc[0]} 的 {c} 不同")
                     break
+    _stat("compared", compared)
     _fail(errs, bad == 0,
           f"macro: 区间相同的行指标不一致，{bad} 处" + (f"（例如 {sample}）" if sample else ""))
     return errs
@@ -401,36 +490,43 @@ def validate_period_sums(macro: pd.DataFrame, specs: list, issues: Optional[list
                                    "field": "comment_total", "rows": [f"{spec['name']}@{t}"],
                                    "values": [int(total), int(got.sum())]})
                 sample = sample or ((sc, t, spec["name"], ch), int(got.sum()), int(total))
+    _stat("compared", checked)
     _fail(errs, bad == 0,
           f"macro: 周期 comment_total != 区间内每天 td 之和，{bad} 处（共核对 {checked} 处）"
           + (f"（例如 {sample[0]}：td 合计 {sample[1]} vs 周期 {sample[2]}）" if sample else ""))
     return errs
 
 
-def validate_all(tables: dict) -> List[str]:
-    """tables 额外可带 "platform_codes"：本次跑批配置的渠道全集，用于行完整性断言。"""
+def validate_all(tables: dict, trace: Optional[list] = None) -> List[str]:
+    """tables 额外可带 "platform_codes"：本次跑批配置的渠道全集，用于行完整性断言。
+
+    trace：传一个 list 进来，就把每一项检查的过程追加进去（见 CHECK_INFO / run_check）。
+    """
     core = tables.get("core", pd.DataFrame())
     formula = tables.get("score_formula") or DEFAULT_SCORE_FORMULA
+    platform = tables.get("platform", pd.DataFrame())
     errs: List[str] = []
-    errs += validate_core(core, formula, tables.get("score_weights"))
-    errs += validate_platform(tables.get("platform", pd.DataFrame()), core,
-                              tables.get("platform_codes"),
-                              tables.get("backfill_mode", BACKFILL_MODE_FILL))
-    errs += validate_dimension(tables.get("dimension", pd.DataFrame()))
-    errs += validate_content(tables.get("content", pd.DataFrame()), core)
+    errs += run_check(trace, "core", _rows(core), validate_core, core, formula, tables.get("score_weights"))
+    errs += run_check(trace, "platform", _rows(platform), validate_platform, platform, core,
+                  tables.get("platform_codes"), tables.get("backfill_mode", BACKFILL_MODE_FILL))
+    dim = tables.get("dimension", pd.DataFrame())
+    errs += run_check(trace, "dimension", _rows(dim), validate_dimension, dim)
+    content = tables.get("content", pd.DataFrame())
+    errs += run_check(trace, "content", _rows(content), validate_content, content, core)
     if "macro" in tables and "drill" in tables:
-        errs += validate_drill(tables["drill"], tables["macro"],
-                               tables.get("macro_specs", []), tables.get("output_dates", []),
-                               bool(tables.get("macro_period_specs")),
-                               words_only=bool(tables.get("drill_words_only")))
+        errs += run_check(trace, "drill", _rows(tables["drill"]), validate_drill, tables["drill"], tables["macro"],
+                      tables.get("macro_specs", []), tables.get("output_dates", []),
+                      bool(tables.get("macro_period_specs")),
+                      words_only=bool(tables.get("drill_words_only")))
     if "macro" in tables and tables.get("macro_specs_all"):
-        errs += validate_macro_same_range(tables["macro"], tables["macro_specs_all"],
-                                          tables.get("macro_spec_lookback"))
+        errs += run_check(trace, "same_range", _rows(tables["macro"]), validate_macro_same_range,
+                      tables["macro"], tables["macro_specs_all"], tables.get("macro_spec_lookback"))
     if "macro" in tables and tables.get("macro_period_specs"):
-        errs += validate_period_sums(tables["macro"], tables["macro_period_specs"])
+        errs += run_check(trace, "period_sum", _rows(tables["macro"]), validate_period_sums,
+                      tables["macro"], tables["macro_period_specs"])
     if "macro" in tables:
-        errs += validate_macro(tables["macro"], core, tables.get("platform_codes"),
-                               tables.get("macro_granularities"), formula)
+        errs += run_check(trace, "macro", _rows(tables["macro"]), validate_macro, tables["macro"], core,
+                      tables.get("platform_codes"), tables.get("macro_granularities"), formula)
     return errs
 
 

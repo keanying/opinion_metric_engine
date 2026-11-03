@@ -59,6 +59,8 @@ class PipelineResult:
     elapsed: float = 0.0
     quality_attempts: int = 0              # 计算了几次（数据质量检测不过会重新取数重算）
     quality_blocked: bool = False          # 检测最终没过 → 本次结果没写库、没推送（已回退）
+    quality_steps: List = field(default_factory=list)   # 本次计算的检测过程（validate_all 的 trace）
+    quality_trace: List = field(default_factory=list)   # 每一次计算的检测过程：[{attempt, at, ok, errors, steps}]
 
     @property
     def ok(self) -> bool:
@@ -247,7 +249,8 @@ def _compute(settings: EtlSettings,
             checks["macro_specs"] = ctx.macro_granularities
             checks["output_dates"] = ctx.output_dates
             checks["drill_words_only"] = bool(getattr(settings, "drill_keyword_filter", False))
-    res.errors = validate_all(checks)
+    res.quality_steps = []
+    res.errors = validate_all(checks, trace=res.quality_steps)
 
     # 回补可见化：输出日期里有多少「景区·渠道·日」是复制来的明细
     lb = ctx.backfill_lookback(D_PLATFORM_WINDOWS)
@@ -313,10 +316,15 @@ def run(settings: EtlSettings,
     gate = bool(getattr(settings, "quality_gate", True))
     tries = 1 + max(int(getattr(settings, "quality_retries", 1) or 0), 0)
     retry_notes: List[str] = []
+    trace: List[dict] = []
     for attempt in range(1, tries + 1):
         res, scenics = _compute(settings, dates, scenic_codes, db, comments_df, works_df,
                                 drill_keywords)
         res.quality_attempts = attempt
+        if res.quality_steps:                       # 每次计算的检测过程都留着（页面「检测记录」看）
+            trace.append({"attempt": attempt, "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                          "ok": not res.errors, "errors": list(res.errors)[:30], "steps": res.quality_steps})
+        res.quality_trace = trace
         if not res.errors:
             break
         if attempt < tries:

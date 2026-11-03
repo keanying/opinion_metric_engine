@@ -2,17 +2,40 @@ import { ref, reactive, onMounted, onUnmounted, computed } from 'vue'
 import { api, todayYmd, notify, CHANNELS, confirmBox, STATUS } from '../api.js'
 import { Ring } from '../charts.js'
 
+// 检测结果 / 方式的文字，列表和详情共用
+export const CHECK_STATUS = {
+  pass: { text: '通过', color: 'green', icon: 'tickCircle' },
+  fixed: { text: '重算后通过', color: 'violet', icon: 'refresh' },
+  blocked: { text: '已回退', color: 'orange', icon: 'alert' },
+  fail: { text: '不通过', color: 'pink', icon: 'clear' },
+}
+const TRIGGER_TEXT = { schedule: '定时跑批', manual: '手动执行', repair: '数据修复', page: '页面检测' }
+export const howText = c => c.type === 'run' ? `跑批检测 · ${TRIGGER_TEXT[c.trigger] || c.trigger}` : '页面检测（读库）'
+const fmtYmd = d => d ? `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6)}` : ''
+export const rangeText = c => !c.start ? '—' : c.start === c.end ? fmtYmd(c.start) : `${fmtYmd(c.start)} ~ ${fmtYmd(c.end)}`
+
 export default {
   components: { Ring },
   setup() {
-    const days = ref(14), data = ref({ items: [] }), err = ref(''), loading = ref(true), kw = ref('')
+    const days = ref(14), data = ref({ total: 0, counts: {}, items: [] }), err = ref(''), loading = ref(true), kw = ref('')
+    const fstatus = ref(''), ftype = ref(''), more = ref(false)
     const scenics = ref([]), today = todayYmd()
     const chk = reactive({ scenic: '', start: todayYmd(-30), end: todayYmd(), running: false, result: null,
                            push: true, repair: null })   // repair：{ id, status, start(ms) } 提交的修复执行
+    // 检测记录：每一次检测（跑批自动检测、页面检测）一条；先拿 30 条，滚到底 / 点「加载更多」再拿
+    const qs = offset => new URLSearchParams({ days: days.value, status: fstatus.value, type: ftype.value,
+                                                q: kw.value.trim(), offset, limit: 30 })
     const load = async () => {
       loading.value = true
-      try { data.value = await api('/api/quality?days=' + days.value); err.value = '' } catch (e) { err.value = e.message }
+      try { data.value = await api('/api/quality/checks?' + qs(0)); err.value = '' } catch (e) { err.value = e.message }
       finally { loading.value = false }
+    }
+    const loadMore = async () => {
+      if (more.value || loading.value || data.value.items.length >= data.value.total) return
+      more.value = true
+      try { const r = await api('/api/quality/checks?' + qs(data.value.items.length))
+        data.value = { ...r, items: data.value.items.concat(r.items) } }
+      catch (e) { notify(e.message, 'err') } finally { more.value = false }
     }
     onMounted(async () => {
       load()
@@ -24,7 +47,7 @@ export default {
       q = q && q.scenic ? q : { scenic: chk.scenic, start: chk.start, end: chk.end }
       chk.running = true; chk.result = null; chk.repair = null; stopWatch()
       try { chk.result = await api('/api/quality/check', { method: 'POST', body: q })
-        chk.push = chk.result.push_ready }
+        chk.push = chk.result.push_ready; load() }          // 这次检测也记进了检测记录
       catch (e) { notify(e.message, 'err') } finally { chk.running = false }
       return chk.result
     }
@@ -89,25 +112,23 @@ export default {
     const wk = d => '周' + '日一二三四五六'[new Date(+d.slice(0, 4), +d.slice(4, 6) - 1, +d.slice(6)).getDay()]
     const fmtD = d => `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6)}`
     const stats = computed(() => {
-      const it = data.value.items
-      return { blocked: it.filter(x => x.quality_blocked).length, fixed: it.filter(x => x.ok && x.attempts > 1).length,
-               failed: it.filter(x => !x.ok && !x.quality_blocked).length }
+      const c = data.value.counts || {}
+      return { pass: c.pass || 0, fixed: c.fixed || 0, blocked: c.blocked || 0, fail: c.fail || 0 }
     })
     const parts = computed(() => [
-      { value: stats.value.blocked, label: '回退', colors: ['#ffd88a', '#f5a524'], icon: 'alert' },
+      { value: stats.value.pass, label: '通过', colors: ['#8fe0d3', '#21b8a6'], icon: 'tickCircle' },
       { value: stats.value.fixed, label: '重算后通过', colors: ['#a194ec', '#5446b8'], icon: 'refresh' },
-      { value: stats.value.failed, label: '其他失败', colors: ['#f6a4b8', '#ee5a7c'], icon: 'clear' }])
-    const shown = computed(() => data.value.items.filter(x => !kw.value ||
-      JSON.stringify(x).toLowerCase().includes(kw.value.toLowerCase())))
+      { value: stats.value.blocked, label: '已回退', colors: ['#ffd88a', '#f5a524'], icon: 'alert' },
+      { value: stats.value.fail, label: '不通过', colors: ['#f6a4b8', '#ee5a7c'], icon: 'clear' }])
     const cols = [
-      { key: 'run', title: '执行', width: 220 }, { key: 'scenic', title: '景区', width: 170 },
-      { key: 'result', title: '结果', width: 120 }, { key: 'attempts', title: '次数', width: 60 },
-      { key: 'errors', title: '问题' }]
+      { key: 'at', title: '检测时间', width: 120 }, { key: 'how', title: '方式 · 触发', width: 210 },
+      { key: 'scenic', title: '景区', width: 150 }, { key: 'range', title: '检测日期', width: 200 },
+      { key: 'result', title: '结果', width: 120 }, { key: 'summary', title: '检查了 / 结果' }]
     const dayCols = [
       { key: 'date', title: '日期', width: 170 }, { key: 'count', title: '问题', width: 190 },
       { key: 'channels', title: '渠道', width: 110 }, { key: 'samples', title: '明细' }]
-    return { days, data, err, loading, kw, shown, load, scenics, chk, check, repair, repairText, spanDays, wk, fmtD, today,
-             stats, parts, cols, dayCols, CHANNELS }
+    return { days, data, err, loading, kw, load, loadMore, more, fstatus, ftype, scenics, chk, check, repair, repairText,
+             spanDays, wk, fmtD, today, stats, parts, cols, dayCols, CHANNELS, CHECK_STATUS, howText, rangeText }
   },
   template: `
   <div>
@@ -123,7 +144,8 @@ export default {
         <div v-if="chk.result" class="check-result">
           <div class="result-bar" :class="chk.result.days.length ? 'bad' : 'ok'">
             <Icon :name="chk.result.days.length ? 'alert' : 'tickCircle'" :size="18" :sw="2.2"/>
-            <b>{{ chk.result.message }}</b><span class="muted small">{{ chk.result.scenic }} · {{ fmtD(chk.result.start) }} ~ {{ fmtD(chk.result.end) }} · {{ chk.result.rows }} 行</span>
+            <b>{{ chk.result.message }}</b>
+            <a v-if="chk.result.check_id" class="link small" :href="'#/quality/' + chk.result.check_id">查看检测过程 #{{ chk.result.check_id }}</a><span class="muted small">{{ chk.result.scenic }} · {{ fmtD(chk.result.start) }} ~ {{ fmtD(chk.result.end) }} · {{ chk.result.rows }} 行</span>
             <span class="grow"></span>
             <template v-if="chk.result.days.length">
               <label class="check sm"><Switch v-model="chk.push" size="sm" :disabled="!chk.result.push_ready"/>修复后推送
@@ -151,33 +173,125 @@ export default {
 
     <div class="grid one-two">
       <div class="card center">
-        <div class="card-head"><h3>近 {{ days }} 天跑批检测<Tip text="每次跑批算完自动检测的结果（景区 · 次）"/></h3></div>
-        <Ring :parts="parts" :size="200" :thickness="20" :value="String(stats.blocked + stats.fixed + stats.failed)"
-          label="问题" sub="景区·次" :hole="0.5" />
-        <div class="stat4 three">
-          <div><span class="cap">回退</span><b>{{ stats.blocked }}</b><i class="ubar"><em style="width:60%;background:#f5a524"></em></i></div>
-          <div><span class="cap">重算后通过</span><b>{{ stats.fixed }}</b><i class="ubar"><em style="width:60%;background:#6b5bd0"></em></i></div>
-          <div><span class="cap">其他失败</span><b>{{ stats.failed }}</b><i class="ubar"><em style="width:60%;background:#ee5a7c"></em></i></div>
+        <div class="card-head"><h3>近 {{ days }} 天检测<Tip text="每一次检测都算：跑批时每个景区自动检测一次，页面上手动检测一次"/></h3></div>
+        <Ring :parts="parts" :size="200" :thickness="20" :value="String(data.total)" label="检测" sub="次" :hole="0.5" />
+        <div class="stat4">
+          <div v-for="p in parts" :key="p.label"><span class="cap">{{ p.label }}</span><b>{{ p.value }}</b>
+            <i class="ubar"><em :style="{width: (data.total ? Math.max(6, p.value / data.total * 100) : 0) + '%', background: p.colors[1]}"></em></i></div>
         </div>
       </div>
       <div class="card">
-        <div class="card-head stick"><h3>检测记录<Tip text="每次跑批算完都检测；不通过先重算，还不通过就回退（不写库、不推送）并发飞书通知"/></h3>
+        <div class="card-head stick"><h3>检测记录<Tip wide text="每一次数据质量检测都在这里：什么时候、怎么触发的（定时跑批 / 手动执行 / 数据修复 / 页面检测）、检测了哪个景区哪几天、结果。点一行看检测过程：查了哪些项、每项的规则、核对了多少、哪里不对、对比的数值"/></h3>
           <div class="toolbar">
             <div class="seg"><button v-for="d in [7,14,30]" :key="d" :class="{on: days===d}" @click="days=d; load()">近 {{ d }} 天</button></div>
-            <span class="search"><Icon name="search" :size="15"/><input v-model="kw" placeholder="景区 / 问题"/></span>
-            <button class="btn light" @click="kw=''; load()">重置</button></div></div>
+            <select v-model="ftype" @change="load"><option value="">全部方式</option><option value="run">跑批自动检测</option><option value="manual">页面检测</option></select>
+            <select v-model="fstatus" @change="load"><option value="">全部结果</option>
+              <option v-for="(v,k) in CHECK_STATUS" :key="k" :value="k">{{ v.text }}</option></select>
+            <span class="search"><Icon name="search" :size="15"/><input v-model="kw" placeholder="景区 / 任务 / 结果" @keyup.enter="load"/></span>
+            <button class="btn light" @click="kw=''; fstatus=''; ftype=''; load()">重置</button></div></div>
         <div v-if="err" class="alert red">{{ err }}</div>
-        <STable :columns="cols" :data="shown" :loading="loading" :min-height="260" row-key="__k"
-          :empty="data.items.length ? '搜索无结果' : '这段时间没有质量问题'">
-          <template #run="{ row }"><span class="s-name"><Avatar square icon="shield" :color="row.quality_blocked ? 'amber' : 'indigo'"/>
-            <span class="s-ell"><a :href="'#/runs/'+row.run_id"><b>{{ row.task_name || '临时执行' }}</b></a>
-              <small>#{{ row.run_id }} · {{ row.created_at.slice(5,16) }}</small></span></span></template>
-          <template #scenic="{ row }"><span class="s-name"><Avatar :text="row.scenic"/><span class="s-ell" :title="row.scenic">{{ row.scenic }}</span></span></template>
-          <template #result="{ row }"><Tag :color="row.quality_blocked ? 'orange' : (row.ok ? 'blue' : 'pink')"
-            :icon="row.quality_blocked ? 'alert' : (row.ok ? 'refresh' : 'clear')">{{ row.quality_blocked ? '已回退' : (row.ok ? '重算后通过' : '失败') }}</Tag></template>
-          <template #errors="{ row }"><ul class="errs tight"><li v-for="(e,j) in row.errors" :key="j">{{ e }}</li></ul></template>
+        <STable :columns="cols" :data="data.items" :loading="loading" :min-height="260" clickable
+          :empty="'近 ' + days + ' 天没有检测记录'" @row-click="r => $router.push('/quality/' + r.id)">
+          <template #at="{ row }"><span class="s-ell"><b>{{ row.created_at.slice(5, 16) }}</b><small>#{{ row.id }}</small></span></template>
+          <template #how="{ row }"><span class="s-name"><Avatar square :icon="row.type === 'run' ? 'layers' : 'shield'" :color="row.type === 'run' ? 'indigo' : 'cyan'"/>
+            <span class="s-ell"><b>{{ howText(row) }}</b><small :title="row.task_name">{{ row.type === 'run' ? (row.task_name || '临时执行') + ' · #' + row.run_id : (row.operator || '—') }}</small></span></span></template>
+          <template #scenic="{ row }"><span class="s-ell" :title="row.scenic">{{ row.scenic }}</span></template>
+          <template #range="{ row }"><span class="nowrap">{{ rangeText(row) }}</span></template>
+          <template #result="{ row }"><Tag :color="CHECK_STATUS[row.status].color" :icon="CHECK_STATUS[row.status].icon">{{ CHECK_STATUS[row.status].text }}</Tag></template>
+          <template #summary="{ row }"><span class="s-ell"><b :class="{'t-red': row.status === 'fail' || row.status === 'blocked'}" :title="row.summary">{{ row.summary }}</b>
+            <small>检查 {{ row.items }} 项<template v-if="row.attempts > 1"> · 检测 {{ row.attempts }} 次</template><template v-if="row.issues"> · {{ row.issues }} 处问题</template></small></span></template>
+          <template #foot><div v-if="data.items.length < data.total" class="s-table-foot">
+            已显示 {{ data.items.length }} / 共 {{ data.total }} 条 <a class="link" @click.stop="loadMore">{{ more ? '加载中…' : '加载更多' }}</a></div></template>
         </STable>
       </div>
     </div>
+  </div>`,
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 检测详情：什么时候、怎么触发的、检测了什么数据；每次检测的每一项：查了什么、核对多少、哪里不对、对比的数值
+// ══════════════════════════════════════════════════════════════════
+export const QualityDetail = {
+  props: { id: [String, Number] },
+  setup(p) {
+    const c = ref(null), err = ref(''), open = reactive({})
+    onMounted(async () => {
+      try {
+        c.value = await api('/api/quality/checks/' + p.id)
+        const att = c.value.detail?.attempts || []
+        att.forEach((a, i) => (a.steps || []).forEach(s => {            // 默认展开：最后一次检测里不通过的项
+          if (i === att.length - 1 && !s.ok) open[`${a.attempt}.${s.key}`] = true
+        }))
+      } catch (e) { err.value = e.message }
+    })
+    const toggle = k => { open[k] = !open[k] }
+    const fmtNum = n => (n ?? 0).toLocaleString('zh-CN')
+    const KEY_TEXT = { same_range: '区间不一致', period_sum: '周期合计不对' }
+    return { c, err, open, toggle, fmtNum, CHECK_STATUS, howText, rangeText, KEY_TEXT, CHANNELS }
+  },
+  template: `
+  <div>
+    <div class="detail-head card">
+      <a class="dh-back" href="#/quality" title="返回数据质量" aria-label="返回数据质量"><Icon name="arrowL" :size="18" :sw="2.2"/></a>
+      <div class="dh-title">
+        <div class="dh-crumb"><a href="#/quality">数据质量</a><span>/</span>检测记录<span>/</span>详情</div>
+        <h2>检测 #{{ id }}<Tag v-if="c" :color="CHECK_STATUS[c.status].color" :icon="CHECK_STATUS[c.status].icon">{{ CHECK_STATUS[c.status].text }}</Tag></h2>
+        <span v-if="c" class="muted ell1" :title="c.summary">{{ c.summary }}</span>
+      </div>
+    </div>
+    <div v-if="err" class="alert red">{{ err }}</div>
+    <template v-if="c">
+      <div class="card run-sum">
+        <div class="rs-grid">
+          <div><span>检测时间</span><b>{{ c.created_at }}</b></div>
+          <div><span>方式 · 触发</span><b>{{ howText(c) }}</b></div>
+          <div><span>景区</span><b>{{ c.scenic || '-' }}</b></div>
+          <div><span>检测日期</span><b>{{ rangeText(c) }}</b></div>
+          <div><span>检测次数 · 项数</span><b>{{ c.attempts }} 次 · {{ c.items }} 项</b></div>
+          <div v-if="c.type === 'run'"><span>关联执行</span><b><a :href="'#/runs/' + c.run_id">#{{ c.run_id }}</a> <small class="muted">{{ c.task_name || '临时执行' }}</small></b></div>
+          <div v-else><span>操作人</span><b>{{ c.operator || '-' }}</b></div>
+        </div>
+        <div class="qd-source">
+          <template v-if="c.type === 'run'">检测的是这次跑批<b>刚算出来、还没写库</b>的结果；不通过会重新取数重算，还不通过就回退（不写库、不推送）。
+            <span v-if="c.detail.run_title" class="muted">（{{ c.detail.run_title }}）</span></template>
+          <template v-else>检测的是 {{ c.detail.source }}。</template>
+          <span v-if="c.detail.exception" class="t-red">异常：{{ c.detail.exception }}</span>
+        </div>
+      </div>
+
+      <div v-if="!(c.detail.attempts || []).length" class="card"><Empty text="这次没有走到检测（见上面的说明）"/></div>
+      <div v-for="a in c.detail.attempts" :key="a.attempt" class="card qd-attempt">
+        <div class="card-head"><h3>第 {{ a.attempt }} 次检测<small>{{ a.at }} · {{ (a.steps || []).length }} 项</small></h3>
+          <Tag :color="a.ok ? 'green' : 'pink'" :icon="a.ok ? 'tickCircle' : 'clear'">{{ a.ok ? '全部通过' : (a.errors || []).length + ' 项不通过' }}</Tag></div>
+        <div v-if="!a.ok && a.attempt < c.detail.attempts.length" class="alert orange small">这次不通过，结果作废，重新取数重算后做了第 {{ a.attempt + 1 }} 次检测</div>
+        <div class="qd-steps">
+          <div v-for="s in a.steps" :key="s.key" class="qd-step" :class="{bad: !s.ok, on: open[a.attempt + '.' + s.key]}">
+            <button class="qd-row" @click="toggle(a.attempt + '.' + s.key)">
+              <span class="qd-ico"><Icon :name="s.ok ? 'tickCircle' : 'clear'" :size="18" :sw="2.2"/></span>
+              <b>{{ s.title }}</b>
+              <span class="qd-stats">核对 {{ fmtNum(s.rows) }} 行 · 断言 {{ s.asserts }} 次<template v-if="s.compared != null"> · 比对 {{ fmtNum(s.compared) }} {{ s.key === 'period_sum' ? '格' : '对' }}</template> · {{ s.ms }} ms</span>
+              <span class="grow"></span>
+              <Tag v-if="!s.ok" color="pink">{{ s.issue_total ? s.issue_total + ' 处' : (s.errors || []).length + ' 项' }}</Tag>
+              <span class="chev" :class="{on: open[a.attempt + '.' + s.key]}"><Icon name="down" :size="16"/></span>
+            </button>
+            <div v-if="open[a.attempt + '.' + s.key]" class="qd-body">
+              <div class="qd-sec"><span class="ng-lab">查了什么</span><ul><li v-for="(r,i) in s.rules" :key="i">{{ r }}</li></ul></div>
+              <div v-if="(s.errors || []).length" class="qd-sec"><span class="ng-lab bad">哪里不对</span>
+                <ul class="errs"><li v-for="(e,i) in s.errors" :key="i">{{ e }}</li></ul></div>
+              <div v-if="(s.issues || []).length" class="qd-sec"><span class="ng-lab bad">对比的数值</span>
+                <div class="s-table-wrap"><table class="mini-table qd-issues">
+                  <thead><tr><th>日期</th><th>渠道</th><th>字段</th><th>对比的行</th><th>数值</th></tr></thead>
+                  <tbody><tr v-for="(it, i) in s.issues" :key="i">
+                    <td>{{ it.date }}</td><td>{{ CHANNELS[it.channel] || it.channel }}</td><td>{{ it.field }}</td>
+                    <td><template v-if="s.key === 'period_sum'">{{ (it.rows || [])[0] }} 的评论数 vs 区间内每天 td 合计</template>
+                      <template v-else>{{ (it.rows || []).join(' vs ') }}</template></td>
+                    <td><b class="t-red">{{ (it.values || []).join(' vs ') }}</b></td></tr></tbody></table></div>
+                <div v-if="s.issue_total > s.issues.length" class="muted small">共 {{ s.issue_total }} 处，这里只列前 {{ s.issues.length }} 处</div></div>
+              <div v-if="s.ok" class="muted small">这一项全部通过。</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </template>
   </div>`,
 }

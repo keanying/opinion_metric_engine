@@ -30,6 +30,7 @@ TABLE_TASK = "dim_trf_social_opinion_task_f"
 TABLE_SETTING = "dim_trf_social_opinion_service_setting_f"
 TABLE_RUN = "dwd_trf_social_opinion_task_run_di"
 TABLE_SCHEDULE_LOG = "dwd_trf_social_opinion_schedule_log_di"
+TABLE_QUALITY = "dwd_trf_social_opinion_quality_check_di"
 
 DDL_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
                         "sql", "sys_trf_social_opinion_service_ddl.sql")
@@ -66,6 +67,15 @@ create table if not exists {TABLE_SCHEDULE_LOG} (
     task_id integer, task_name text not null default '', log_level text not null default 'info',
     log_content text not null default '');
 create index if not exists idx_schedule_log_date on {TABLE_SCHEDULE_LOG} (travel_date);
+create table if not exists {TABLE_QUALITY} (
+    check_id integer primary key autoincrement, travel_date integer not null,
+    check_type text not null default 'run', trigger_type text not null default '', run_id integer,
+    task_id integer, task_name text not null default '', scenic_id text not null default '',
+    start_date integer, end_date integer, check_status text not null default 'pass',
+    attempt_cnt integer not null default 1, item_cnt integer not null default 0, issue_cnt integer not null default 0,
+    check_summary text not null default '', check_detail text, operator text not null default '',
+    create_time text not null);
+create index if not exists idx_quality_check_date on {TABLE_QUALITY} (travel_date);
 """
 
 _IDENT = re.compile(r"^[A-Za-z0-9_]+$")
@@ -139,6 +149,7 @@ class Store:
                 self._ensure_tables()
         self.t_task, self.t_setting = q(TABLE_TASK), q(TABLE_SETTING)
         self.t_run, self.t_log = q(TABLE_RUN), q(TABLE_SCHEDULE_LOG)
+        self.t_quality = q(TABLE_QUALITY)
 
     @classmethod
     def sqlite(cls, path: str) -> "Store":
@@ -171,7 +182,8 @@ class Store:
         rows = self._all("select table_name as t from information_schema.tables where table_schema=?",
                          (self.database,))
         have = {r["t"] for r in rows}
-        missing = [f"{self.database}.{t}" for t in (TABLE_TASK, TABLE_SETTING, TABLE_RUN, TABLE_SCHEDULE_LOG)
+        missing = [f"{self.database}.{t}" for t in (TABLE_TASK, TABLE_SETTING, TABLE_RUN, TABLE_SCHEDULE_LOG,
+                                                    TABLE_QUALITY)
                    if t not in have]
         if not missing:
             return
@@ -300,6 +312,63 @@ class Store:
 
     def delete_events_before(self, before: str) -> int:
         return self._exec(f"delete from {self.t_log} where log_time<?", (before,)).rowcount
+
+    # ------------------------------------------------------------ 数据质量检测记录
+    def add_check(self, *, check_type: str, trigger: str, scenic: str, start: str, end: str, status: str,
+                  attempts: int, items: int, issues: int, summary: str, detail: dict,
+                  run_id: Optional[int] = None, task: Optional[dict] = None, operator: str = "") -> int:
+        t = now_str()
+        cur = self._exec(
+            f"insert into {self.t_quality} (travel_date, check_type, trigger_type, run_id, task_id, task_name,"
+            f" scenic_id, start_date, end_date, check_status, attempt_cnt, item_cnt, issue_cnt, check_summary,"
+            f" check_detail, operator, create_time) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (_ymd(t), check_type, trigger, run_id, task["id"] if task else None, task["name"] if task else "",
+             scenic, int(start) if start else None, int(end) if end else None, status, int(attempts),
+             int(items), int(issues), summary[:1000], json.dumps(detail, ensure_ascii=False, default=str),
+             operator[:64], t))
+        return int(cur.lastrowid)
+
+    @staticmethod
+    def _check(r: dict, full: bool = False) -> Dict[str, Any]:
+        d = {"id": int(r["check_id"]), "type": r["check_type"], "trigger": r["trigger_type"], "run_id": r["run_id"],
+             "task_id": r["task_id"], "task_name": r["task_name"], "scenic": r["scenic_id"],
+             "start": str(r["start_date"] or ""), "end": str(r["end_date"] or ""), "status": r["check_status"],
+             "attempts": int(r["attempt_cnt"] or 0), "items": int(r["item_cnt"] or 0),
+             "issues": int(r["issue_cnt"] or 0), "summary": r["check_summary"], "operator": r["operator"],
+             "created_at": _ts(r["create_time"])}
+        if full:
+            d["detail"] = _loads(r["check_detail"], {})
+        return d
+
+    def list_checks(self, status: str = "", check_type: str = "", scenic: str = "", since: str = "",
+                    kw: str = "", limit: int = 50, offset: int = 0) -> Dict[str, Any]:
+        where, params = ["1=1"], []
+        for col, v in (("check_status", status), ("check_type", check_type), ("scenic_id", scenic)):
+            if v:
+                where.append(f"{col}=?")
+                params.append(v)
+        if since:
+            where.append("travel_date>=?")
+            params.append(_ymd(since))
+        if kw:
+            where.append("(scenic_id like ? or task_name like ? or check_summary like ?)")
+            params += [f"%{kw}%"] * 3
+        w = " and ".join(where)
+        cols = ("check_id, check_type, trigger_type, run_id, task_id, task_name, scenic_id, start_date, end_date,"
+                " check_status, attempt_cnt, item_cnt, issue_cnt, check_summary, operator, create_time")
+        total = self._all(f"select count(*) as n from {self.t_quality} where {w}", params)[0]["n"]
+        rows = self._all(f"select {cols} from {self.t_quality} where {w} order by check_id desc limit ? offset ?",
+                         params + [int(limit), int(offset)])
+        counts = {r["check_status"]: int(r["n"]) for r in self._all(
+            f"select check_status, count(*) as n from {self.t_quality} where {w} group by check_status", params)}
+        return {"total": int(total), "counts": counts, "items": [self._check(r) for r in rows]}
+
+    def get_check(self, check_id: int) -> Optional[Dict[str, Any]]:
+        rows = self._all(f"select * from {self.t_quality} where check_id=?", (int(check_id),))
+        return self._check(rows[0], full=True) if rows else None
+
+    def delete_checks_before(self, before: str) -> int:
+        return self._exec(f"delete from {self.t_quality} where create_time<?", (before,)).rowcount
 
     # ------------------------------------------------------------ 执行记录
     @staticmethod
