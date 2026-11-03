@@ -357,8 +357,9 @@ class App:
         return d if os.path.isabs(d) else os.path.join(APP_ROOT, d)
 
     def push_logs(self, date: str = "", result: str = "", keyword: str = "",
-                  limit: int = 200) -> dict:
-        """推送记录（pusher 每个请求一行 JSON，logs/push_yyyyMMdd.log）。"""
+                  limit: int = 50, offset: int = 0) -> dict:
+        """推送记录（pusher 每个请求一行 JSON，logs/push_yyyyMMdd.log），新的在前。
+        分页：offset / limit；total 是符合筛选条件的条数，counts / rows_ok 统计当天全部。"""
         d = self._push_log_dir()
         files = sorted((f for f in (os.listdir(d) if d and os.path.isdir(d) else [])
                         if re.fullmatch(r"push_\d{8}\.log", f)), reverse=True)
@@ -366,7 +367,7 @@ class App:
         date = date or (dates[0] if dates else "")
         if date and not re.fullmatch(r"\d{8}", date):
             raise ApiError(400, "日期格式是 yyyyMMdd")
-        items, counts, rows = [], {}, 0
+        items, counts, rows, total = [], {}, 0, 0
         path = os.path.join(d, f"push_{date}.log") if d and date else ""
         if path and os.path.exists(path):
             with open(path, encoding="utf-8", errors="replace") as f:
@@ -384,14 +385,15 @@ class App:
                     continue
                 if keyword and keyword not in json.dumps(r, ensure_ascii=False):
                     continue
-                if len(items) < limit:
+                total += 1
+                if offset < total <= offset + limit:
                     resp = r.get("response")
                     if isinstance(resp, str) and len(resp) > 2000:
                         r["response"] = resp[:2000] + "…"
                     r.pop("url", None)
                     items.append(r)
         return {"dir": d, "dates": dates[:60], "date": date, "counts": counts,
-                "rows_ok": rows, "items": items}
+                "rows_ok": rows, "total": total, "items": items}
 
     # ------------------------------------------------------------ 执行记录
     def get_run(self, run_id: int) -> dict:
@@ -731,7 +733,8 @@ def _route_table(app: App):
         ("GET", r"/api/push/settings", lambda m, q, b: app.push_settings_view()),
         ("PUT", r"/api/push/settings", lambda m, q, b: app.save_push_settings(b)),
         ("GET", r"/api/push/logs", lambda m, q, b: app.push_logs(
-            q1(q, "date"), q1(q, "result"), q1(q, "q"), min(I(q1(q, "limit", "200")), 1000))),
+            q1(q, "date"), q1(q, "result"), q1(q, "q"), min(I(q1(q, "limit", "50")), 1000),
+            max(I(q1(q, "offset", "0")), 0))),
         ("POST", r"/api/tasks", lambda m, q, b: app.create_task(b)),
         ("PUT", r"/api/tasks/(\d+)", lambda m, q, b: app.update_task(I(m[1]), b)),
         ("DELETE", r"/api/tasks/(\d+)", lambda m, q, b: app.store.delete_task(I(m[1])) or {"ok": True}),

@@ -18,11 +18,21 @@ export default {
         for (const k of ['push_batch_size', 'push_timeout', 'push_retries']) if (form[k] === null) form[k] = '' }
       catch (e) { notify(e.message, 'err') }
     }
+    // 推送记录：固定高度的窗口，先拿 PAGE 条，滚到底（或点「加载更多」）再接着拿下一批
+    const PAGE = 50, moreLogs = ref(false)
+    const logQuery = offset => '/api/push/logs?' + new URLSearchParams({ date: q.date, result: q.result, q: q.kw, offset, limit: PAGE })
     const loadLogs = async () => {
       loadingLogs.value = true
-      try { logs.value = await api('/api/push/logs?' + new URLSearchParams({ date: q.date, result: q.result, q: q.kw }))
+      try { logs.value = await api(logQuery(0))
         if (!q.date) q.date = logs.value.date }
       catch (e) { notify(e.message, 'err') } finally { loadingLogs.value = false }
+    }
+    const loadMoreLogs = async () => {
+      const cur = logs.value
+      if (!cur || moreLogs.value || loadingLogs.value || cur.items.length >= cur.total) return
+      moreLogs.value = true
+      try { const r = await api(logQuery(cur.items.length)); logs.value = { ...r, items: cur.items.concat(r.items) } }
+      catch (e) { notify(e.message, 'err') } finally { moreLogs.value = false }
     }
     onMounted(() => { loadView(); loadLogs() })
     const save = async (patch) => {
@@ -54,7 +64,7 @@ export default {
       { key: 'rows', title: '行数', width: 80, align: 'r' }, { key: 'result', title: '结果', width: 120 },
       { key: 'resp', title: '响应', width: 260 }, { key: 'op', title: '', width: 56, align: 'r' }]
     const ymd = s => s ? `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6)}` : ''
-    return { view, form, saving, save, setMaster, logs, q, loadLogs, loadingLogs, reset, re, toggleRe, doRepush,
+    return { view, form, saving, save, setMaster, logs, q, loadLogs, loadMoreLogs, moreLogs, loadingLogs, reset, re, toggleRe, doRepush,
              parts, total, okRate, cols, detail, ymd, TABLES, TABLE_LABEL, PUSH_RESULT, fmtNum, todayYmd }
   },
   template: `
@@ -115,15 +125,15 @@ export default {
       </div>
     </div>
 
-    <div class="card">
-      <div class="card-head stick"><h3>推送记录<Tip text="每个请求一行：推了哪个表、哪个景区、对方怎么回的；点右边的眼睛看完整响应"/></h3>
+    <div class="card fill push-logs">
+      <div class="card-head"><h3>推送记录<Tip text="每个请求一行：推了哪个表、哪个景区、对方怎么回的；点右边的眼睛看完整响应"/></h3>
         <div class="toolbar">
           <DatePicker v-model="q.date" :clearable="false" placeholder="推送日期" @change="loadLogs" />
           <select v-model="q.result" @change="loadLogs"><option value="">全部结果</option>
             <option v-for="(v,k) in PUSH_RESULT" :key="k" :value="k">{{ v.text }}</option></select>
           <span class="search"><Icon name="search" :size="15"/><input v-model="q.kw" placeholder="景区 / 表 / 响应内容" @keyup.enter="loadLogs"/></span>
           <button class="btn light" @click="reset">重置</button></div></div>
-      <STable :columns="cols" :data="logs ? logs.items : []" :loading="loadingLogs" :min-height="350" row-key="__k">
+      <STable :columns="cols" :data="logs ? logs.items : []" :loading="loadingLogs" row-key="__k" scroll @reach-end="loadMoreLogs">
         <template #time="{ row }">{{ (row.time || '').slice(11) }}</template>
         <template #table="{ row }"><span class="s-name"><Avatar square icon="db" :color="row.table && row.table.includes('macro') ? 'indigo' : row.table && row.table.includes('drill') ? 'violet' : 'light-blue'"/>
           <span class="s-ell" :title="row.push_table || row.table"><b>{{ TABLE_LABEL[row.table] || row.table }}</b><small>{{ row.push_table || row.table }}</small></span></span></template>
@@ -135,6 +145,11 @@ export default {
           {{ (PUSH_RESULT[row.result]||{}).text || row.result }}</Tag><small v-if="row.status" class="muted"> {{ row.status }}</small></template>
         <template #resp="{ row }"><span class="s-ell mono" :title="row.response || row.error">{{ row.response || row.error || '-' }}</span></template>
         <template #op="{ row }"><button class="s-btn-icon" title="查看完整响应" @click="detail = row"><Icon name="eye" :size="16"/></button></template>
+        <template #foot><div v-if="logs && logs.items.length" class="s-table-foot">
+          <template v-if="moreLogs">加载中…</template>
+          <template v-else-if="logs.items.length < logs.total">已显示 {{ logs.items.length }} / 共 {{ logs.total }} 条，往下滚动加载更多
+            <a class="link" @click.stop="loadMoreLogs">加载更多</a></template>
+          <template v-else>已全部显示（共 {{ logs.total }} 条）</template></div></template>
       </STable>
     </div>
 

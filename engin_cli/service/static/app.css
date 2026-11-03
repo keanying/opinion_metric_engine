@@ -855,11 +855,13 @@ details summary { cursor: pointer; color: var(--primary); font-size: 13px; margi
 .s-table-wrap.scroll thead th { position: sticky; top: 0; z-index: 2; }
 .page-fill > .fixed-log { margin-bottom: 0; }
 .page-fill > .fixed-log .evlog { height: 190px; max-height: none; }
+.card.fill.push-logs { height: max(440px, calc(100vh - 130px)); display: flex; flex-direction: column; overflow: hidden; }   /* 推送页：推送记录固定窗口 */
 .s-table-foot { padding: 12px 4px 2px; text-align: center; font-size: 12px; color: var(--muted); }
 .s-table-foot .link { margin-left: 8px; cursor: pointer; }
 @media (max-width: 860px) {                 /* 手机：整页正常滚动，不固定高度 */
   .page-fill { height: auto; display: block; }
   .card.fill > .s-table-wrap.scroll { max-height: 70vh; }
+  .card.fill.push-logs { height: auto; }
 }
 
 /* 执行详情：顶部标题栏（圆形返回按钮 + 面包屑 + 标题 / 状态 + 说明） */

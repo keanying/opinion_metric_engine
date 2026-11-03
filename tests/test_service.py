@@ -730,7 +730,11 @@ def test_push_settings_and_logs_api(server, tmp_path, monkeypatch):
     assert lg["date"] == "20261102" and lg["counts"] == {"ok": 1, "http_error": 1} and lg["rows_ok"] == 10
     assert lg["items"][0]["result"] == "http_error" and "url" not in lg["items"][1]
     code, lg = _call(base, "/api/push/logs?result=ok")
-    assert [x["result"] for x in lg["items"]] == ["ok"]
+    assert [x["result"] for x in lg["items"]] == ["ok"] and lg["total"] == 1
+    code, lg = _call(base, "/api/push/logs?limit=1")                  # 分页：新的在前
+    assert lg["total"] == 2 and [x["result"] for x in lg["items"]] == ["http_error"]
+    code, lg = _call(base, "/api/push/logs?limit=1&offset=1")
+    assert lg["total"] == 2 and [x["result"] for x in lg["items"]] == ["ok"] and lg["counts"]["ok"] == 1
     assert _call(base, "/api/push/logs?date=bad")[0] == 400
 
 
