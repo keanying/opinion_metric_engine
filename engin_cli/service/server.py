@@ -846,6 +846,16 @@ def serve(settings, host: Optional[str] = None, port: Optional[int] = None,
     except (ValueError, OSError) as e:
         print(f"✗ 启动失败：{e}")
         return 2
+    # kill / systemctl stop / scripts/service.sh stop 发的是 SIGTERM：跟 Ctrl+C 一样正常退出
+    # （停定时、结束正在跑的子进程，执行记录标成「服务重启，执行被中断」），不留孤儿进程
+    import signal
+
+    def _on_term(*_):
+        raise KeyboardInterrupt
+    try:
+        signal.signal(signal.SIGTERM, _on_term)
+    except ValueError:                                  # 不在主线程（测试里）就算了
+        pass
     app.start()
     print("=" * 72)
     print(f"指标计算服务已启动：http://{host}:{port}/"

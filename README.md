@@ -59,7 +59,7 @@ python -m pytest -q
 看执行日志、数据质量、历史记录、ADS 指标、推送设置与推送记录。只用标准库（http.server）+ 已有的 pymysql；任务 / 设置 / 执行记录 / 调度日志存 MySQL 系统表，和计算指标同一个库
 （`dim_trf_social_opinion_*_f` / `dwd_trf_social_opinion_*_di`，`sql/sys_trf_social_opinion_service_ddl.sql`），
 前端是 Vue 3（`engin_cli/service/static/vendor/`，免构建）。每次执行在子进程里跑 `engin_cli.cli run`，一次一个。
-部署 / 页面说明见《使用说明》第三·五节。
+服务器上用 `bash scripts/service.sh {status|start|restart|stop}` 检测 / 启动 / 重启 / 停止。部署 / 页面说明见《使用说明》第三·五节。
 
 ## 源字段 → 指标 的映射
 
