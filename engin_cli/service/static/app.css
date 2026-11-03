@@ -32,12 +32,14 @@ input, select, textarea, button { font: inherit; color: inherit; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ── 外框 / 侧栏 / 顶栏 ─────────────────────────────────────────── */
+/* 顶栏和侧栏固定不动，只有右边内容区滚动 */
+html, body { height: 100%; overflow: hidden; }
 .frame {
-  position: relative; display: flex; flex-direction: column; margin: 18px; min-height: calc(100vh - 36px);
-  background: var(--frame); border-radius: 32px; overflow: clip; padding: 22px 28px 28px 22px;
+  position: relative; display: flex; flex-direction: column; margin: 18px; height: calc(100vh - 36px);
+  background: var(--frame); border-radius: 32px; overflow: hidden; padding: 22px 0 0 22px;
 }
 /* 顶栏：logo + 问候 + 搜索 / 状态 / 圆形图标按钮 */
-.topbar { display: flex; align-items: center; gap: 16px; margin: 4px 0 20px; }
+.topbar { flex: none; display: flex; align-items: center; gap: 16px; margin: 4px 0 20px; padding-right: 28px; }
 .brand { flex: none; display: grid; place-items: center; width: 56px; }
 .hello { flex: 1; min-width: 0; }
 .hello h1 { font-size: 24px; font-weight: 600; letter-spacing: .3px; line-height: 1.25; }
@@ -58,8 +60,8 @@ input, select, textarea, button { font: inherit; color: inherit; }
 /* 侧栏 + 内容 */
 .body { display: flex; gap: 22px; flex: 1; min-height: 0; }
 .side {
-  position: sticky; top: 18px; z-index: 3; flex: none; align-self: flex-start;
-  width: 56px; height: calc(100vh - 170px); min-height: 460px; max-height: 720px; padding: 12px 0;
+  position: relative; z-index: 3; flex: none; align-self: flex-start;
+  width: 56px; height: calc(100% - 28px); max-height: 760px; padding: 12px 0;
   background: #fff; border-radius: 28px; box-shadow: var(--shadow);
   display: flex; flex-direction: column; align-items: center;
 }
@@ -81,7 +83,9 @@ input, select, textarea, button { font: inherit; color: inherit; }
   width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; color: #fff; font-weight: 700;
   background: #2b302d; box-shadow: 0 0 0 3px #fff, 0 0 0 4px #e2e0da;
 }
-.main { position: relative; z-index: 1; flex: 1; min-width: 0; }
+.main { position: relative; z-index: 1; flex: 1; min-width: 0; height: 100%; overflow-y: auto; overscroll-behavior: contain;
+  padding: 2px 28px 28px 2px; scrollbar-width: none; }
+.main::-webkit-scrollbar { display: none; }
 .main > * { max-width: 1680px; margin-left: auto; margin-right: auto; }
 .tb-space { flex: 1; }
 
@@ -260,7 +264,7 @@ input::placeholder { color: #b3b1aa; }
 .opts.compact .opt { padding: 10px 0; }
 /* 任务编辑：左边表单，右边预览 + 调度日志（滚动时右栏跟着）*/
 .te-layout { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 20px; align-items: start; }
-.te-side { position: sticky; top: 18px; }
+.te-side { position: sticky; top: 0; }
 .te-side .evlog { max-height: 340px; }
 .te-main .tiles { grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }
 .pv-list { display: flex; flex-direction: column; gap: 2px; }
@@ -606,7 +610,10 @@ details summary { cursor: pointer; color: var(--primary); font-size: 13px; margi
   .kpis { grid-template-columns: 1fr 1fr; }
 }
 @media (max-width: 860px) {
-  .frame { margin: 0; border-radius: 0; min-height: 100vh; padding: 14px 14px 40px; }
+  html, body { height: auto; overflow: visible; }
+  .frame { margin: 0; border-radius: 0; height: auto; min-height: 100vh; padding: 14px 14px 40px; overflow: visible; }
+  .topbar { padding-right: 0; }
+  .main { height: auto; overflow: visible; padding: 0; }
   .body { flex-direction: column; gap: 14px; }
   .side { position: sticky; top: 0; width: auto; height: auto; min-height: 0; max-height: none; padding: 6px 10px;
           border-radius: 26px; flex-direction: row; align-self: stretch; }

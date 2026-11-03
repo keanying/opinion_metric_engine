@@ -1,5 +1,5 @@
 // 入口：外框 + 图标侧栏 + 顶栏 + 极简 hash 路由（#/tasks、#/runs/12 …）。新增页面：在 ROUTES 里加一行即可。
-import { createApp, reactive, computed, h, ref, watchEffect, onMounted, onUnmounted } from 'vue'
+import { createApp, reactive, computed, h, ref, onMounted, onUnmounted } from 'vue'
 import { toast, sched, refreshSched, search } from './api.js'
 import { installUI } from './ui.js'
 import Overview from './pages/overview.js'
@@ -34,7 +34,10 @@ const NAV = [
 
 const route = reactive({ path: '/' })
 const sync = () => { route.path = (location.hash.replace(/^#/, '') || '/').split('?')[0] }
-window.addEventListener('hashchange', () => { sync(); window.scrollTo(0, 0) })
+window.addEventListener('hashchange', () => {
+  sync(); window.scrollTo(0, 0)
+  const m = document.querySelector('.main'); if (m) m.scrollTop = 0      // 内容区自己滚动，换页回到顶部
+})
 sync()
 
 const RouterLink = {
@@ -52,7 +55,7 @@ const App = {
       return { r: ROUTES[0], props: {} }
     })
     let timer
-    watchEffect(() => { document.title = `${current.value.r.title} · 舆情指标计算服务` })
+    document.title = '标签计算中心'                      // 浏览器标签页标题固定
     onMounted(() => { refreshSched(); timer = setInterval(refreshSched, 15000) })
     onUnmounted(() => clearInterval(timer))
     const pill = computed(() => {
