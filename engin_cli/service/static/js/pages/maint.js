@@ -93,7 +93,7 @@ export default {
       </div>
     </div>
 
-    <TaskBody v-if="!rr.task" :cfg="cfg" :push-off="pushOff" />
+    <TaskBody v-if="!rr.task" :cfg="cfg" :push-off="pushOff" once />
 
     <div v-if="fsEdit" class="modal-mask" @click.self="fsEdit=null">
       <div class="modal narrow">

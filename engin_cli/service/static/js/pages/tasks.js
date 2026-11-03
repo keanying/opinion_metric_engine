@@ -31,7 +31,8 @@ export const EventLog = {
 
 // ── 任务参数（日期 / 计算哪些表 / 推送 / 选项），任务编辑和维护页「临时执行」共用 ──
 export const TaskBody = {
-  props: { cfg: Object, pushOff: Boolean, withCopies: Boolean },
+  // once：维护页临时执行用，选项只对这一次执行生效、不保存；不传 = 任务编辑，点「保存任务」才生效
+  props: { cfg: Object, pushOff: Boolean, withCopies: Boolean, once: Boolean },
   setup(p) {
     const calc = computed(() => new Set(p.cfg.tables ? split(p.cfg.tables) : KEYS))
     const push = computed(() => new Set(split(p.cfg.push)))
@@ -84,7 +85,7 @@ export const TaskBody = {
 
     <div class="card sect">
       <div class="sect-head"><h3>推送<Tip text="算完推给下游；推送地址、批大小、试推在「推送」页设置；都不选 = 不推送"/></h3>
-        <a href="#/push" class="btn xs light">推送设置 →</a></div>
+        <a href="#/push" class="btn xs light go-btn"><Icon name="gear" :size="13" :sw="2.2"/>推送地址、批大小<Icon name="arrowR" :size="13" :sw="2.4"/></a></div>
       <div v-if="pushOff" class="alert orange">推送总开关已关闭：这个任务现在只算不推（推送页可以打开）</div>
       <div class="push-row">
         <label v-for="t in TABLES" :key="t.key" class="pchk" :class="{off: !calc.has(t.key), on: push.has(t.key)}">
@@ -110,7 +111,7 @@ export const TaskBody = {
     </div>
 
     <div class="card sect">
-      <div class="sect-head"><h3>数据质量与选项</h3></div>
+      <div class="sect-head"><h3>数据质量与选项<small>{{ once ? '只对这一次执行生效，不会保存' : '改完点「保存任务」才生效' }}</small></h3></div>
       <div class="opts">
         <div class="opt"><div><b>质量检测不通过就回退</b><Tip text="先重算（次数不填 = 用 settings），还不通过：不写库、不推送，发飞书通知"/></div>
           <div class="opt-r"><span class="hint">重算</span><input v-model="cfg.quality_retries" class="w64" placeholder="默认"/><span class="hint">次</span>
