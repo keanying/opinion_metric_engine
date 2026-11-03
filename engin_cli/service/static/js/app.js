@@ -89,29 +89,31 @@ const App = {
       await checkHealth()
       if (auth.user) htimer = setTimeout(loopHealth, health.state === 'down' ? 5000 : 10000)
     }
-    const hp = ref(false)                       // 状态面板开没开
-    const closeHp = e => { if (hp.value && !e.target.closest('.hp-wrap')) hp.value = false }
+    const hp = ref(false), me = ref(false)       // 系统状态面板 / 账号卡片开没开
+    // 鼠标移上去展开、移开稍等一下再收（留时间把鼠标移进面板里点「重新检测」「退出登录」）；点一下也能开关（触屏）
+    const hoverOf = flag => { let t
+      return { enter: () => { clearTimeout(t); flag.value = true }, leave: () => { clearTimeout(t); t = setTimeout(() => { flag.value = false }, 220) } } }
+    const hpHover = hoverOf(hp), meHover = hoverOf(me)
+    const closeHp = e => {
+      if (hp.value && !e.target.closest('.hp-wrap')) hp.value = false
+      if (me.value && !e.target.closest('.me-wrap')) me.value = false
+    }
     // 登录后才开始轮询调度状态 / 系统状态，退出登录就停
     const startLoops = () => { if (timer) return; refreshSched(); timer = setInterval(refreshSched, 15000); loopHealth() }
     const stopLoops = () => { clearInterval(timer); clearTimeout(htimer); timer = htimer = null }
     watch(() => !!auth.user, on => (on ? startLoops() : stopLoops()), { immediate: true })
     onMounted(() => { loadMe(); window.addEventListener('mousedown', closeHp) })
     onUnmounted(() => { stopLoops(); window.removeEventListener('mousedown', closeHp) })
-    const doLogout = async () => {
-      const u = auth.user
-      if (!await confirmBox({ title: '退出登录', okText: '退出登录', type: 'warn', message: '退出后要重新输入用户名和密码。',
-        items: [['账号', `${u.display_name}（${u.username}）`], ['角色', u.role_text]]
-          .concat(u.login_at ? [['登录时间', u.login_at]] : []) })) return
-      await logout()
-    }
+    const doLogout = async () => { me.value = false; await logout() }      // 账号卡片里点「退出登录」，意图明确，不再二次确认
     const recheck = () => checkHealth(true).then(() => setTimeout(checkHealth, 1500))
     const checks = computed(() => health.state === 'down'
       ? [{ key: 'service', label: '服务', ok: false, detail: `没有响应（已停止或网络中断），${health.since} 起` }]
       : (health.data?.checks || []))
+    // 顶栏齿轮：正常绿色、有问题红色（服务连不上 / 某个库连不上），正在执行时慢慢转
     const pill = computed(() => {
       if (health.state === 'down') return { cls: 'red', text: '服务连不上 · 可能已停止' }
       const bad = (health.data?.checks || []).filter(c => c.ok === false)
-      if (bad.length) return { cls: 'amber', text: bad.map(c => c.label).join('、') + '连不上' }
+      if (bad.length) return { cls: 'red', text: bad.map(c => c.label).join('、') + '连不上' }
       const d = sched.data
       if (!d) return { cls: 'grey', text: '检测中…' }
       if (!d.available) return { cls: 'grey', text: '定时未启动（--no-scheduler）' }
@@ -129,7 +131,7 @@ const App = {
     }
     window.addEventListener('keydown', onKey)
     const doSearch = () => { search.q = kw.value.trim(); search.n++; kw.value = ''; location.hash = '/tasks' }
-    return { current, route, NAV, toast, pill, kw, doSearch, dialog, health, hp, checks, recheck, auth, doLogout }
+    return { current, route, NAV, toast, pill, kw, doSearch, dialog, health, hp, me, hpHover, meHover, checks, recheck, auth, doLogout, sched }
   },
   template: `
   <div v-if="auth.user === undefined" class="boot">加载中…</div>
@@ -150,11 +152,13 @@ const App = {
       <div class="tb-right">
         <label class="tb-search"><input v-model="kw" placeholder="搜索任务 / 景区…" @keyup.enter="doSearch"/>
           <button @click="doSearch" aria-label="搜索"><Icon name="search" :size="16" :sw="2.2"/></button></label>
-        <div class="hp-wrap">
-          <button class="status-pill" :class="pill.cls" :title="pill.text + '（点开看系统状态）'" @click="hp = !hp"><i></i><span>{{ pill.text }}</span></button>
-          <div v-if="hp" class="hp-pop">
+        <div class="hp-wrap" @mouseenter="hpHover.enter" @mouseleave="hpHover.leave">
+          <button class="tb-gear" :class="[pill.cls === 'red' ? 'red' : 'green', { busy: sched.data && sched.data.running }]"
+            :aria-label="'系统状态：' + pill.text" @click="hp = !hp"><Icon name="gear" :size="20" :sw="2"/><i></i></button>
+          <Transition name="pop"><div v-if="hp" class="hp-pop">
             <div class="hp-head"><b>系统状态</b>
               <span class="hp-state" :class="health.state">{{ {ok: '全部正常', warn: '部分不可用', down: '服务连不上', checking: '检测中'}[health.state] }}</span></div>
+            <div class="hp-now" :class="pill.cls"><i></i>{{ pill.text }}</div>
             <p v-if="health.state === 'down'" class="hp-tip">页面连不上服务：服务可能已经停止，或网络中断。每 5 秒自动重试，恢复后页面会自动刷新。
               服务器上重新启动：<code>python -m engin_cli.cli serve</code></p>
             <ul class="hp-list"><li v-for="c in checks" :key="c.key">
@@ -162,11 +166,19 @@ const App = {
               <b>{{ c.label }}</b><span>{{ c.detail }}</span></li></ul>
             <div class="hp-foot"><span>{{ health.state === 'down' ? '上次正常 ' + (health.lastOk || '—') : '检测于 ' + (health.lastOk || '—') }}</span>
               <a @click="recheck">重新检测</a></div>
-          </div>
+          </div></Transition>
         </div>
-        <a href="#/quality" class="tb-round" title="数据质量"><Icon name="shield" :size="18"/></a>
-        <a href="#/runs" class="tb-round" title="执行记录"><Icon name="bell" :size="18"/></a>
-        <button class="side-me" :title="auth.user.display_name + ' · ' + auth.user.role_text + '（点击退出登录）'" @click="doLogout">{{ auth.user.display_name.slice(0, 1) }}</button>
+        <div class="me-wrap" @mouseenter="meHover.enter" @mouseleave="meHover.leave">
+          <button class="side-me" :aria-label="auth.user.display_name" @click="me = !me">{{ auth.user.display_name.slice(0, 1) }}</button>
+          <Transition name="pop"><div v-if="me" class="me-pop">
+            <div class="me-head"><span class="side-me big">{{ auth.user.display_name.slice(0, 1) }}</span>
+              <div><b>{{ auth.user.display_name }}</b><small>{{ auth.user.username }}</small></div>
+              <span class="hp-state" :class="auth.user.readonly ? '' : 'ok'">{{ auth.user.role_text }}</span></div>
+            <dl class="me-kv"><dt>登录时间</dt><dd>{{ auth.user.login_at || '—' }}</dd>
+              <dt>权限</dt><dd>{{ auth.user.readonly ? '只能查看' : auth.user.role === 'admin' ? '全部（含系统设置）' : '执行、编辑任务（系统设置除外）' }}</dd></dl>
+            <button class="btn light danger me-out" @click="doLogout"><Icon name="logout" :size="15" :sw="2.2"/>退出登录</button>
+          </div></Transition>
+        </div>
       </div>
     </header>
     <div class="body">

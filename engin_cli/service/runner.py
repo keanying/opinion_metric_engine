@@ -86,6 +86,25 @@ def push_overrides(ps: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def normalize_notify_settings(data: Optional[dict]) -> Dict[str, str]:
+    """飞书通知设置（页面上配，存系统表 service_setting 的 notify）：留空 = 用 settings_local / 环境变量的。"""
+    d = data or {}
+    out = {"feishu_webhook": str(d.get("feishu_webhook") or "").strip(),
+           "feishu_secret": str(d.get("feishu_secret") or "").strip()}
+    if out["feishu_webhook"] and not out["feishu_webhook"].lower().startswith("https://"):
+        raise ValueError("飞书机器人地址要以 https:// 开头")
+    return out
+
+
+def notify_overrides(ns: Dict[str, str]) -> Dict[str, str]:
+    """通知设置 → 传给子进程的 OPINION_SETTINGS_JSON（只放页面上配了的）。"""
+    out = {}
+    if ns.get("feishu_webhook"):
+        out["notify_feishu_webhook"] = ns["feishu_webhook"]
+        out["notify_feishu_secret"] = ns.get("feishu_secret", "")
+    return out
+
+
 def apply_push_switch(argv: List[str], enabled: bool) -> List[str]:
     """推送总开关关着：run 命令去掉 --push xxx，换成 --no-push；mock 改成只预览报文、不发送。"""
     if enabled or not argv:
@@ -313,6 +332,12 @@ class Runner:
             if self._proc and self._proc.poll() is None:
                 self._proc.terminate()
 
+    def notify_settings(self) -> Dict[str, str]:
+        try:
+            return normalize_notify_settings(self.store.get_kv("notify", {}))
+        except ValueError:
+            return normalize_notify_settings({})
+
     def push_settings(self) -> Dict[str, Any]:
         try:
             return normalize_push_settings(self.store.get_kv("push", {}))
@@ -442,8 +467,9 @@ class Runner:
         cmd = [self.python, "-m", "engin_cli.cli"] + argv
         env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
         over = push_overrides(ps)
-        if over:
-            env["OPINION_SETTINGS_JSON"] = json.dumps(over, ensure_ascii=False)
+        nover = notify_overrides(self.notify_settings())
+        if over or nover:
+            env["OPINION_SETTINGS_JSON"] = json.dumps({**over, **nover}, ensure_ascii=False)
         else:
             env.pop("OPINION_SETTINGS_JSON", None)
         self._current = run_id
@@ -455,6 +481,8 @@ class Runner:
             if over:
                 logf.write("（推送设置来自服务页面：" + "，".join(
                     f"{k}={v}" for k, v in over.items()) + "）\n")
+            if nover:
+                logf.write("（飞书通知地址来自服务页面）\n")       # 地址里带令牌，不写进日志
             logf.write("\n")
             logf.flush()
             with self._lock:

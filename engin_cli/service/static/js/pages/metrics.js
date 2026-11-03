@@ -70,7 +70,7 @@ export default {
       <div class="toolbar wrap">
         <ScenicPicker v-model="q.scenic" single placeholder="选择景区" width="300px" />
         <DatePicker v-model="q.date" placeholder="默认最新一天" @change="load" />
-        <button class="btn primary sm" @click="load"><Icon name="search" :size="14"/>查询</button>
+        <button class="btn primary" @click="load"><Icon name="search" :size="14"/>查询</button>
         <div class="seg"><button v-for="g in GRANULARITIES" :key="g[0]" :class="{on: q.granularity===g[0]}"
           @click="q.granularity=g[0]">{{ g[1] }}</button></div>
       </div>

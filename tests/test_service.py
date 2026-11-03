@@ -592,6 +592,42 @@ def test_maintenance_actions(server, tmp_path):
     assert code == 200 and c["deleted_runs"] == 0                       # 7 天下限，刚跑的不删
 
 
+def test_maint_rerun_existing_task_for_a_date_range(server):
+    """重跑一段日期：选已有任务，按它的配置跑选的这段日期（任务本身不改）。"""
+    base, app, _ = server
+    tid = app.store.create_task("九寨沟每日", {"scenics": "S1", "date_mode": "yesterday", "tables": "drill,macro",
+                                             "push": "macro"}, {"times": ["08:10"]})
+    code, r = _call(base, "/api/maint/run", "POST", {"task_id": tid, "start": "20261027", "end": "20261103"})
+    assert code == 200
+    run = app.store.get_run(r["run_id"])
+    assert run["title"] == "重跑 · 九寨沟每日 · 20261027~20261103" and run["task_id"] == tid
+    argv = " ".join(run["command"])
+    assert "--start-date 20261027 --end-date 20261103" in argv and "--scenic S1" in argv
+    assert "--tables drill,macro" in argv and "--push macro" in argv
+    assert app.store.get_task(tid)["config"]["date_mode"] == "yesterday"   # 任务本身不改
+    assert _call(base, "/api/maint/run", "POST", {"task_id": tid, "start": "20261105", "end": "20261101"})[0] == 400
+    assert _call(base, "/api/maint/run", "POST", {"task_id": 9999, "start": "20261101"})[0] == 404
+
+
+def test_notify_settings_api(server):
+    """飞书通知：页面上设置的优先；地址里带令牌，接口只回打码后的；只有管理员能改。"""
+    base, app, _ = server
+    hook = "https://open.feishu.cn/open-apis/bot/v2/hook/TESTTOKEN0123456789"
+    code, v = _call(base, "/api/notify/settings")
+    assert code == 200 and not v["page_set"]
+    assert _call(base, "/api/notify/settings", "PUT", {"webhook": hook})[0] == 403   # 操作员不能改
+    _login_as(base, "boss")
+    assert _call(base, "/api/notify/settings", "PUT", {"webhook": "http://x"})[0] == 400
+    code, v = _call(base, "/api/notify/settings", "PUT", {"webhook": hook, "secret": "sec"})
+    assert code == 200 and v["source"] == "page" and v["secret"] and "TESTTOKEN" not in json.dumps(v)
+    code, v = _call(base, "/api/notify/settings", "PUT", {"webhook": ""})              # 留空 = 不改
+    assert v["page_set"] and v["secret"] and app.runner.notify_settings()["feishu_webhook"] == hook
+    code, cfg = _call(base, "/api/config")
+    assert cfg["数据质量"]["notify_feishu_from"] == "服务页面" and "TESTTOKEN" not in json.dumps(cfg)
+    code, v = _call(base, "/api/notify/settings", "PUT", {"clear": True})
+    assert not v["page_set"] and app.runner.notify_settings()["feishu_webhook"] == ""
+
+
 def test_login_with_user_table(server):
     """必须登录：用 SMC 的用户表；输错 5 次锁定；停用不能登录；角色同 SMC（只读 / 操作员不能改系统设置）。"""
     base, app, _ = server
@@ -699,6 +735,14 @@ def test_runner_push_switch_and_overrides_reach_subprocess(runner, tmp_path):
     rid = runner.submit("run", ["run", "--date", "20261102", "--push", "drill"], "t")
     text = open(_done(runner, rid)["log_path"], encoding="utf-8").read()
     assert "推送总开关已关闭" not in text and "--push drill" in text and "JSON=\n" in text
+    # 页面上设置的飞书地址传给子进程；日志头不写地址（带令牌）
+    hook = "https://open.feishu.cn/open-apis/bot/v2/hook/TESTTOKEN0123456789"
+    runner.store.set_kv("notify", {"feishu_webhook": hook, "feishu_secret": ""})
+    rid = runner.submit("notify", ["notify-test"], "t")
+    text = open(_done(runner, rid)["log_path"], encoding="utf-8").read()
+    head, out = text.split("ARGS=", 1)
+    assert "飞书通知地址来自服务页面" in head and "TESTTOKEN" not in head
+    assert f'"notify_feishu_webhook": "{hook}"' in out
 
 
 def _login_as(base, username):

@@ -34,7 +34,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .runner import (APP_ROOT, PUSH_DEFAULTS, TABLE_KEYS, Runner, TASK_DEFAULTS, apply_push_switch,
                      build_push_argv, build_run_argv, build_task_argv, normalize_config, normalize_push_settings,
-                     push_overrides, task_dates)
+                     push_overrides, task_dates, normalize_notify_settings)
 from .auth import COOKIE, SESSION_HOURS, Auth, AuthError, UserRepository, denied_reason
 from .scheduler import GRACE, Scheduler, next_fire, normalize_times
 from .store import Store, StoreError, now_str
@@ -660,12 +660,55 @@ class App:
         return {"run_id": self.runner.submit("push", argv, title)}
 
     def maint_run(self, body: dict) -> dict:
-        """临时跑一次（不建任务）：参数同任务配置。"""
+        """重跑一段日期：
+        · 传 task_id + start / end：按已有任务的配置（景区、表、推送、质量、跑完后复制）跑这段日期；
+        · 不传 task_id：临时跑一次（不建任务），参数同任务配置（config）。"""
+        if body.get("task_id"):
+            t = self.store.get_task(int(body["task_id"]))
+            if not t:
+                raise ApiError(404, "任务不存在")
+            start, end = str(body.get("start") or ""), str(body.get("end") or body.get("start") or "")
+            cfg = dict(t["config"], date_mode="range", start_date=start, end_date=end)
+            try:
+                kind, argv, _, then = build_task_argv(cfg)
+            except ValueError as e:
+                raise ApiError(400, str(e))
+            title = f"重跑 · {t['name']} · " + (start if start == end else f"{start}~{end}")
+            return {"run_id": self.runner.submit(kind, argv, title, "manual", t, then=then)}
         try:
             argv, title = build_run_argv(body.get("config") or {})
         except ValueError as e:
             raise ApiError(400, str(e))
         return {"run_id": self.runner.submit("run", argv, "临时 · " + title)}
+
+    # ------------------------------------------------------------ 飞书通知设置
+    def notify_settings_view(self) -> dict:
+        """页面上配的飞书机器人（优先）；没配就用 settings_local / 环境变量的。地址里带令牌，只回打码后的。"""
+        ns, st = self.runner.notify_settings(), self.settings
+        page, base = ns["feishu_webhook"], str(st.notify_feishu_webhook or "")
+        url = page or base
+        return {"source": "page" if page else ("local" if base else "none"),
+                "webhook": _mask(url, 40), "secret": bool(ns["feishu_secret"] if page else st.notify_feishu_secret),
+                "page_set": bool(page), "local_set": bool(base)}
+
+    def save_notify_settings(self, body: dict) -> dict:
+        """webhook 留空 = 不改；clear=true 清掉页面上的设置（回到 settings_local 的）。"""
+        body = body or {}
+        if body.get("clear"):
+            ns = normalize_notify_settings({})
+        else:
+            cur = self.runner.notify_settings()
+            url = str(body.get("webhook") or "").strip() or cur["feishu_webhook"]
+            if not url:
+                raise ApiError(400, "请填飞书机器人地址")
+            secret = cur["feishu_secret"] if body.get("secret") is None else str(body.get("secret") or "")
+            try:
+                ns = normalize_notify_settings({"feishu_webhook": url, "feishu_secret": secret})
+            except ValueError as e:
+                raise ApiError(400, str(e))
+        self.store.set_kv("notify", ns)
+        self.store.add_event("飞书通知设置已" + ("清除（改用配置文件的）" if body.get("clear") else "更新"))
+        return self.notify_settings_view()
 
     def maint_notify(self) -> dict:
         return {"run_id": self.runner.submit("notify", ["notify-test"], "飞书通知测试")}
@@ -689,6 +732,7 @@ class App:
     def config_view(self) -> dict:
         st = self.settings
         db = st.db
+        nv = self.notify_settings_view()
         return {
             "数据库": {"host": db.host, "port": db.port, "user": db.user,
                     "database": db.database, "ads_database": db.ads_db(), "src_database": db.src_db(),
@@ -701,8 +745,9 @@ class App:
                    "lookback_days": st.lookback_days, "drill_keyword_filter": st.drill_keyword_filter,
                    "score_formula": st.score_formula},
             "数据质量": {"quality_gate": st.quality_gate, "quality_retries": st.quality_retries,
-                     "notify_feishu_webhook": _mask(st.notify_feishu_webhook, 40),
-                     "notify_feishu_secret": "已配置" if st.notify_feishu_secret else "未配置"},
+                     "notify_feishu_webhook": nv["webhook"],
+                     "notify_feishu_from": {"page": "服务页面", "local": "配置文件", "none": "未配置"}[nv["source"]],
+                     "notify_feishu_secret": "已配置" if nv["secret"] else "未配置"},
             "服务": {"store": self.store.describe(), "data_dir": self.data_dir, "push_settings_from_page": push_overrides(
                 self.runner.push_settings()), "app_root": APP_ROOT,
                    "started_at": self.started_at},
@@ -765,6 +810,8 @@ def _route_table(app: App):
         ("POST", r"/api/maint/push", lambda m, q, b: app.maint_push(b)),
         ("POST", r"/api/maint/run", lambda m, q, b: app.maint_run(b)),
         ("POST", r"/api/maint/notify-test", lambda m, q, b: app.maint_notify()),
+        ("GET", r"/api/notify/settings", lambda m, q, b: app.notify_settings_view()),
+        ("PUT", r"/api/notify/settings", lambda m, q, b: app.save_notify_settings(b)),
         ("POST", r"/api/maint/cleanup", lambda m, q, b: app.maint_cleanup(b)),
     ]
 
