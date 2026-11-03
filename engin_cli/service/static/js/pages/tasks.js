@@ -191,7 +191,7 @@ export const TaskList = {
              timeGroups, calcText, pushText }
   },
   template: `
-  <div>
+  <div class="page-fill">
     <div class="card banner">
       <Switch :model-value="!!(sched.data && sched.data.enabled)" :disabled="sched.data && !sched.data.available" @change="setMaster"/>
       <div class="grow"><b>启用定时执行</b><Tip wide :text="'到点按任务配置跑批：计算 → 质量检测 → 写入 ADS → 推送下游。同一时间只跑一个，后到的排队；服务停机错过超过 ' + (sched.data ? sched.data.grace_minutes : 30) + ' 分钟的不补跑。关掉后只能手动执行'"/></div>
@@ -200,13 +200,13 @@ export const TaskList = {
     </div>
     <div v-if="err" class="alert red">{{ err }}</div>
 
-    <div class="card">
-      <div class="card-head stick"><h3>定时任务<small>{{ tasks.length }} 个</small></h3>
+    <div class="card fill">
+      <div class="card-head"><h3>定时任务<small>{{ tasks.length }} 个</small></h3>
         <div class="toolbar">
           <span class="search"><Icon name="search" :size="15"/><input v-model="kw" placeholder="搜索任务 / 景区" /></span>
           <button class="btn light" @click="kw=''; load()">重置</button>
           <a href="#/tasks/new" class="btn primary"><Icon name="plus" :size="14" :sw="2.4"/>新建任务</a></div></div>
-      <STable :columns="cols" :data="shown" :loading="loading" :min-height="260"
+      <STable :columns="cols" :data="shown" :loading="loading" scroll
         :empty="tasks.length ? '搜索无结果' : '还没有任务，点「新建任务」'">
         <template #name="{ row }"><span class="s-name"><Avatar square :text="row.name" :size="24"/>
           <span class="s-ell"><a :href="'#/tasks/'+row.id" :title="row.name"><b>{{ row.name }}</b></a>
@@ -234,7 +234,7 @@ export const TaskList = {
           <button class="s-btn-icon danger" title="删除" @click="remove(row)"><Icon name="del" :size="16"/></button></template>
       </STable>
     </div>
-    <EventLog :events="events" />
+    <EventLog :events="events" class="fixed-log" />
   </div>`,
 }
 

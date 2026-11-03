@@ -845,3 +845,44 @@ details summary { cursor: pointer; color: var(--primary); font-size: 13px; margi
   display: flex; align-items: center; gap: 4px; }
 .tk-what dd .ico { flex: none; color: #0f8ba0; }
 .tk-what dd.copy { color: var(--primary); }
+
+/* 固定大小的页面（任务、执行记录）：整页不滚动，表格卡片撑满剩下的高度、自己滚动，表头固定；
+   调度日志固定高度、自己滚动 */
+.page-fill { height: 100%; display: flex; flex-direction: column; }
+.page-fill > .card { flex: none; }
+.page-fill > .card.fill { flex: 1 1 0; min-height: 320px; display: flex; flex-direction: column; overflow: hidden; }
+.card.fill > .s-table-wrap.scroll { flex: 1; min-height: 0; overflow: auto; }
+.s-table-wrap.scroll thead th { position: sticky; top: 0; z-index: 2; }
+.page-fill > .fixed-log { margin-bottom: 0; }
+.page-fill > .fixed-log .evlog { height: 190px; max-height: none; }
+.s-table-foot { padding: 12px 4px 2px; text-align: center; font-size: 12px; color: var(--muted); }
+.s-table-foot .link { margin-left: 8px; cursor: pointer; }
+@media (max-width: 860px) {                 /* 手机：整页正常滚动，不固定高度 */
+  .page-fill { height: auto; display: block; }
+  .card.fill > .s-table-wrap.scroll { max-height: 70vh; }
+}
+
+/* 执行详情：顶部标题栏（圆形返回按钮 + 面包屑 + 标题 / 状态 + 说明） */
+.detail-head.card { padding: 16px 22px; gap: 16px; flex-wrap: nowrap; }
+.dh-back { flex: none; display: grid; place-items: center; width: 42px; height: 42px; border-radius: 50%;
+  background: var(--lav); color: var(--primary); transition: .15s; }
+.dh-back:hover { background: var(--solid); color: #fff; }
+.dh-title { flex: 1 1 auto !important; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.dh-crumb { font-size: 12px; color: var(--muted); display: flex; gap: 6px; }
+.dh-crumb a { color: var(--muted); } .dh-crumb a:hover { color: var(--primary); }
+.dh-title h2 { display: flex; align-items: center; gap: 10px; font-size: 20px; line-height: 1.3; }
+.dh-title .ell1 { max-width: 100%; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 执行详情：展开的景区明细 —— 每张表一张小卡片，下面是按类别分组的处理说明 */
+.sc-box2 { display: flex; flex-direction: column; gap: 14px; padding: 14px 4px 6px; }
+.tb-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
+.tb-card { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+.tb-card > b { display: block; font-size: 13px; margin-bottom: 8px; }
+.tb-card dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; margin: 0; font-size: 12px; }
+.tb-card dt { color: var(--muted); }
+.tb-card dd { margin: 0; text-align: right; font-weight: 600; display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
+.note-groups { display: flex; flex-direction: column; gap: 8px; background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+.note-g { display: grid; grid-template-columns: 80px minmax(0, 1fr); gap: 12px; align-items: start; }
+.note-g + .note-g { border-top: 1px dashed var(--line); padding-top: 8px; }
+.ng-lab { font-size: 12px; font-weight: 600; color: var(--primary); background: var(--lav); border-radius: 6px; padding: 2px 8px; text-align: center; }
+.note-g ul { margin: 0; padding-left: 16px; font-size: 12px; line-height: 1.75; color: var(--ink-2); }
+@media (max-width: 860px) { .note-g { grid-template-columns: 1fr; gap: 4px; } .ng-lab { justify-self: start; } }

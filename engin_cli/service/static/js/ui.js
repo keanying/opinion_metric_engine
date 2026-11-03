@@ -108,11 +108,19 @@ export const Empty = {
 // ── 表格：columns = [{key, title, width, align, ellipsis}]；单元格用同名插槽自定义 ──
 export const STable = {
   components: { Empty },
+  // scroll：表格自己滚动（外层给定高度，表头固定）；滚到底发 reach-end（「滚动自动翻页」用）
   props: { columns: Array, data: Array, rowKey: { type: String, default: 'id' }, clickable: Boolean,
-           empty: { type: String, default: '搜索无结果' }, minHeight: Number, loading: Boolean },
-  emits: ['row-click'],
+           empty: { type: String, default: '搜索无结果' }, minHeight: Number, loading: Boolean, scroll: Boolean },
+  emits: ['row-click', 'reach-end'],
+  methods: {
+    onScroll(e) {
+      const el = e.target
+      if (el.scrollTop + el.clientHeight >= el.scrollHeight - 80) this.$emit('reach-end')
+    },
+  },
   template: `
-  <div class="s-table-wrap" :style="{minHeight: minHeight ? minHeight + 'px' : null}">
+  <div class="s-table-wrap" :class="{scroll}" :style="{minHeight: minHeight ? minHeight + 'px' : null}"
+    @scroll.passive="scroll && onScroll($event)">
     <table class="s-table">
       <colgroup><col v-for="c in columns" :key="c.key" :style="{width: c.width ? c.width + 'px' : null}"/></colgroup>
       <thead><tr><th v-for="c in columns" :key="c.key" :class="c.align">{{ c.title }}</th></tr></thead>
@@ -124,6 +132,7 @@ export const STable = {
         <tr v-if="!data || !data.length" class="empty-row"><td :colspan="columns.length"><Empty :text="loading ? '加载中…' : empty"/></td></tr>
       </tbody>
     </table>
+    <slot name="foot"/>
   </div>`,
 }
 
