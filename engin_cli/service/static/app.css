@@ -45,8 +45,8 @@ input, select, textarea, button { font: inherit; color: inherit; }
 /* 顶栏和侧栏固定不动，只有右边内容区滚动 */
 html, body { height: 100%; overflow: hidden; }
 .frame {
-  /* 白色面板上 / 右 / 下贴满窗口、四个角圆角（角上露出渐变）；左边留出 48px 渐变，侧栏贴着窗口左边、压在面板圆角上，上下露出流动渐变 */
-  position: relative; display: flex; flex-direction: column; margin: 0 0 0 48px; height: 100vh;
+  /* 白色面板四边贴满窗口、四个角圆角（角上露出流动的渐变）；菜单在顶栏里，左右对称 */
+  position: relative; display: flex; flex-direction: column; margin: 0; height: 100vh;
   background: linear-gradient(100deg, #ffffff 0%, #ffffff 62%, #f6f4fe 100%); border-radius: 34px; padding: 26px 0 0 26px;
 }
 /* 顶栏：logo + 问候 + 搜索 / 状态 / 圆形图标按钮 */
