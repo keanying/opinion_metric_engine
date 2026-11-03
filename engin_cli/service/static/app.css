@@ -424,7 +424,7 @@ input::placeholder { color: #a5a2bb; }
 .pv-row em { color: var(--muted); font-style: normal; font-size: 12px; }
 .savebar {
   position: sticky; bottom: 16px; z-index: 5; display: flex; align-items: center; justify-content: flex-end; gap: 12px;
-  padding: 12px 16px 12px 24px; border-radius: 18px; background: rgba(255, 255, 255, .92); backdrop-filter: blur(8px); box-shadow: 0 10px 30px rgba(60, 50, 140, .14);
+  padding: 12px 16px 12px 24px; border-radius: 18px; background: rgba(255, 255, 255, .98); box-shadow: 0 10px 30px rgba(60, 50, 140, .14);
 }
 .savebar .hint { margin-right: auto; font-size: 13px; }
 
@@ -731,7 +731,8 @@ details summary { cursor: pointer; color: var(--primary); font-size: 13px; margi
 .hbar b { width: 44px; text-align: right; }
 
 /* 弹窗 / 轻提示 */
-.modal-mask, .dlg-mask { position: fixed; inset: 0; z-index: 150; background: rgba(30, 25, 70, .32); backdrop-filter: blur(3px);
+/* 遮罩不用 backdrop-filter 模糊：背后是一直流动的渐变，又有整页缩放，模糊每帧重算会闪屏 */
+.modal-mask, .dlg-mask { position: fixed; inset: 0; z-index: 150; background: rgba(30, 25, 70, .4);
   display: grid; place-items: center; padding: 20px; }
 .modal { width: min(760px, 100%); max-height: calc(86vh / var(--z)); overflow: auto; background: #fff; border-radius: 22px; padding: 22px 24px;
   box-shadow: 0 24px 70px rgba(30, 25, 70, .25); }
@@ -748,7 +749,8 @@ details summary { cursor: pointer; color: var(--primary); font-size: 13px; margi
 .btn.danger-solid { background: #e04a6e; color: #fff; } .btn.danger-solid:hover { background: #c73a5c; }
 .btn.warn-solid { background: #b9780a; color: #fff; } .btn.warn-solid:hover { background: #9e6608; }
 .dlg-enter-active, .dlg-leave-active { transition: opacity .16s; } .dlg-enter-from, .dlg-leave-to { opacity: 0; }
-.dlg-enter-active .dlg { transition: transform .18s; } .dlg-enter-from .dlg { transform: translateY(8px) scale(.97); }
+.dlg-enter-active .dlg, .dlg-enter-active .modal { transition: transform .18s; }
+.dlg-enter-from .dlg, .dlg-enter-from .modal { transform: translateY(8px) scale(.97); }
 /* 轻提示放右下角，且不挡点击（只是提示，不需要点） */
 .toasts { position: fixed; right: 30px; bottom: 30px; z-index: 200; display: flex; flex-direction: column; gap: 10px; align-items: flex-end; pointer-events: none; }
 .toast { display: flex; align-items: center; gap: 10px; max-width: 420px; padding: 12px 16px 12px 12px; border-radius: 14px; background: #fff;

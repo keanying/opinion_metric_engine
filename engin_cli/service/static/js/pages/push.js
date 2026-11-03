@@ -153,11 +153,12 @@ export default {
       </STable>
     </div>
 
-    <div v-if="detail" class="modal-mask" @click.self="detail=null">
-      <div class="modal">
-        <div class="card-head"><h3>推送记录 · {{ detail.time }}</h3><button class="s-btn-icon" @click="detail=null"><Icon name="clear" :size="18"/></button></div>
-        <pre class="log light">{{ JSON.stringify(detail, null, 2) }}</pre>
-      </div>
-    </div>
+    <Transition name="dlg">
+      <div v-if="detail" class="modal-mask" @click.self="detail=null">
+        <div class="modal">
+          <div class="card-head"><h3>推送记录 · {{ detail.time }}</h3><button class="s-btn-icon" @click="detail=null"><Icon name="clear" :size="18"/></button></div>
+          <pre class="log light">{{ JSON.stringify(detail, null, 2) }}</pre>
+        </div>
+      </div></Transition>
   </div>`,
 }
