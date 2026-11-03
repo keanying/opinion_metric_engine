@@ -154,10 +154,10 @@ class EtlSettings:
     notify_feishu_secret: str = ""           # 机器人开了「签名校验」才填（OPINION_FEISHU_SECRET）
 
     # ---- 指标计算服务（python -m engin_cli.cli serve）----
-    # 默认只监听本机；要让别的机器访问就改成 "0.0.0.0"，这时**必须**配 service_password。
+    # 默认只监听本机；要让别的机器访问就改成 "0.0.0.0"。
+    # 页面必须登录，账号用系统用户表 src_opinion_sys_user（在 src_database，见 service/auth.py）。
     service_host: str = "127.0.0.1"
     service_port: int = 8765
-    service_password: str = ""               # 页面访问密码（OPINION_SERVICE_PASSWORD）
     service_data_dir: str = "service_data"   # 执行日志（runs/<id>.log）放这里
     # 任务、设置、执行记录、调度日志存哪：
     #   "mysql"（默认）= 建在计算指标用的同一个库（db.database）里的系统表，见 sql/sys_trf_social_opinion_service_ddl.sql
@@ -309,7 +309,6 @@ def load_settings() -> EtlSettings:
     s.push_enabled = _env("OPINION_PUSH_ENABLED", s.push_enabled, bool)
     s.push_url = _env("OPINION_PUSH_URL", s.push_url)
     s.notify_feishu_webhook = _env("OPINION_FEISHU_WEBHOOK", s.notify_feishu_webhook)
-    s.service_password = _env("OPINION_SERVICE_PASSWORD", s.service_password)
     s.notify_feishu_secret = _env("OPINION_FEISHU_SECRET", s.notify_feishu_secret)
     # 令牌放在哪个请求头、前面带什么前缀，也都能用环境变量指定：
     #   OPINION_PUSH_TOKEN_HEADER=xpftkey  OPINION_PUSH_TOKEN_PREFIX=   → xpftkey: pfk_xxx

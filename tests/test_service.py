@@ -7,6 +7,7 @@
 
 import base64
 import datetime as dt
+import http.cookiejar
 import json
 import os
 import re
@@ -26,6 +27,7 @@ from engin_cli.loader import TABLE_MACRO
 from engin_cli.pipeline import run as run_pipeline
 from engin_cli.service import runner as R
 from engin_cli.service import scheduler as SC
+from engin_cli.service.auth import Auth, hash_password
 from engin_cli.service.server import App, make_server
 from engin_cli.service.store import Store
 from engin_cli.settings import EtlSettings
@@ -366,17 +368,72 @@ def server(tmp_path, macro):
     st.db.password = FAKE_DB_PW
     st.push_headers = {"Authorization": "Bearer " + FAKE_TOKEN}
     app = App(st, data_dir=str(tmp_path / "svc"), scheduler_enabled=False,
-              db_factory=lambda: FakeDB(holder["macro"]))
-    srv = make_server(app, "127.0.0.1", 0, password="")
+              db_factory=lambda: FakeDB(holder["macro"]), auth=Auth(FakeUsers()))
+    srv = make_server(app, "127.0.0.1", 0)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     app.start()
-    yield f"http://127.0.0.1:{srv.server_address[1]}", app, holder
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    _JAR.clear()                                          # 每个用例重新登录（会话 Cookie 放在 _JAR 里）
+    assert _call(base, "/api/login", "POST", {"username": "op", "password": FAKE_SVC_PW})[0] == 200
+    yield base, app, holder
     srv.shutdown()
     srv.server_close()
     app.stop()
 
 
-_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+_JAR = http.cookiejar.CookieJar()
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPCookieProcessor(_JAR))
+
+
+class FakeUsers:
+    """假的用户 / 会话表（同 auth.UserRepository 的接口），字段同 SMC 的 src_opinion_sys_user。"""
+    table = "`src`.`src_opinion_sys_user`"
+
+    def __init__(self):
+        self.rows = {r["username"]: r for r in [
+            {"id": 1, "username": "op", "display_name": "运维小王", "role": "operator", "enabled": 1},
+            {"id": 2, "username": "boss", "display_name": "", "role": "admin", "enabled": 1},
+            {"id": 3, "username": "look", "display_name": "只读同学", "role": "viewer", "enabled": 1},
+            {"id": 4, "username": "gone", "display_name": "离职", "role": "operator", "enabled": 0}]}
+        for r in self.rows.values():
+            r.update(password_hash=hash_password(FAKE_SVC_PW, iterations=1000), failed_count=0,
+                     locked_until=None, last_login_at=None, last_login_ip="")
+        self.sessions = {}
+
+    def _by_id(self, uid):
+        return next(r for r in self.rows.values() if r["id"] == uid)
+
+    def get_with_hash(self, username):
+        r = self.rows.get(username)
+        if not r:
+            return None
+        return dict(r, is_locked=int(bool(r["locked_until"] and r["locked_until"] > dt.datetime.now())))
+
+    def record_failure(self, uid, max_failed, lock_minutes):
+        r = self._by_id(uid)
+        r["failed_count"] += 1
+        if r["failed_count"] >= max_failed:
+            r["locked_until"] = dt.datetime.now() + dt.timedelta(minutes=lock_minutes)
+        return bool(r["locked_until"] and r["locked_until"] > dt.datetime.now())
+
+    def record_success(self, uid, ip):
+        self._by_id(uid).update(failed_count=0, locked_until=None, last_login_at=dt.datetime.now(),
+                                last_login_ip=ip)
+
+    def create_session(self, uid, hours, ip, ua):
+        token = secrets.token_urlsafe(16)
+        self.sessions[token] = uid
+        return token
+
+    def session_user(self, token):
+        r = self._by_id(self.sessions[token]) if token in self.sessions else None
+        return dict(r) if r and r["enabled"] else None
+
+    def touch_session(self, token, hours):
+        pass
+
+    def delete_session(self, token):
+        self.sessions.pop(token, None)
 
 
 def _call(base, path, method="GET", body=None, headers=None, raw=False):
@@ -535,27 +592,69 @@ def test_maintenance_actions(server, tmp_path):
     assert code == 200 and c["deleted_runs"] == 0                       # 7 天下限，刚跑的不删
 
 
-def test_password_protection(tmp_path):
-    app = App(_sqlite_settings(), data_dir=str(tmp_path / "svc"), scheduler_enabled=False)
-    srv = make_server(app, "127.0.0.1", 0, password=FAKE_SVC_PW)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    base = f"http://127.0.0.1:{srv.server_address[1]}"
-    try:
-        assert _call(base, "/api/health")[0] == 401
-        assert _call(base, "/", raw=True)[0] == 401
-        bad = base64.b64encode(b"admin:wrong").decode()
-        assert _call(base, "/api/health", headers={"Authorization": "Basic " + bad})[0] == 401
-        ok = base64.b64encode(("admin:" + FAKE_SVC_PW).encode()).decode()
-        assert _call(base, "/api/health", headers={"Authorization": "Basic " + ok})[0] == 200
-    finally:
-        srv.shutdown()
-        srv.server_close()
+def test_login_with_user_table(server):
+    """必须登录：用 SMC 的用户表；输错 5 次锁定；停用不能登录；角色同 SMC（只读 / 操作员不能改系统设置）。"""
+    base, app, _ = server
+    users = app.auth.users
+    code, me = _call(base, "/api/me")
+    assert code == 200 and me["user"]["display_name"] == "运维小王" and me["user"]["role_text"] == "操作员"
+    assert users.rows["op"]["last_login_ip"] == "127.0.0.1" and users.rows["op"]["last_login_at"]
+    assert _call(base, "/", raw=True)[0] == 200                       # 页面文件不用登录（登录页要加载）
+    code, r = _call(base, "/api/scheduler", "PUT", {"enabled": True})
+    assert code == 403 and "管理员" in r["error"]                     # 操作员不能改系统设置
+    assert _call(base, "/api/tasks", "POST", {"name": ""})[0] == 400   # 日常操作可以（这里是参数不对）
+
+    _call(base, "/api/logout", "POST")
+    code, r = _call(base, "/api/tasks")
+    assert code == 401 and r["login"] is True                         # 退出后接口要求登录
+    assert _call(base, "/api/login", "POST", {"username": "op"})[0] == 400
+    code, r = _call(base, "/api/login", "POST", {"username": "nobody", "password": "x"})
+    assert code == 401 and r["error"] == "用户名或密码不对"           # 不提示账号存不存在
+
+    for _ in range(4):
+        code, r = _call(base, "/api/login", "POST", {"username": "boss", "password": "wrong"})
+        assert code == 401 and r["error"] == "用户名或密码不对"
+    code, r = _call(base, "/api/login", "POST", {"username": "boss", "password": "wrong"})
+    assert code == 423 and "锁定 10 分钟" in r["error"]               # 第 5 次锁定
+    code, r = _call(base, "/api/login", "POST", {"username": "boss", "password": FAKE_SVC_PW})
+    assert code == 423 and "已锁定" in r["error"]                     # 锁定期间密码对了也不行
+    users.rows["boss"]["locked_until"] = None
+    code, r = _call(base, "/api/login", "POST", {"username": "boss", "password": FAKE_SVC_PW})
+    assert code == 200 and r["user"]["display_name"] == "boss"        # 没有显示名就用登录名
+    assert users.rows["boss"]["failed_count"] == 0
+    assert _call(base, "/api/scheduler", "PUT", {"enabled": True})[0] in (200, 400)   # 管理员可以
+
+    code, r = _call(base, "/api/login", "POST", {"username": "gone", "password": FAKE_SVC_PW})
+    assert code == 403 and "停用" in r["error"]
+
+    code, r = _call(base, "/api/login", "POST", {"username": "look", "password": FAKE_SVC_PW})
+    assert code == 200 and r["user"]["readonly"] is True
+    assert _call(base, "/api/tasks")[0] == 200                        # 只读：能看
+    code, r = _call(base, "/api/tasks", "POST", {"name": "x"})
+    assert code == 403 and "只读" in r["error"]                       # 不能改
+    users.rows["look"]["enabled"] = 0                                 # 在 SMC 里停用 → 这边登录也失效
+    app.auth._cache.clear()
+    assert _call(base, "/api/tasks")[0] == 401
 
 
-def test_refuses_public_bind_without_password(tmp_path):
-    app = App(_sqlite_settings(), data_dir=str(tmp_path / "svc"), scheduler_enabled=False)
-    with pytest.raises(ValueError, match="访问密码"):
-        make_server(app, "0.0.0.0", 0, password="")
+def test_health_without_login_only_from_local(server):
+    base, app, _ = server
+    _call(base, "/api/logout", "POST")
+    assert _call(base, "/api/health")[0] == 200                       # 本机直连（scripts/service.sh）不用登录
+    assert _call(base, "/api/health", headers={"X-Forwarded-For": "10.0.0.8"})[0] == 401   # 经过代理要登录
+
+
+def test_password_hash_same_as_smc():
+    """跟 SMC passwords.py 同一个格式：pbkdf2_sha256$迭代$盐(十六进制串，按文本参与计算)$十六进制哈希。"""
+    import hashlib
+    from engin_cli.service.auth import verify_password
+    salt = "0123456789abcdef0123456789abcdef"
+    stored = f"pbkdf2_sha256$240000${salt}$" + hashlib.pbkdf2_hmac(
+        "sha256", "Pass1234".encode(), salt.encode(), 240000).hex()
+    assert verify_password("Pass1234", stored) and not verify_password("Pass12345", stored)
+    assert verify_password("秘密 123", hash_password("秘密 123", iterations=1000))
+    for bad in ("", "md5$1$a$b", "pbkdf2_sha256$x$a$b", "pbkdf2_sha256$1000$abc", None):
+        assert not verify_password("Pass1234", bad)
 
 
 def test_run_summary_json_from_cli(tmp_path):
@@ -602,8 +701,14 @@ def test_runner_push_switch_and_overrides_reach_subprocess(runner, tmp_path):
     assert "推送总开关已关闭" not in text and "--push drill" in text and "JSON=\n" in text
 
 
+def _login_as(base, username):
+    _JAR.clear()
+    assert _call(base, "/api/login", "POST", {"username": username, "password": FAKE_SVC_PW})[0] == 200
+
+
 def test_push_settings_and_logs_api(server, tmp_path, monkeypatch):
     base, app, _ = server
+    _login_as(base, "boss")                                           # 推送设置是系统设置：管理员
     code, v = _call(base, "/api/push/settings")
     assert v["settings"]["enabled"] and FAKE_TOKEN not in json.dumps(v)
     code, e = _call(base, "/api/push/settings", "PUT", {"push_url": "ftp://x"})
@@ -631,6 +736,7 @@ def test_push_settings_and_logs_api(server, tmp_path, monkeypatch):
 
 def test_scheduler_api_and_task_preview(server):
     base, app, _ = server
+    _login_as(base, "boss")                                           # 定时总开关：管理员
     code, sv = _call(base, "/api/scheduler")
     assert sv["available"] is False                                    # 测试里没启动定时
     assert _call(base, "/api/scheduler", "PUT", {"enabled": False})[0] == 400
@@ -932,3 +1038,71 @@ def test_repair_must_recompute_the_whole_checked_range(server):
     assert check(part)["days"]
     # 现在的做法：整段一次重算 → 通过
     assert check(write(db, calc(True, body["start"], body["end"])))["days"] == []
+
+
+def test_mysql_login_with_smc_user_table():
+    """真库：SMC 的用户表（客户给的建表语句）+ 会话表；SQL 跟 SMC 一致（库的 NOW() 判断锁定 / 过期）。"""
+    import pymysql
+    from engin_cli.db import MySQL
+    from engin_cli.service.auth import Auth, AuthError, UserRepository
+    cfg = _mysql_cfg()
+    conn = pymysql.connect(host=cfg.host, port=cfg.port, user=cfg.user, password=cfg.password, autocommit=True)
+    with conn.cursor() as c:
+        c.execute("drop database if exists omx_t_src")
+        c.execute("create database omx_t_src default charset utf8mb4")
+        c.execute("""CREATE TABLE omx_t_src.`src_opinion_sys_user` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `username` varchar(64) NOT NULL COMMENT '登录名',
+  `display_name` varchar(100) NOT NULL DEFAULT '' COMMENT '显示名，复核人等处显示它',
+  `password_hash` varchar(255) NOT NULL COMMENT 'pbkdf2_sha256$迭代次数$盐$哈希',
+  `role` varchar(20) NOT NULL DEFAULT 'operator' COMMENT 'admin 管理员 / operator 操作员 / viewer 只读',
+  `enabled` tinyint NOT NULL DEFAULT '1',
+  `failed_count` int NOT NULL DEFAULT '0' COMMENT '连续输错密码次数',
+  `locked_until` datetime DEFAULT NULL COMMENT '输错太多次锁到什么时候',
+  `last_login_at` datetime DEFAULT NULL,
+  `last_login_ip` varchar(64) NOT NULL DEFAULT '',
+  `password_changed_at` datetime DEFAULT NULL,
+  `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `update_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_sys_user` (`username`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COMMENT='系统用户'""")
+        c.execute("insert into omx_t_src.src_opinion_sys_user (username, display_name, password_hash, role) "
+                  "values (%s, %s, %s, 'admin'), ('v', '', %s, 'viewer')",
+                  ["admin", "管理员甲", hash_password(FAKE_SVC_PW), hash_password(FAKE_SVC_PW, 1000)])
+    import dataclasses
+    cfg = dataclasses.replace(cfg, database="omx_t_src")
+    auth = Auth(UserRepository(lambda: MySQL(cfg), "omx_t_src"))
+    try:
+        for _ in range(4):
+            with pytest.raises(AuthError, match="用户名或密码不对"):
+                auth.login("admin", "wrong", "10.0.0.1")
+        with pytest.raises(AuthError, match="锁定 10 分钟"):
+            auth.login("admin", "wrong", "10.0.0.1")
+        with pytest.raises(AuthError, match="已锁定"):
+            auth.login("admin", FAKE_SVC_PW, "10.0.0.1")
+        with conn.cursor() as c:
+            c.execute("update omx_t_src.src_opinion_sys_user set locked_until = NULL where username='admin'")
+        token, user = auth.login("admin", FAKE_SVC_PW, "10.0.0.2", "pytest")
+        assert user["display_name"] == "管理员甲" and user["role"] == "admin"
+        with conn.cursor() as c:
+            c.execute("select failed_count, last_login_ip, last_login_at is not null "
+                      "from omx_t_src.src_opinion_sys_user where username='admin'")
+            assert c.fetchone() == (0, "10.0.0.2", 1)
+            c.execute("select count(*), max(ip), max(user_agent) from omx_t_src.src_opinion_sys_user_session")
+            assert c.fetchone() == (1, "10.0.0.2", "pytest")          # 会话表照 SMC 的结构自动建
+        assert auth.user_for(token)["username"] == "admin"
+        assert auth.user_for("not-a-token") is None
+        with conn.cursor() as c:                                      # 在 SMC 里停用 → 这边也失效
+            c.execute("update omx_t_src.src_opinion_sys_user set enabled = 0 where username='admin'")
+        auth._cache.clear()
+        assert auth.user_for(token) is None
+        t2, u2 = auth.login("v", FAKE_SVC_PW)
+        assert u2["readonly"] and u2["display_name"] == "v"
+        auth.logout(t2)
+        auth._cache.clear()
+        assert auth.user_for(t2) is None
+    finally:
+        with conn.cursor() as c:
+            c.execute("drop database if exists omx_t_src")
+        conn.close()

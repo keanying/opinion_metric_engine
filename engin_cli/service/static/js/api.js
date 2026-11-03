@@ -14,8 +14,23 @@ export async function api(path, { method = 'GET', body } = {}) {
   if (res.status === 502 || res.status === 503 || res.status === 504) { markDown(); checkHealth() }
   let data = null
   try { data = await res.json() } catch (e) { /* 非 JSON */ }
+  if (res.status === 401 && data && data.login) auth.user = null      // 没登录 / 会话过期：回登录页
   if (!res.ok) throw new Error((data && data.error) || `请求失败（HTTP ${res.status}）`)
   return data
+}
+
+// ── 登录：auth.user  undefined = 还在确认 / null = 没登录（显示登录页）/ 对象 = 当前用户 ─────────────
+// 用户：{ id, username, display_name, role, role_text, readonly, login_at }
+export const auth = reactive({ user: undefined })
+export async function loadMe() {
+  try { auth.user = (await api('/api/me')).user }
+  catch (e) { if (auth.user === undefined) auth.user = null }
+}
+export async function login(username, password) {
+  auth.user = (await api('/api/login', { method: 'POST', body: { username, password } })).user
+}
+export async function logout() {
+  try { await api('/api/logout', { method: 'POST' }) } finally { auth.user = null }
 }
 
 export const STATUS = {

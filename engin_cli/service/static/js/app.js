@@ -1,6 +1,6 @@
 // 入口：外框 + 图标侧栏 + 顶栏 + 极简 hash 路由（#/tasks、#/runs/12 …）。新增页面：在 ROUTES 里加一行即可。
-import { createApp, reactive, computed, h, ref, onMounted, onUnmounted } from 'vue'
-import { toast, sched, refreshSched, search, dialog, health, checkHealth } from './api.js'
+import { createApp, reactive, computed, h, ref, watch, onMounted, onUnmounted } from 'vue'
+import { toast, sched, refreshSched, search, dialog, health, checkHealth, auth, loadMe, login, logout, confirmBox } from './api.js'
 import { installUI } from './ui.js'
 import Overview from './pages/overview.js'
 import { TaskList, TaskEdit } from './pages/tasks.js'
@@ -45,7 +45,33 @@ const RouterLink = {
   setup(p, { slots }) { return () => h('a', { href: '#' + p.to }, slots.default && slots.default()) },
 }
 
+// 登录页：账号是系统用户表 src_opinion_sys_user 里的
+const LoginPage = {
+  setup() {
+    const f = reactive({ username: '', password: '', busy: false, err: '' })
+    const submit = async () => {
+      if (!f.username.trim() || !f.password) { f.err = '请输入用户名和密码'; return }
+      f.busy = true; f.err = ''
+      try { await login(f.username.trim(), f.password); f.password = '' }
+      catch (e) { f.err = e.message; f.password = '' }
+      finally { f.busy = false }
+    }
+    return { f, submit }
+  },
+  template: `
+  <div class="login-wrap"><form class="login" @submit.prevent="submit">
+    <img src="/logo.png" width="60" height="60" alt="" />
+    <h1>标签计算中心</h1>
+    <p class="muted">请用系统账号登录</p>
+    <label><span>用户名</span><input v-model="f.username" autocomplete="username" autofocus /></label>
+    <label><span>密码</span><input v-model="f.password" type="password" autocomplete="current-password" /></label>
+    <div v-if="f.err" class="login-err"><Icon name="alert" :size="15" :sw="2.2"/>{{ f.err }}</div>
+    <button class="btn primary" :disabled="f.busy">{{ f.busy ? '登录中…' : '登录' }}</button>
+  </form></div>`,
+}
+
 const App = {
+  components: { LoginPage },
   setup() {
     const current = computed(() => {
       for (const r of ROUTES) {
@@ -58,12 +84,25 @@ const App = {
     document.title = '标签计算中心'                      // 浏览器标签页标题固定
     // 系统状态：正常 10 秒测一次，连不上时 5 秒一次
     let htimer
-    const loopHealth = async () => { await checkHealth(); htimer = setTimeout(loopHealth, health.state === 'down' ? 5000 : 10000) }
+    const loopHealth = async () => {
+      await checkHealth()
+      if (auth.user) htimer = setTimeout(loopHealth, health.state === 'down' ? 5000 : 10000)
+    }
     const hp = ref(false)                       // 状态面板开没开
     const closeHp = e => { if (hp.value && !e.target.closest('.hp-wrap')) hp.value = false }
-    onMounted(() => { refreshSched(); timer = setInterval(refreshSched, 15000); loopHealth()
-      window.addEventListener('mousedown', closeHp) })
-    onUnmounted(() => { clearInterval(timer); clearTimeout(htimer); window.removeEventListener('mousedown', closeHp) })
+    // 登录后才开始轮询调度状态 / 系统状态，退出登录就停
+    const startLoops = () => { if (timer) return; refreshSched(); timer = setInterval(refreshSched, 15000); loopHealth() }
+    const stopLoops = () => { clearInterval(timer); clearTimeout(htimer); timer = htimer = null }
+    watch(() => !!auth.user, on => (on ? startLoops() : stopLoops()), { immediate: true })
+    onMounted(() => { loadMe(); window.addEventListener('mousedown', closeHp) })
+    onUnmounted(() => { stopLoops(); window.removeEventListener('mousedown', closeHp) })
+    const doLogout = async () => {
+      const u = auth.user
+      if (!await confirmBox({ title: '退出登录', okText: '退出登录', type: 'warn', message: '退出后要重新输入用户名和密码。',
+        items: [['账号', `${u.display_name}（${u.username}）`], ['角色', u.role_text]]
+          .concat(u.login_at ? [['登录时间', u.login_at]] : []) })) return
+      await logout()
+    }
     const recheck = () => checkHealth(true).then(() => setTimeout(checkHealth, 1500))
     const checks = computed(() => health.state === 'down'
       ? [{ key: 'service', label: '服务', ok: false, detail: `没有响应（已停止或网络中断），${health.since} 起` }]
@@ -89,13 +128,15 @@ const App = {
     }
     window.addEventListener('keydown', onKey)
     const doSearch = () => { search.q = kw.value.trim(); search.n++; kw.value = ''; location.hash = '/tasks' }
-    return { current, route, NAV, toast, pill, kw, doSearch, dialog, health, hp, checks, recheck }
+    return { current, route, NAV, toast, pill, kw, doSearch, dialog, health, hp, checks, recheck, auth, doLogout }
   },
   template: `
-  <div class="frame">
+  <div v-if="auth.user === undefined" class="boot">加载中…</div>
+  <LoginPage v-else-if="!auth.user" />
+  <div v-else class="frame">
     <header class="topbar">
       <a href="#/" class="brand" title="标签计算中心"><img src="/logo.png" width="40" height="40" alt="标签计算中心" /></a>
-      <div class="hello"><h1>你好，运维！</h1></div>
+      <div class="hello"><h1>你好，{{ auth.user.display_name }}！<span v-if="auth.user.readonly" class="ro-badge" title="只读账号：只能查看，不能执行、修改">只读</span></h1></div>
       <div class="tb-right">
         <label class="tb-search"><input v-model="kw" placeholder="搜索任务 / 景区…" @keyup.enter="doSearch"/>
           <button @click="doSearch" aria-label="搜索"><Icon name="search" :size="16" :sw="2.2"/></button></label>
@@ -125,7 +166,7 @@ const App = {
         </nav>
         <div class="side-foot">
           <a href="#/maint" class="side-mini" title="维护" :class="{on: current.r.nav==='/maint'}"><Icon name="gear" :size="18"/></a>
-          <div class="side-me" title="运维">运</div>
+          <button class="side-me" :title="auth.user.display_name + ' · ' + auth.user.role_text + '（点击退出登录）'" @click="doLogout">{{ auth.user.display_name.slice(0, 1) }}</button>
         </div>
       </aside>
       <main class="main"><component :is="current.r.comp" v-bind="current.props" :key="route.path + '#' + health.epoch" /></main>

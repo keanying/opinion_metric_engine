@@ -7,10 +7,11 @@
 任务、设置、执行记录、调度日志存 MySQL 系统表（store.py，数仓命名规范），执行日志是文件。
 
 安全：
-· 默认只监听本机。监听其他地址（如 0.0.0.0）必须配 service_password，否则拒绝启动 ——
-  这个服务能触发跑批、推送，能看库里的指标，裸奔在内网上不行；
-· 配了密码就走 HTTP Basic 认证（用户名随意，密码对就行）；
-· 所有改动类请求（POST/PUT/DELETE）要带 X-Requested-With 头，挡住跨站表单提交（CSRF）。
+· 必须登录：用 SMC 系统的用户（src_opinion_sys_user，会话在 src_opinion_sys_user_session，见 auth.py）。
+  页面静态文件不用登录（登录页要加载），
+  /api/* 一律要登录；只有本机（不经过代理）请求 /api/health 例外，给 scripts/service.sh 检测用；
+· 角色跟 SMC 一样：admin 全部；operator 不能改推送设置 / 定时总开关；viewer 只读（auth.denied_reason）；
+· 所有改动类请求（含登录）要带 X-Requested-With 头，会话 Cookie 是 SameSite=Strict，挡住跨站提交（CSRF）。
 """
 
 from __future__ import annotations
@@ -34,13 +35,14 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from .runner import (APP_ROOT, PUSH_DEFAULTS, TABLE_KEYS, Runner, TASK_DEFAULTS, apply_push_switch,
                      build_push_argv, build_run_argv, build_task_argv, normalize_config, normalize_push_settings,
                      push_overrides, task_dates)
+from .auth import COOKIE, SESSION_HOURS, Auth, AuthError, UserRepository, denied_reason
 from .scheduler import GRACE, Scheduler, next_fire, normalize_times
 from .store import Store, StoreError, now_str
 
 log = logging.getLogger(__name__)
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+LOOPBACK = {"127.0.0.1", "::1", "::ffff:127.0.0.1"}
 
 
 class ApiError(Exception):
@@ -118,7 +120,7 @@ def open_store(settings, data_dir: str) -> Store:
 class App:
     def __init__(self, settings, data_dir: Optional[str] = None, runner: Optional[Runner] = None,
                  scheduler_enabled: bool = True, db_factory: Optional[Callable] = None,
-                 store: Optional[Store] = None):
+                 store: Optional[Store] = None, auth: Optional[Auth] = None):
         self.settings = settings
         d = data_dir or getattr(settings, "service_data_dir", "") or "service_data"
         # 相对路径按项目根目录算（执行器的子进程也在项目根目录跑），跟从哪启动服务无关
@@ -128,6 +130,8 @@ class App:
         self.runner = runner or Runner(self.store, self.data_dir)
         self.scheduler = Scheduler(self.store, self.runner) if scheduler_enabled else None
         self._db_factory = db_factory
+        # 登录：用 SMC 系统的用户 / 会话表，在源表库（src_database，没配就是 database），见 auth.py
+        self.auth = auth or Auth(UserRepository(self._db, settings.db.src_db()))
         self.started_at = now_str()
         # 系统状态：系统表库 / 指标库在后台线程里检测（连库最多要等 connect_timeout 秒，不能卡住请求）
         self._health_lock = threading.Lock()
@@ -729,7 +733,7 @@ def _route_table(app: App):
     ]
 
 
-def make_handler(app: App, password: str = ""):
+def make_handler(app: App):
     routes = [(meth, re.compile(f"^{pat}$"), fn) for meth, pat, fn in _route_table(app)]
 
     class Handler(BaseHTTPRequestHandler):
@@ -738,18 +742,24 @@ def make_handler(app: App, password: str = ""):
         def log_message(self, fmt, *args):            # 走 logging，别刷 stderr
             log.debug("%s %s", self.address_string(), fmt % args)
 
-        # -------------------------------------------------- 认证 / 防 CSRF
-        def _authorized(self) -> bool:
-            if not password:
-                return True
-            h = self.headers.get("Authorization") or ""
-            if not h.startswith("Basic "):
-                return False
-            try:
-                _, _, pw = base64.b64decode(h[6:]).decode("utf-8").partition(":")
-            except (ValueError, UnicodeDecodeError):
-                return False
-            return hmac.compare_digest(pw.encode("utf-8"), password.encode("utf-8"))
+        # -------------------------------------------------- 登录 / 防 CSRF
+        def _token(self) -> str:
+            for part in (self.headers.get("Cookie") or "").split(";"):
+                k, _, v = part.strip().partition("=")
+                if k == COOKIE:
+                    return v
+            return ""
+
+        def _client_ip(self) -> str:
+            fwd = (self.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+            return fwd or self.client_address[0]
+
+        def _is_local(self) -> bool:
+            """本机直连（不经过反向代理）：scripts/service.sh 检测服务状态用。"""
+            return self.client_address[0] in LOOPBACK and not self.headers.get("X-Forwarded-For")
+
+        def _cookie(self, token: str, max_age: int) -> dict:
+            return {"Set-Cookie": f"{COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}"}
 
         def _send(self, status: int, body: bytes, ctype: str, extra: Optional[dict] = None):
             self.send_response(status)
@@ -763,20 +773,17 @@ def make_handler(app: App, password: str = ""):
             if self.command != "HEAD":
                 self.wfile.write(body)
 
-        def _json(self, status: int, data: Any):
+        def _json(self, status: int, data: Any, extra: Optional[dict] = None):
             self._send(status, json.dumps(_clean(data), ensure_ascii=False).encode("utf-8"),
-                       "application/json; charset=utf-8")
+                       "application/json; charset=utf-8", extra)
 
         def _dispatch(self):
-            if not self._authorized():
-                self._send(401, "需要登录".encode("utf-8"), "text/plain; charset=utf-8",
-                           {"WWW-Authenticate": 'Basic realm="opinion-metric", charset="UTF-8"'})
-                return
             u = urllib.parse.urlsplit(self.path)
             path = u.path
             if not path.startswith("/api/"):
-                return self._static(path)
-            if self.command in ("POST", "PUT", "DELETE") and not self.headers.get("X-Requested-With"):
+                return self._static(path)                 # 页面文件不用登录（登录页本身要加载）
+            writing = self.command in ("POST", "PUT", "DELETE")
+            if writing and not self.headers.get("X-Requested-With"):
                 return self._json(403, {"error": "缺少 X-Requested-With 请求头"})
             body = {}
             n = int(self.headers.get("Content-Length") or 0)
@@ -785,12 +792,32 @@ def make_handler(app: App, password: str = ""):
                     body = json.loads(self.rfile.read(n).decode("utf-8") or "{}")
                 except ValueError:
                     return self._json(400, {"error": "请求体不是合法 JSON"})
+            body = body if isinstance(body, dict) else {}
+            # ---- 登录 / 退出：不需要已登录
+            if path == "/api/login" and self.command == "POST":
+                try:
+                    token, user = app.auth.login(body.get("username"), body.get("password"), self._client_ip(),
+                                                 self.headers.get("User-Agent") or "")
+                except AuthError as e:
+                    return self._json(e.status, {"error": str(e)})
+                return self._json(200, {"user": user}, self._cookie(token, SESSION_HOURS * 3600))
+            if path == "/api/logout" and self.command == "POST":
+                app.auth.logout(self._token())
+                return self._json(200, {"ok": True}, self._cookie("", 0))
+            user = app.auth.user_for(self._token())
+            if user is None and not (path == "/api/health" and self._is_local()):
+                return self._json(401, {"error": "请先登录", "login": True})
+            if path == "/api/me":
+                return self._json(200, {"user": user})
+            why = denied_reason(user["role"], self.command, path) if user else ""
+            if why:
+                return self._json(403, {"error": why})
             q = urllib.parse.parse_qs(u.query)
             for meth, pat, fn in routes:
                 m = pat.match(path)
                 if m and meth == self.command:
                     try:
-                        return self._json(200, fn(m, q, body if isinstance(body, dict) else {}))
+                        return self._json(200, fn(m, q, body))
                     except ApiError as e:
                         return self._json(e.status, {"error": str(e)})
                     except (ValueError, TypeError) as e:
@@ -819,12 +846,8 @@ def make_handler(app: App, password: str = ""):
     return Handler
 
 
-def make_server(app: App, host: str = "127.0.0.1", port: int = 8765,
-                password: str = "") -> ThreadingHTTPServer:
-    if host not in LOCAL_HOSTS and not password:
-        raise ValueError(f"监听 {host} 会让其他机器访问到这个服务，必须先配置访问密码"
-                         "（settings_local.py 的 service_password，或环境变量 OPINION_SERVICE_PASSWORD）")
-    srv = ThreadingHTTPServer((host, int(port)), make_handler(app, password))
+def make_server(app: App, host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServer:
+    srv = ThreadingHTTPServer((host, int(port)), make_handler(app))
     srv.daemon_threads = True
     return srv
 
@@ -833,7 +856,6 @@ def serve(settings, host: Optional[str] = None, port: Optional[int] = None,
           scheduler_enabled: bool = True) -> int:
     host = host or getattr(settings, "service_host", "127.0.0.1")
     port = int(port or getattr(settings, "service_port", 8765))
-    password = str(getattr(settings, "service_password", "") or "")
     try:
         app = App(settings, scheduler_enabled=scheduler_enabled)
     except StoreError as e:
@@ -842,7 +864,7 @@ def serve(settings, host: Optional[str] = None, port: Optional[int] = None,
               "只想本机试用可以设 service_store = \"sqlite\"")
         return 2
     try:
-        srv = make_server(app, host, port, password)
+        srv = make_server(app, host, port)
     except (ValueError, OSError) as e:
         print(f"✗ 启动失败：{e}")
         return 2
@@ -859,7 +881,7 @@ def serve(settings, host: Optional[str] = None, port: Optional[int] = None,
     app.start()
     print("=" * 72)
     print(f"指标计算服务已启动：http://{host}:{port}/"
-          + ("   （已开启密码访问）" if password else "   （仅本机可访问）"))
+          + f"   （需要登录，账号在 {app.auth.users.table}）")
     print(f"系统表：{app.store.describe()}")
     print(f"执行日志：{app.data_dir}    定时：{'开启' if scheduler_enabled else '关闭'}")
     print("按 Ctrl+C 停止")

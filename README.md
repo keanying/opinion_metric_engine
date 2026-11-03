@@ -903,7 +903,8 @@ opinion_metric_engine/          项目根
 | `sql/sys_trf_social_opinion_service_ddl.sql` | 指标服务 4 张系统表的建表语句（数仓命名规范，表 / 字段都有注释；服务启动时缺表自动执行） |
 | `engin_cli/service/runner.py` | 执行器：任务配置 → `run` 命令，排队、子进程执行、取消；推送总开关 / 推送设置下发 |
 | `engin_cli/service/scheduler.py` | 定时：每天 HH:MM 触发，30 分钟补触发窗口，定时总开关，调度日志 |
-| `engin_cli/service/server.py` | HTTP 接口 + 静态页面（Basic 认证、防 CSRF） |
+| `engin_cli/service/server.py` | HTTP 接口 + 静态页面（登录、角色权限、防 CSRF） |
+| `engin_cli/service/auth.py` | 登录：用 SMC 系统的用户 / 会话表，密码哈希、锁定、角色跟 SMC 一致 |
 | `engin_cli/service/static/` | 页面（Vue 3，免构建；表格 / 标签仿 Semi Design 风格） |
 | `sql/ads_ddl_reference.sql` | 四张目标表的建表语句（原样保留，测试据此断言） |
 | `sql/ads_drill_analysis_ddl.sql` | 5.2 下钻分析表建表语句（含 2.0 新增的 region / entity_tags、time_granularity） |

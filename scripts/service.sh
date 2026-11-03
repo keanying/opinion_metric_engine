@@ -69,13 +69,13 @@ find_pid() {
 }
 
 # ---------------------------------------------------------------- 检测接口
-# 读 settings 拿端口和访问密码（密码不出现在命令行里），请求 /api/health。
-#   health        打印各项状态；退出码 0 全部正常  2 有依赖不可用  3 连不上  4 密码不对
+# 读 settings 拿端口，请求本机的 /api/health。
+#   health        打印各项状态；退出码 0 全部正常  2 有依赖不可用  3 连不上  4 要求登录
 #   health quiet  不打印，退出码同上
 #   health busy   不打印；正在执行跑批返回 0，否则 1
 health() {
     SERVE_ARGS="$SERVE_ARGS" MODE="${1:-}" "$PYTHON" - <<'PY'
-import base64, json, os, re, sys, urllib.error, urllib.request
+import json, os, re, sys, urllib.error, urllib.request
 sys.path.insert(0, os.getcwd())
 from engin_cli.settings import load_settings
 st = load_settings()
@@ -86,10 +86,8 @@ m = re.search(r"--host[ =](\S+)", args)
 host = m.group(1) if m else st.service_host
 host = "127.0.0.1" if host in ("0.0.0.0", "", "::") else host
 url = f"http://{host}:{port}/api/health?refresh=1"
+# 本机直连请求 /api/health 不用登录（服务端只对本机、不经过代理的请求放行）
 req = urllib.request.Request(url, headers={"X-Requested-With": "service.sh"})
-if st.service_password:
-    tok = base64.b64encode(f"admin:{st.service_password}".encode()).decode()
-    req.add_header("Authorization", "Basic " + tok)
 mode = os.environ.get("MODE", "")
 quiet = mode in ("quiet", "busy")
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -109,7 +107,7 @@ try:
 except urllib.error.HTTPError as e:
     if not quiet:
         print(f"  地址      http://{host}:{port}/")
-        print("  检测      ✗ 访问密码不对（401）" if e.code == 401 else f"  检测      ✗ HTTP {e.code}")
+        print("  检测      ✗ 要求登录（401）：请用本机地址检测，不要经过代理" if e.code == 401 else f"  检测      ✗ HTTP {e.code}")
     sys.exit(1 if mode == "busy" else 4 if e.code == 401 else 3)
 except Exception as e:                                  # noqa: BLE001
     if not quiet:

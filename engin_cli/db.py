@@ -60,6 +60,18 @@ class MySQL:
         finally:
             cur.close()
 
+    # ---------- 执行一条改动语句（update / insert），提交，返回影响行数 ----------
+    def execute(self, sql: str, params: Optional[Sequence[Any]] = None) -> int:
+        conn = self.connect()
+        try:
+            with self.cursor() as cur:
+                n = cur.execute(sql, params or ())
+            conn.commit()
+            return n
+        except Exception:
+            conn.rollback()
+            raise
+
     # ---------- 读 ----------
     def query_df(self, sql: str, params: Optional[Sequence[Any]] = None,
                  chunk_size: int = 20000) -> pd.DataFrame:
