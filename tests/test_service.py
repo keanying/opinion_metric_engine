@@ -759,3 +759,50 @@ def test_service_store_setting(tmp_path):
 
 def now_str_():
     return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+# ══════════════════════════════════════════════════════════════════
+# 复制景区数据（engin_cli mock）任务
+# ══════════════════════════════════════════════════════════════════
+MOCK_CFG = {"task_type": "mock", "from_scenic": "PFTSCA01016184", "to_scenic": "PFTSCA01018088",
+            "to_name": "泰宁九龙潭生态旅游区", "date_mode": "today",
+            "tables": "drill,macro,core,platform,dimension,content"}
+
+
+def test_mock_task_builds_mock_command():
+    kind, argv, title = R.build_task_argv(MOCK_CFG, dt.date(2026, 11, 3))
+    assert kind == "mock"
+    assert argv == ["mock", "--from-scenic", "PFTSCA01016184", "--to-scenic", "PFTSCA01018088",
+                    "--to-name", "泰宁九龙潭生态旅游区", "--start-date", "20261103", "--end-date", "20261103",
+                    "--no-progress", "--tables", "drill,macro,core,platform,dimension,content"]
+    assert "PFTSCA01016184 → PFTSCA01018088" in title
+    # 推送总开关关着：只预览报文、不发送
+    assert R.apply_push_switch(argv, False)[-1] == "--preview"
+    with pytest.raises(ValueError, match="源景区"):
+        R.normalize_config({"task_type": "mock", "from_scenic": "A"})
+    with pytest.raises(ValueError, match="不能和源景区一样"):
+        R.normalize_config({**MOCK_CFG, "to_scenic": "PFTSCA01016184"})
+    # 跑批任务不受影响
+    assert R.build_task_argv({"scenics": "S1"}, dt.date(2026, 11, 3))[0] == "run"
+
+
+def test_scheduler_fires_mock_task(tmp_path):
+    store = Store(str(tmp_path / "s.db"))
+    tid = store.create_task("复制九龙潭", MOCK_CFG, {"times": ["08:30"]})
+    fr = _FakeRunner()
+    SC.Scheduler(store, fr).tick(dt.datetime(2026, 11, 3, 8, 31))
+    kind, argv, title, trigger, task_id = fr.submitted[0]
+    assert (kind, trigger, task_id) == ("mock", "schedule", tid)
+    assert argv[0] == "mock" and argv[argv.index("--start-date") + 1] == "20261103"
+
+
+def test_mock_task_api_preview_and_run(server):
+    base, app, _ = server
+    code, pv = _call(base, "/api/tasks/preview", "POST", {"config": MOCK_CFG, "schedule": {"times": ["08:30"]}})
+    assert pv["ok"] and pv["task_type"] == "mock" and pv["command"].startswith("python -m engin_cli.cli mock ")
+    assert len(pv["push"]) == 6 and pv["push_no_url"] is True             # 测试里没配推送地址
+    code, t = _call(base, "/api/tasks", "POST", {"name": "复制九龙潭", "config": MOCK_CFG, "schedule": {"times": ["08:30"]}})
+    assert code == 200 and t["config"]["task_type"] == "mock" and "engin_cli.cli mock" in t["command_preview"]
+    code, r = _call(base, f"/api/tasks/{t['id']}/run", "POST", {})
+    run = app.store.get_run(r["run_id"])
+    assert run["kind"] == "mock" and run["command"][0] == "mock"

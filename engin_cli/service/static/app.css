@@ -197,6 +197,7 @@ input::placeholder { color: #b3b1aa; }
 /* 景区选择 */
 .sp { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 36px; padding: 4px 10px; border-radius: 10px;
   background: #f3f2ee; border: 1px solid transparent; cursor: pointer; color: var(--muted); min-width: 200px; }
+.sp.single { flex-wrap: nowrap; } .sp.single .sp-chip { min-width: 0; overflow: hidden; white-space: nowrap; }
 .sp:hover, .sp.on { border-color: #a9c2b0; background: #fff; }
 .frow .sp { flex: 1; }
 .sp-ph { color: #b3b1aa; font-size: 14px; }

@@ -27,6 +27,10 @@ log = logging.getLogger(__name__)
 APP_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 TASK_DEFAULTS: Dict[str, Any] = {
+    "task_type": "run",         # run = 跑批；mock = 复制景区数据（engin_cli mock：复制源景区的 ADS 结果给新景区并推送）
+    "from_scenic": "",          # mock：从哪个景区复制
+    "to_scenic": "",            # mock：新景区编号
+    "to_name": "",              # mock：新景区名称
     "scenics": "",              # 逗号分隔；空 = 取数区间内有评论的全部景区
     "tables": "",               # 计算 / 输出哪些表（逗号分隔简写）；空 = 全部
     "date_mode": "today",       # today / yesterday / recent（近 N 天）/ range（固定区间）
@@ -87,8 +91,12 @@ def push_overrides(ps: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def apply_push_switch(argv: List[str], enabled: bool) -> List[str]:
-    """推送总开关关着：run 命令去掉 --push xxx，换成 --no-push。"""
-    if enabled or not argv or argv[0] != "run":
+    """推送总开关关着：run 命令去掉 --push xxx，换成 --no-push；mock 改成只预览报文、不发送。"""
+    if enabled or not argv:
+        return list(argv)
+    if argv[0] == "mock":
+        return list(argv) if "--preview" in argv else list(argv) + ["--preview"]
+    if argv[0] != "run":
         return list(argv)
     out, skip = [], False
     for a in argv:
@@ -129,6 +137,14 @@ def normalize_config(cfg: Optional[dict]) -> Dict[str, Any]:
     for k, v in (cfg or {}).items():
         if k in out:
             out[k] = v
+    out["task_type"] = "mock" if out["task_type"] == "mock" else "run"
+    for k in ("from_scenic", "to_scenic", "to_name"):
+        out[k] = str(out[k] or "").strip()
+    if out["task_type"] == "mock":
+        if not (out["from_scenic"] and out["to_scenic"] and out["to_name"]):
+            raise ValueError("复制景区数据要填：源景区、新景区编号、新景区名称")
+        if out["from_scenic"] == out["to_scenic"]:
+            raise ValueError("新景区编号不能和源景区一样")
     out["scenics"] = ",".join(s.strip() for s in str(out["scenics"] or "").replace("，", ",")
                               .split(",") if s.strip())
     if out["date_mode"] not in DATE_MODES:
@@ -193,6 +209,28 @@ def build_run_argv(cfg: Dict[str, Any], today: Optional[dt.date] = None) -> Tupl
     title = (f"{cfg['scenics'] or '全部景区'} · "
              f"{start if start == end else f'{start}~{end}'}")
     return argv, title
+
+
+def build_mock_argv(cfg: Dict[str, Any], today: Optional[dt.date] = None) -> Tuple[List[str], str]:
+    """复制景区数据：`engin_cli.cli mock`（复制源景区 ADS 结果给新景区编号并推送，不写本地库）。"""
+    cfg = normalize_config(cfg)
+    start, end = task_dates(cfg, today)
+    argv = ["mock", "--from-scenic", cfg["from_scenic"], "--to-scenic", cfg["to_scenic"],
+            "--to-name", cfg["to_name"], "--start-date", start, "--end-date", end, "--no-progress"]
+    if cfg["tables"]:
+        argv += ["--tables", cfg["tables"]]
+    title = (f"复制 {cfg['from_scenic']} → {cfg['to_scenic']}（{cfg['to_name']}） · "
+             f"{start if start == end else f'{start}~{end}'}")
+    return argv, title
+
+
+def build_task_argv(cfg: Dict[str, Any], today: Optional[dt.date] = None) -> Tuple[str, List[str], str]:
+    """任务配置 → (执行类型, 命令参数, 一句话说明)。定时、手动执行都走这里。"""
+    if (cfg or {}).get("task_type") == "mock":
+        argv, title = build_mock_argv(cfg, today)
+        return "mock", argv, title
+    argv, title = build_run_argv(cfg, today)
+    return "run", argv, title
 
 
 def build_push_argv(scenics: str = "", tables: str = "", start: str = "",

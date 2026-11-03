@@ -2,7 +2,7 @@ import { ref, reactive, onMounted, onUnmounted, watch, nextTick, computed } from
 import { api, KIND, TRIGGER, TABLE_LABEL, duration, fmtNum, notify, confirmBox } from '../api.js'
 import { STATUS_TAG } from '../ui.js'
 
-const KIND_AV = { run: ['layers', 'indigo'], push: ['send', 'cyan'], notify: ['bell', 'amber'] }
+const KIND_AV = { run: ['layers', 'indigo'], mock: ['file', 'violet'], push: ['send', 'cyan'], notify: ['bell', 'amber'] }
 
 export const RunList = {
   setup() {
