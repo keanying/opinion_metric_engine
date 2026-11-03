@@ -81,9 +81,22 @@ html, body { height: 100%; overflow: hidden; }
 .tb-gear.green { background: #dcf5f1; color: #11806f; box-shadow: 0 6px 16px rgba(17, 128, 111, .16); }
 .tb-gear.red { background: #fde6ec; color: #d03a5f; box-shadow: 0 6px 16px rgba(208, 58, 95, .2); }
 .tb-gear:hover { transform: translateY(-1px); }
-.tb-gear.busy .ico { animation: spin 3.2s linear infinite; }
+/* 动态效果：齿轮一直慢慢转（正在执行时转快一点），外圈呼吸光晕；有问题时红点闪烁、齿轮轻微晃动 */
+.tb-gear .ico { animation: spin 7s linear infinite; }
+.tb-gear.busy .ico { animation-duration: 2.4s; }
+.tb-gear.green { animation: gear-glow-g 2.6s ease-in-out infinite; }
+.tb-gear.red { animation: gear-glow-r 1.4s ease-in-out infinite; }
+.tb-gear.red .ico { animation: gear-shake 2.4s ease-in-out infinite; }
 .tb-gear i { position: absolute; right: 6px; top: 6px; width: 9px; height: 9px; border-radius: 50%; border: 2px solid #fff; }
-.tb-gear.green i { background: #21b8a6; } .tb-gear.red i { background: #ee5a7c; animation: hp-blink 1.2s ease-in-out infinite; }
+.tb-gear.green i { background: #21b8a6; animation: dot-pulse-g 2.6s ease-in-out infinite; }
+.tb-gear.red i { background: #ee5a7c; animation: hp-blink 1.2s ease-in-out infinite; }
+@keyframes gear-glow-g { 0%, 100% { box-shadow: 0 6px 16px rgba(17, 128, 111, .16), 0 0 0 0 rgba(33, 184, 166, .28); }
+  50% { box-shadow: 0 6px 16px rgba(17, 128, 111, .16), 0 0 0 7px rgba(33, 184, 166, 0); } }
+@keyframes gear-glow-r { 0%, 100% { box-shadow: 0 6px 16px rgba(208, 58, 95, .2), 0 0 0 0 rgba(238, 90, 124, .4); }
+  50% { box-shadow: 0 6px 16px rgba(208, 58, 95, .2), 0 0 0 8px rgba(238, 90, 124, 0); } }
+@keyframes dot-pulse-g { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.25); } }
+@keyframes gear-shake { 0%, 70%, 100% { transform: rotate(0); } 76% { transform: rotate(-14deg); } 84% { transform: rotate(12deg); } 92% { transform: rotate(-6deg); } }
+@media (prefers-reduced-motion: reduce) { .tb-gear, .tb-gear .ico, .tb-gear i { animation: none !important; } }
 .hp-now { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; padding: 9px 12px; border-radius: 12px; font-size: 13px; font-weight: 600;
   background: #f2fbf9; color: #11806f; }
 .hp-now i { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none; }
@@ -424,7 +437,7 @@ input::placeholder { color: #a5a2bb; }
 .pv-row em { color: var(--muted); font-style: normal; font-size: 12px; }
 .savebar {
   position: sticky; bottom: 16px; z-index: 5; display: flex; align-items: center; justify-content: flex-end; gap: 12px;
-  padding: 12px 16px 12px 24px; border-radius: 18px; background: rgba(255, 255, 255, .92); backdrop-filter: blur(8px); box-shadow: 0 10px 30px rgba(60, 50, 140, .14);
+  padding: 12px 16px 12px 24px; border-radius: 18px; background: rgba(255, 255, 255, .98); box-shadow: 0 10px 30px rgba(60, 50, 140, .14);
 }
 .savebar .hint { margin-right: auto; font-size: 13px; }
 
@@ -731,7 +744,8 @@ details summary { cursor: pointer; color: var(--primary); font-size: 13px; margi
 .hbar b { width: 44px; text-align: right; }
 
 /* 弹窗 / 轻提示 */
-.modal-mask, .dlg-mask { position: fixed; inset: 0; z-index: 150; background: rgba(30, 25, 70, .32); backdrop-filter: blur(3px);
+/* 遮罩不用 backdrop-filter 模糊：背后是一直流动的渐变，又有整页缩放，模糊每帧重算会闪屏 */
+.modal-mask, .dlg-mask { position: fixed; inset: 0; z-index: 150; background: rgba(30, 25, 70, .4);
   display: grid; place-items: center; padding: 20px; }
 .modal { width: min(760px, 100%); max-height: calc(86vh / var(--z)); overflow: auto; background: #fff; border-radius: 22px; padding: 22px 24px;
   box-shadow: 0 24px 70px rgba(30, 25, 70, .25); }
@@ -748,7 +762,8 @@ details summary { cursor: pointer; color: var(--primary); font-size: 13px; margi
 .btn.danger-solid { background: #e04a6e; color: #fff; } .btn.danger-solid:hover { background: #c73a5c; }
 .btn.warn-solid { background: #b9780a; color: #fff; } .btn.warn-solid:hover { background: #9e6608; }
 .dlg-enter-active, .dlg-leave-active { transition: opacity .16s; } .dlg-enter-from, .dlg-leave-to { opacity: 0; }
-.dlg-enter-active .dlg { transition: transform .18s; } .dlg-enter-from .dlg { transform: translateY(8px) scale(.97); }
+.dlg-enter-active .dlg, .dlg-enter-active .modal { transition: transform .18s; }
+.dlg-enter-from .dlg, .dlg-enter-from .modal { transform: translateY(8px) scale(.97); }
 /* 轻提示放右下角，且不挡点击（只是提示，不需要点） */
 .toasts { position: fixed; right: 30px; bottom: 30px; z-index: 200; display: flex; flex-direction: column; gap: 10px; align-items: flex-end; pointer-events: none; }
 .toast { display: flex; align-items: center; gap: 10px; max-width: 420px; padding: 12px 16px 12px 12px; border-radius: 14px; background: #fff;

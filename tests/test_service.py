@@ -741,7 +741,7 @@ def test_runner_push_switch_and_overrides_reach_subprocess(runner, tmp_path):
     rid = runner.submit("notify", ["notify-test"], "t")
     text = open(_done(runner, rid)["log_path"], encoding="utf-8").read()
     head, out = text.split("ARGS=", 1)
-    assert "飞书通知地址来自服务页面" in head and "TESTTOKEN" not in head
+    assert "通知地址来自服务页面" in head and "TESTTOKEN" not in head
     assert f'"notify_feishu_webhook": "{hook}"' in out
 
 

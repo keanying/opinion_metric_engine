@@ -93,7 +93,7 @@ _READ = ("GET", "HEAD", "OPTIONS")
 _SELF_SERVICE = ("/api/logout",)                  # 只读用户也能做的写操作：管自己的登录态
 _ADMIN_ONLY = (("PUT", "/api/push/settings", "推送设置只有管理员能改"),
                ("PUT", "/api/scheduler", "定时总开关只有管理员能改"),
-               ("PUT", "/api/notify/settings", "飞书通知设置只有管理员能改"))
+               ("PUT", "/api/notify/settings", "通知设置只有管理员能改"))
 
 
 def denied_reason(role: str, method: str, path: str) -> str:

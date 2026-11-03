@@ -113,7 +113,7 @@ export const TaskBody = {
     <div class="card sect">
       <div class="sect-head"><h3>数据质量与选项<small>{{ once ? '只对这一次执行生效，不会保存' : '改完点「保存任务」才生效' }}</small></h3></div>
       <div class="opts">
-        <div class="opt"><div><b>质量检测不通过就回退</b><Tip text="先重算（次数不填 = 用 settings），还不通过：不写库、不推送，发飞书通知"/></div>
+        <div class="opt"><div><b>质量检测不通过就回退</b><Tip text="先重算（次数不填 = 用 settings），还不通过：不写库、不推送，发通知"/></div>
           <div class="opt-r"><span class="hint">重算</span><input v-model="cfg.quality_retries" class="w64" placeholder="默认"/><span class="hint">次</span>
             <Switch v-model="cfg.quality_gate"/></div></div>
         <div class="opt"><div><b>下钻表按采集关键字过滤</b><Tip text="下钻表只收评论包含本景区采集关键字（及词云里的词）的评论"/></div>
