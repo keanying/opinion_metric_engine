@@ -129,6 +129,11 @@ class App:
         self.scheduler = Scheduler(self.store, self.runner) if scheduler_enabled else None
         self._db_factory = db_factory
         self.started_at = now_str()
+        # 系统状态：系统表库 / 指标库在后台线程里检测（连库最多要等 connect_timeout 秒，不能卡住请求）
+        self._health_lock = threading.Lock()
+        self._health_deps: Dict[str, dict] = {}
+        self._health_at = 0.0
+        self._health_busy = False
 
     def start(self):
         self.runner.start()
@@ -139,6 +144,56 @@ class App:
         if self.scheduler:
             self.scheduler.stop()
         self.runner.stop()
+
+    # ------------------------------------------------------------ 系统状态
+    HEALTH_TTL = 20                                   # 秒：库的检测结果缓存这么久
+
+    def health(self, refresh: bool = False) -> dict:
+        """页面顶栏的状态标识：服务（能响应就是在线）、系统表库、指标库、定时。
+
+        库的检测放在后台线程，这里立刻返回上一次的结果；第一次还没测完时显示「检测中」。
+        """
+        with self._health_lock:
+            stale = refresh or time.time() - self._health_at > self.HEALTH_TTL
+            if stale and not self._health_busy:
+                self._health_busy = True
+                threading.Thread(target=self._check_deps, name="health", daemon=True).start()
+            deps = dict(self._health_deps)
+            busy = self._health_busy
+        checks = [{"key": "service", "label": "服务", "ok": True, "detail": f"运行中 · {self.started_at} 启动"}]
+        for key, label in (("store", "系统表库"), ("db", "指标库")):
+            checks.append(deps.get(key) or {"key": key, "label": label, "ok": None, "detail": "检测中…"})
+        if self.scheduler is None:
+            checks.append({"key": "scheduler", "label": "定时", "ok": None, "detail": "未启动（--no-scheduler），只能手动执行"})
+        elif not self.scheduler.enabled:
+            checks.append({"key": "scheduler", "label": "定时", "ok": None, "detail": "总开关已关闭，到点不会自动执行"})
+        else:
+            checks.append({"key": "scheduler", "label": "定时", "ok": True, "detail": "运行中"})
+        cur, queued = self.runner.current, self.runner.queued()
+        checks.append({"key": "runner", "label": "执行器", "ok": True,
+                       "detail": (f"正在执行 #{cur}" if cur else "空闲") + (f"，排队 {queued} 个" if queued else "")})
+        return {"ok": all(c["ok"] is not False for c in checks), "now": now_str(),
+                "checked_at": deps.get("checked_at", {}).get("detail", ""), "checking": busy, "checks": checks}
+
+    def _check_deps(self) -> None:
+        out: Dict[str, dict] = {}
+        try:
+            self.store.get_kv("scheduler", {})
+            out["store"] = {"key": "store", "label": "系统表库", "ok": True, "detail": self.store.describe()}
+        except Exception as e:                        # noqa: BLE001
+            out["store"] = {"key": "store", "label": "系统表库", "ok": False,
+                            "detail": f"读写系统表失败：{str(e)[:200]}（任务、执行记录存不进去）"}
+        c = self.settings.db
+        where = f"MySQL {c.host}:{c.port} 库 {c.ads_db() or c.database}"
+        try:
+            self._query("select 1 as ok")
+            out["db"] = {"key": "db", "label": "指标库", "ok": True, "detail": where}
+        except ApiError as e:
+            out["db"] = {"key": "db", "label": "指标库", "ok": False,
+                         "detail": f"{where} 连不上：{str(e)[:200]}（跑批、指标查看、数据检测都用不了）"}
+        out["checked_at"] = {"detail": now_str()}
+        with self._health_lock:
+            self._health_deps, self._health_at, self._health_busy = out, time.time(), False
 
     # ------------------------------------------------------------ 数据库
     def _db(self):
@@ -618,7 +673,7 @@ def _route_table(app: App):
         return (q.get(k) or [default])[0]
 
     return [
-        ("GET", r"/api/health", lambda m, q, b: {"ok": True, "now": now_str()}),
+        ("GET", r"/api/health", lambda m, q, b: app.health(refresh=q1(q, "refresh") == "1")),
         ("GET", r"/api/overview", lambda m, q, b: app.overview()),
         ("GET", r"/api/config", lambda m, q, b: app.config_view()),
         ("GET", r"/api/task-defaults", lambda m, q, b: TASK_DEFAULTS),

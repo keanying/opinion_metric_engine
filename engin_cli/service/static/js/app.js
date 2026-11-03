@@ -1,6 +1,6 @@
 // 入口：外框 + 图标侧栏 + 顶栏 + 极简 hash 路由（#/tasks、#/runs/12 …）。新增页面：在 ROUTES 里加一行即可。
 import { createApp, reactive, computed, h, ref, onMounted, onUnmounted } from 'vue'
-import { toast, sched, refreshSched, search, dialog } from './api.js'
+import { toast, sched, refreshSched, search, dialog, health, checkHealth } from './api.js'
 import { installUI } from './ui.js'
 import Overview from './pages/overview.js'
 import { TaskList, TaskEdit } from './pages/tasks.js'
@@ -56,11 +56,24 @@ const App = {
     })
     let timer
     document.title = '标签计算中心'                      // 浏览器标签页标题固定
-    onMounted(() => { refreshSched(); timer = setInterval(refreshSched, 15000) })
-    onUnmounted(() => clearInterval(timer))
+    // 系统状态：正常 10 秒测一次，连不上时 5 秒一次
+    let htimer
+    const loopHealth = async () => { await checkHealth(); htimer = setTimeout(loopHealth, health.state === 'down' ? 5000 : 10000) }
+    const hp = ref(false)                       // 状态面板开没开
+    const closeHp = e => { if (hp.value && !e.target.closest('.hp-wrap')) hp.value = false }
+    onMounted(() => { refreshSched(); timer = setInterval(refreshSched, 15000); loopHealth()
+      window.addEventListener('mousedown', closeHp) })
+    onUnmounted(() => { clearInterval(timer); clearTimeout(htimer); window.removeEventListener('mousedown', closeHp) })
+    const recheck = () => checkHealth(true).then(() => setTimeout(checkHealth, 1500))
+    const checks = computed(() => health.state === 'down'
+      ? [{ key: 'service', label: '服务', ok: false, detail: `没有响应（已停止或网络中断），${health.since} 起` }]
+      : (health.data?.checks || []))
     const pill = computed(() => {
+      if (health.state === 'down') return { cls: 'red', text: '服务连不上 · 可能已停止' }
+      const bad = (health.data?.checks || []).filter(c => c.ok === false)
+      if (bad.length) return { cls: 'amber', text: bad.map(c => c.label).join('、') + '连不上' }
       const d = sched.data
-      if (!d) return null
+      if (!d) return { cls: 'grey', text: '检测中…' }
       if (!d.available) return { cls: 'grey', text: '定时未启动（--no-scheduler）' }
       if (!d.enabled) return { cls: 'grey', text: '定时已暂停 · 只能手动执行' }
       const run = d.running ? ` · 正在执行 #${d.running}` : ''
@@ -76,7 +89,7 @@ const App = {
     }
     window.addEventListener('keydown', onKey)
     const doSearch = () => { search.q = kw.value.trim(); search.n++; kw.value = ''; location.hash = '/tasks' }
-    return { current, route, NAV, toast, pill, kw, doSearch, dialog }
+    return { current, route, NAV, toast, pill, kw, doSearch, dialog, health, hp, checks, recheck }
   },
   template: `
   <div class="frame">
@@ -87,7 +100,20 @@ const App = {
       <div class="tb-right">
         <label class="tb-search"><input v-model="kw" placeholder="搜索任务 / 景区…" @keyup.enter="doSearch"/>
           <button @click="doSearch" aria-label="搜索"><Icon name="search" :size="16" :sw="2.2"/></button></label>
-        <a v-if="pill" href="#/tasks" class="status-pill" :class="pill.cls" :title="pill.text"><i></i><span>{{ pill.text }}</span></a>
+        <div class="hp-wrap">
+          <button class="status-pill" :class="pill.cls" :title="pill.text + '（点开看系统状态）'" @click="hp = !hp"><i></i><span>{{ pill.text }}</span></button>
+          <div v-if="hp" class="hp-pop">
+            <div class="hp-head"><b>系统状态</b>
+              <span class="hp-state" :class="health.state">{{ {ok: '全部正常', warn: '部分不可用', down: '服务连不上', checking: '检测中'}[health.state] }}</span></div>
+            <p v-if="health.state === 'down'" class="hp-tip">页面连不上服务：服务可能已经停止，或网络中断。每 5 秒自动重试，恢复后页面会自动刷新。
+              服务器上重新启动：<code>python -m engin_cli.cli serve</code></p>
+            <ul class="hp-list"><li v-for="c in checks" :key="c.key">
+              <i :class="c.ok === true ? 'ok' : c.ok === false ? 'bad' : 'warn'"></i>
+              <b>{{ c.label }}</b><span>{{ c.detail }}</span></li></ul>
+            <div class="hp-foot"><span>{{ health.state === 'down' ? '上次正常 ' + (health.lastOk || '—') : '检测于 ' + (health.lastOk || '—') }}</span>
+              <a @click="recheck">重新检测</a></div>
+          </div>
+        </div>
         <a href="#/quality" class="tb-round" title="数据质量"><Icon name="shield" :size="18"/></a>
         <a href="#/runs" class="tb-round" title="执行记录"><Icon name="bell" :size="18"/></a>
       </div>
@@ -103,7 +129,7 @@ const App = {
           <div class="side-me" title="运维">运</div>
         </div>
       </aside>
-      <main class="main"><component :is="current.r.comp" v-bind="current.props" :key="route.path" /></main>
+      <main class="main"><component :is="current.r.comp" v-bind="current.props" :key="route.path + '#' + health.epoch" /></main>
     </div>
     <div class="toasts"><TransitionGroup name="toast">
       <div v-for="t in toast.items" :key="t.id" class="toast" :class="t.type">

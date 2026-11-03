@@ -62,10 +62,37 @@ html, body { height: 100%; overflow: hidden; }
 .status-pill {
   display: inline-flex; align-items: center; gap: 8px; height: 46px; padding: 0 16px; border-radius: 12px; max-width: 280px;
   background: var(--lav); color: var(--ink-2); font-size: 12px; font-weight: 500; white-space: nowrap;
+  border: 0; cursor: pointer; transition: .15s;
 }
+.status-pill:hover { filter: brightness(.97); }
 .status-pill span { overflow: hidden; text-overflow: ellipsis; }
 .status-pill i { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #b4b1c6; }
 .status-pill.green i { background: #21b8a6; box-shadow: 0 0 0 4px rgba(33, 184, 166, .15); }
+/* 服务连不上：红色、圆点闪烁；有依赖连不上（库等）：琥珀色 */
+.status-pill.red { background: #fde6ec; color: #c2365a; font-weight: 600; }
+.status-pill.red i { background: #ee5a7c; animation: hp-blink 1.2s ease-in-out infinite; }
+.status-pill.amber { background: #fff3dc; color: #a86a00; font-weight: 600; }
+.status-pill.amber i { background: #f5a524; box-shadow: 0 0 0 4px rgba(245, 165, 36, .18); }
+@keyframes hp-blink { 0%, 100% { box-shadow: 0 0 0 0 rgba(238, 90, 124, .55); } 50% { box-shadow: 0 0 0 6px rgba(238, 90, 124, 0); opacity: .55; } }
+/* 系统状态面板（点状态标识弹出） */
+.hp-wrap { position: relative; }
+.hp-pop { position: absolute; right: 0; top: calc(100% + 10px); z-index: 60; width: 380px; max-width: calc(100vw - 32px);
+  background: #fff; border-radius: 16px; box-shadow: 0 18px 44px rgba(30, 25, 70, .2); padding: 16px 18px 12px; }
+.hp-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.hp-head b { font-size: 15px; }
+.hp-state { font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 999px; background: var(--lav); color: var(--ink-2); }
+.hp-state.ok { background: #dcf5f1; color: #11806f; } .hp-state.warn { background: #fff3dc; color: #a86a00; }
+.hp-state.down { background: #fde6ec; color: #c2365a; }
+.hp-tip { margin: 0 0 10px; padding: 10px 12px; border-radius: 10px; background: #fff5f7; color: #8a2f47; font-size: 12px; line-height: 1.7; }
+.hp-tip code { background: #fde6ec; padding: 1px 6px; border-radius: 6px; font-size: 11px; }
+.hp-list { list-style: none; margin: 0; padding: 0; }
+.hp-list li { display: grid; grid-template-columns: 10px 64px minmax(0, 1fr); align-items: start; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); font-size: 13px; }
+.hp-list li:first-child { border-top: 0; }
+.hp-list i { width: 8px; height: 8px; border-radius: 50%; background: #b4b1c6; margin-top: 6px; }
+.hp-list i.ok { background: #21b8a6; } .hp-list i.bad { background: #ee5a7c; } .hp-list i.warn { background: #f5a524; }
+.hp-list b { font-weight: 600; } .hp-list span { color: var(--ink-2); font-size: 12px; overflow-wrap: anywhere; }
+.hp-foot { display: flex; align-items: center; gap: 14px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+.hp-foot span { margin-right: auto; } .hp-foot a { cursor: pointer; font-weight: 600; }
 .tb-round { display: grid; place-items: center; width: 46px; height: 46px; border-radius: 12px; background: #fff; color: var(--ink-2); box-shadow: 0 8px 20px rgba(60, 50, 140, .12); }
 .tb-round:hover { color: var(--primary); }
 /* 侧栏 + 内容 */
@@ -745,6 +772,7 @@ details summary { cursor: pointer; color: var(--primary); font-size: 13px; margi
   .tb-right { width: 100%; justify-content: flex-start; gap: 8px; }
   .tb-search { flex: 1; height: 44px; } .tb-search input { width: 100%; }
   .status-pill, .tb-round { height: 44px; } .tb-round { width: 44px; } .status-pill { display: none; }
+  .status-pill.red, .status-pill.amber { display: inline-flex; }       /* 手机上出问题时也要看得到 */
   .ov { grid-template-columns: 1fr; }
   .card { padding: 18px 16px; }
   .sect { padding: 0; }

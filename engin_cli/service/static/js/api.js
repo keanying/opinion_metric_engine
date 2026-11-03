@@ -5,7 +5,13 @@ export async function api(path, { method = 'GET', body } = {}) {
     opt.headers['Content-Type'] = 'application/json'
     opt.body = JSON.stringify(body)
   }
-  const res = await fetch(path, opt)
+  let res
+  try { res = await fetch(path, opt) }
+  catch (e) {                                   // 网络层失败（服务停了 / 断网）：浏览器只给一句 Failed to fetch
+    markDown(); checkHealth()
+    throw new Error(DOWN_TEXT)
+  }
+  if (res.status === 502 || res.status === 503 || res.status === 504) { markDown(); checkHealth() }
   let data = null
   try { data = await res.json() } catch (e) { /* 非 JSON */ }
   if (!res.ok) throw new Error((data && data.error) || `请求失败（HTTP ${res.status}）`)
@@ -104,4 +110,32 @@ export function notify(text, type = 'ok') {
   const item = { id: Math.random(), text, type }
   toast.items.push(item)
   setTimeout(() => { toast.items.splice(toast.items.indexOf(item), 1) }, type === 'err' ? 6000 : 3000)
+}
+
+// ── 系统状态：顶栏状态标识用。每 10 秒（连不上时每 5 秒）测一次 /api/health ─────────────
+export const DOWN_TEXT = '连不上服务：服务可能已停止或网络中断，恢复后页面会自动刷新'
+// state：checking 检测中 / ok 正常 / warn 服务在、但有依赖不可用（库连不上等）/ down 服务连不上
+// epoch：服务从「连不上」恢复时 +1，外层据此重新加载当前页面
+export const health = reactive({ state: 'checking', data: null, lastOk: '', since: '', epoch: 0 })
+const hhmmss = () => new Date().toLocaleTimeString('zh-CN', { hour12: false })
+function markDown() {
+  if (health.state !== 'down') { health.since = hhmmss() }
+  health.state = 'down'
+}
+let healthBusy = false
+export async function checkHealth(refresh = false) {
+  if (healthBusy) return
+  healthBusy = true
+  try {
+    let res = null, d = null
+    try { res = await fetch('/api/health' + (refresh ? '?refresh=1' : ''), { headers: { 'X-Requested-With': 'omx' }, cache: 'no-store' }) }
+    catch (e) { return markDown() }
+    try { d = await res.json() } catch (e) { /* 非 JSON：前面有代理、服务没起来 */ }
+    if (!res.ok || !d || !d.checks) { if (res.status !== 401) markDown(); return }
+    const wasDown = health.state === 'down'
+    health.data = d
+    health.state = d.ok ? 'ok' : 'warn'
+    health.lastOk = hhmmss()
+    if (wasDown) { health.epoch++; notify('服务已恢复，页面已刷新') }
+  } finally { healthBusy = false }
 }

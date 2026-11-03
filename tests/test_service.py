@@ -851,3 +851,37 @@ def test_copy_preview_api(server):
     code, pv = _call(base, "/api/tasks/preview", "POST", {"config": COPY_CFG, "schedule": {"times": ["08:10"]}})
     assert pv["ok"] and len(pv["copies"]) == 1 and pv["copies"][0]["command"].startswith("python -m engin_cli.cli mock ")
     assert pv["push_no_url"] is True
+
+
+def test_health_reports_each_part_and_never_blocks(server):
+    """顶栏状态标识：服务能响应就在线；系统表库 / 指标库在后台线程检测，接口立刻返回。"""
+    base, app, _ = server
+
+    class OkDB:
+        def query_df(self, sql, params=()):
+            return pd.DataFrame([{"ok": 1}])
+
+        def close(self):
+            pass
+
+    class DownDB(OkDB):
+        def query_df(self, sql, params=()):
+            raise OSError("Connection refused")
+
+    app._db_factory = OkDB
+    code, h = _call(base, "/api/health?refresh=1")
+    assert code == 200 and h["checks"][0]["key"] == "service" and h["checks"][0]["ok"] is True
+    _wait(lambda: not app._health_busy and app._health_deps)
+    code, h = _call(base, "/api/health")
+    by = {c["key"]: c for c in h["checks"]}
+    assert h["ok"] and by["store"]["ok"] and by["db"]["ok"]
+    assert by["scheduler"]["ok"] is None                   # --no-scheduler：提示，不算故障
+
+    app._db_factory = DownDB
+    _call(base, "/api/health?refresh=1")
+    _wait(lambda: not app._health_busy and app._health_deps["db"]["ok"] is False)
+    code, h = _call(base, "/api/health")
+    by = {c["key"]: c for c in h["checks"]}
+    assert code == 200 and not h["ok"] and by["db"]["ok"] is False
+    assert "Connection refused" in by["db"]["detail"] and by["service"]["ok"] is True
+    assert FAKE_DB_PW not in json.dumps(h, ensure_ascii=False)          # 不带密码
