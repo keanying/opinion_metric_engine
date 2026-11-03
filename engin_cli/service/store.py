@@ -5,7 +5,7 @@
 表名沿用数仓命名规范，见 sql/sys_trf_social_opinion_service_ddl.sql：
 
     dim_trf_social_opinion_task_f              任务配置
-    dim_trf_social_opinion_service_setting_f   服务级设置（定时总开关、推送设置）
+    dim_trf_social_opinion_service_setting_f   服务级设置（定时总开关、推送设置、飞书通知设置）
     dwd_trf_social_opinion_task_run_di         任务执行记录（travel_date 分区）
     dwd_trf_social_opinion_schedule_log_di     调度日志（travel_date 分区）
 

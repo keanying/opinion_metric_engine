@@ -32,7 +32,7 @@ create table if not exists dim_trf_social_opinion_task_f
 -- ════════════════════════════════════════════════════════════════════
 create table if not exists dim_trf_social_opinion_service_setting_f
 (
-    setting_code  varchar(64)  not null comment '设置项编码：scheduler-定时总开关 push-推送设置' primary key,
+    setting_code  varchar(64)  not null comment '设置项编码：scheduler-定时总开关 push-推送设置 notify-飞书通知设置' primary key,
     setting_value text         null comment '设置内容 JSON。scheduler：{"enabled":true}（true-定时开启 false-定时暂停，只能手动执行）；push：{"enabled":推送总开关（false-任务只算不推）,"push_url":推送地址,"push_batch_size":每批行数,"push_timeout":超时秒,"push_retries":重试次数,"push_dry_run":试推,"push_strict":推送失败算执行失败}，值为空=用 settings_local.py 的配置',
     update_time   datetime     not null comment '最后修改时间'
 )

@@ -670,6 +670,20 @@ details summary { cursor: pointer; color: var(--primary); font-size: 13px; margi
 .tool { display: flex; flex-direction: column; gap: 12px; align-items: flex-start; margin: 0; }
 .tool h3 { font-size: 15px; } .tool p { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
 .tool .btn { margin-top: auto; }
+/* 维护页工具卡：重跑（选任务 + 日期）、飞书通知（当前地址 + 设置 / 测试） */
+.tool-main { width: 100%; min-width: 0; }
+.tool-form { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.tool-form select { height: 38px; min-width: 180px; max-width: 100%; }
+.tool-main p .tag { vertical-align: 1px; }
+.tool-main p .mono { word-break: break-all; }
+.tool-btns { display: flex; gap: 8px; margin-top: auto; }
+.tool-btns .btn { margin-top: 0; }
+.modal.narrow { width: min(560px, 100%); }
+.fs-form { display: grid; gap: 12px; padding-top: 16px; }
+.fs-form .frow > label { width: 84px; }
+.fs-form .frow > input { flex: 1; min-width: 220px; height: 38px; }
+.fs-form .chk { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink-2); cursor: pointer; }
+.fs-form p { margin: 0; }
 
 /* 指标页 */
 .toolbar-card { padding: 16px 20px; }

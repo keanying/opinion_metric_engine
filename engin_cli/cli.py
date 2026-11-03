@@ -808,8 +808,8 @@ def cmd_notify_test(args) -> int:
     if args.webhook:
         st.notify_feishu_webhook = args.webhook
     if not st.notify_feishu_webhook:
-        print("未配置飞书 webhook：在 settings_local.py 里填 notify_feishu_webhook，"
-              "或设环境变量 OPINION_FEISHU_WEBHOOK，或用 --webhook 传入")
+        print("未配置飞书 webhook：在服务页面「维护 → 飞书通知 → 设置」里填，"
+              "或在 settings_local.py 里填 notify_feishu_webhook，或设环境变量 OPINION_FEISHU_WEBHOOK，或用 --webhook 传入")
         return 2
     ok = send_feishu(st, "【舆情指标】通知测试", ["这是一条测试消息：数据质量检测不通过、"
                                                  "指标计算异常时会发到这个群。"])

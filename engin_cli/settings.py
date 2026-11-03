@@ -328,7 +328,7 @@ def load_settings() -> EtlSettings:
 
 # 页面上能改的字段，不允许借 OPINION_SETTINGS_JSON 改数据库连接等
 OVERRIDABLE = ("push_url", "push_batch_size", "push_timeout", "push_retries", "push_retry_backoff",
-               "push_dry_run", "push_strict")
+               "push_dry_run", "push_strict", "notify_feishu_webhook", "notify_feishu_secret")
 
 
 def apply_overrides(s: "EtlSettings", text) -> None:
