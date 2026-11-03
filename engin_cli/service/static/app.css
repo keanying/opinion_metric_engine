@@ -421,8 +421,9 @@ details summary { cursor: pointer; color: var(--primary); font-size: 13px; margi
 .s-empty-desc { margin-top: 10px; color: var(--s-text-1); font-weight: 600; font-size: 14px; }
 .pager { display: flex; justify-content: flex-end; align-items: center; gap: 6px; margin-top: 14px; }
 .pager .muted { margin-right: 6px; font-size: 13px; }
-.kv { display: grid; grid-template-columns: 110px 1fr; gap: 6px 10px; margin: 0; font-size: 13px; }
-.kv dt { color: var(--muted); } .kv dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 键列按最长的键自适应（最多占一半，再长就折行），值列省略号，避免长键名压到值上 */
+.kv { display: grid; grid-template-columns: fit-content(50%) minmax(0, 1fr); gap: 6px 14px; margin: 0; font-size: 13px; }
+.kv dt { color: var(--muted); overflow-wrap: anywhere; } .kv dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cfg { background: #f1eff8; border-radius: 14px; padding: 14px 16px; }
 .cfg h4 { font-size: 13px; margin-bottom: 10px; color: var(--primary); }
 
