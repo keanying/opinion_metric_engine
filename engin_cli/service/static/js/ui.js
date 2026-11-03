@@ -137,13 +137,24 @@ export const STable = {
 }
 
 // ── 说明图标：灰色「!」，鼠标移上去 / 键盘聚焦时浮出说明（挂到 body，不会被卡片裁掉）──────
+// 整页缩放（app.css 里桌面按 80% 显示）：getBoundingClientRect / innerWidth 是屏幕像素，
+// 弹层的 position: fixed 坐标要用缩放前的 CSS 像素，这里统一换算
+export const box = el => {
+  const de = document.documentElement, z = parseFloat(getComputedStyle(de).zoom) || 1
+  // 新版浏览器（标准 zoom）矩形是缩放后的屏幕像素，要除；老版 Chrome 已经是缩放前的，不除
+  const rz = Math.abs(de.getBoundingClientRect().width - window.innerWidth) < 2 ? z : 1
+  const r = el.getBoundingClientRect()
+  return { left: r.left / rz, top: r.top / rz, bottom: r.bottom / rz, width: r.width / rz,
+           vw: window.innerWidth / z, vh: window.innerHeight / z }
+}
+
 export const Tip = {
   props: { text: String, wide: Boolean },
   setup(p) {
     const el = ref(null), pos = ref(null)
     const show = () => {
-      const r = el.value.getBoundingClientRect(), w = p.wide ? 420 : 300
-      const left = Math.min(Math.max(r.left + r.width / 2, w / 2 + 12), window.innerWidth - w / 2 - 12)
+      const r = box(el.value), w = p.wide ? 420 : 300
+      const left = Math.min(Math.max(r.left + r.width / 2, w / 2 + 12), r.vw - w / 2 - 12)
       pos.value = r.top < 120 ? { left, top: r.bottom + 8, below: true } : { left, top: r.top - 8, below: false }
     }
     const hide = () => { pos.value = null }
@@ -173,9 +184,9 @@ export const DatePicker = {
     const outside = e => { if (!e.target.closest('.dp-pop') && !el.value.contains(e.target)) close() }
     const open = () => {
       if (pos.value) return close()
-      const r = el.value.getBoundingClientRect()
-      const below = window.innerHeight - r.bottom > 330
-      pos.value = { left: Math.min(r.left, window.innerWidth - 300), top: below ? r.bottom + 6 : r.top - 326 }
+      const r = box(el.value)
+      const below = r.vh - r.bottom > 330
+      pos.value = { left: Math.min(r.left, r.vw - 300), top: below ? r.bottom + 6 : r.top - 326 }
       const d = parseYmd(p.modelValue) || parseYmd(p.max) || new Date()
       view.value = new Date(d.getFullYear(), d.getMonth(), 1)
       window.addEventListener('mousedown', outside, true)
@@ -259,8 +270,8 @@ export const ScenicPicker = {
     const onScroll = e => { if (!e.target.closest || !e.target.closest('.sp-pop')) close() }
     const open = () => {
       if (pos.value) return
-      const r = el.value.getBoundingClientRect(), below = window.innerHeight - r.bottom > 300
-      pos.value = { left: r.left, width: Math.max(r.width, 300), top: below ? r.bottom + 6 : null, bottom: below ? null : window.innerHeight - r.top + 6 }
+      const r = box(el.value), below = r.vh - r.bottom > 300
+      pos.value = { left: r.left, width: Math.max(r.width, 300), top: below ? r.bottom + 6 : null, bottom: below ? null : r.vh - r.top + 6 }
       window.addEventListener('mousedown', outside, true); window.addEventListener('scroll', onScroll, true)
       setTimeout(() => inp.value && inp.value.focus())
     }
