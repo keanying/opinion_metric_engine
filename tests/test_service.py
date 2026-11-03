@@ -468,7 +468,7 @@ def test_metrics_endpoints(server):
 
 
 def test_online_quality_check_on_db_data(server):
-    base, _, holder = server
+    base, app, holder = server
     body = {"scenic": "S1", "start": "20261031", "end": "20261102"}
     code, r = _call(base, "/api/quality/check", "POST", body)
     assert code == 200 and r["errors"] == [] and r["rows"] > 0
@@ -477,6 +477,25 @@ def test_online_quality_check_on_db_data(server):
     m.loc[hit, "comment_total"] += 1
     code, r = _call(base, "/api/quality/check", "POST", body)
     assert any("区间相同的行指标不一致" in e for e in r["errors"])
+    # 按天列出哪天不对：td@20261101 和 latest_1d@20261102 对不上，两天都要标出来
+    assert [d["date"] for d in r["days"]] == ["20261101", "20261102"]
+    assert r["days"][0]["same_range"] >= 1 and "douyin" in r["days"][0]["channels"]
+    assert any("comment_total" in x for x in r["days"][0]["samples"])
+    # 修复：按这两天重算（写库 + 推送大盘 / 下钻）
+    assert r["push_ready"] is False                                     # 测试配置里没有推送地址
+    code, fx = _call(base, "/api/quality/repair", "POST", {"scenic": "S1", "dates": ["20261102", "20261101"]})
+    assert fx["push"] is False and "--no-push" in app.store.get_run(fx["run_id"])["command"]
+    app.settings.push_url = "https://push.example/sync"                 # 配了地址才推
+    code, fx = _call(base, "/api/quality/repair", "POST", {"scenic": "S1", "dates": ["20261102", "20261101"]})
+    assert code == 200 and (fx["start"], fx["end"], fx["push"]) == ("20261101", "20261102", True)
+    run = app.store.get_run(fx["run_id"])
+    assert run["title"].startswith("数据修复") and run["command"][:5] == ["run", "--start-date", "20261101",
+                                                                       "--end-date", "20261102"]
+    assert "--scenic" in run["command"] and "--push" in run["command"] and "--rerun-days" in run["command"]
+    assert "数据质量修复" in app.store.list_events()[0]["text"]
+    code, fx = _call(base, "/api/quality/repair", "POST", {"scenic": "S1", "dates": ["20261101"], "push": False})
+    assert "--no-push" in app.store.get_run(fx["run_id"])["command"]
+    assert _call(base, "/api/quality/repair", "POST", {"scenic": "S1", "dates": ["bad"]})[0] == 400
     assert _call(base, "/api/quality/check", "POST", {"scenic": "S1"})[0] == 400
 
 

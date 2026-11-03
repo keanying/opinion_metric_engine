@@ -1,5 +1,5 @@
 // 通用 UI 组件：图标、表格（仿 Semi Design Table）、标签、头像、空状态、开关
-import { computed, ref } from 'vue'
+import { computed, ref, onUnmounted } from 'vue'
 
 // ── 图标（24×24 线性图标，stroke 绘制）────────────────────────────────
 const ICONS = {
@@ -148,6 +148,78 @@ export const Tip = {
   </span>`,
 }
 
+// ── 日期选择：点开日历选一天，值是 yyyyMMdd 字符串（和后端一致）──────────────────────
+const ymd = d => `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`
+const parseYmd = s => /^\d{8}$/.test(s || '') ? new Date(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8)) : null
+export const DatePicker = {
+  components: { Icon },
+  props: { modelValue: String, placeholder: { type: String, default: '选择日期' }, min: String, max: String,
+           clearable: { type: Boolean, default: true }, width: { type: Number, default: 150 } },
+  emits: ['update:modelValue', 'change'],
+  setup(p, { emit }) {
+    const el = ref(null), pos = ref(null), view = ref(new Date())
+    const text = computed(() => p.modelValue && /^\d{8}$/.test(p.modelValue)
+      ? `${p.modelValue.slice(0, 4)}-${p.modelValue.slice(4, 6)}-${p.modelValue.slice(6)}` : '')
+    const close = () => { pos.value = null; window.removeEventListener('mousedown', outside, true); window.removeEventListener('scroll', close, true) }
+    const outside = e => { if (!e.target.closest('.dp-pop') && !el.value.contains(e.target)) close() }
+    const open = () => {
+      if (pos.value) return close()
+      const r = el.value.getBoundingClientRect()
+      const below = window.innerHeight - r.bottom > 330
+      pos.value = { left: Math.min(r.left, window.innerWidth - 300), top: below ? r.bottom + 6 : r.top - 326 }
+      const d = parseYmd(p.modelValue) || parseYmd(p.max) || new Date()
+      view.value = new Date(d.getFullYear(), d.getMonth(), 1)
+      window.addEventListener('mousedown', outside, true)
+      window.addEventListener('scroll', close, true)
+    }
+    onUnmounted(close)
+    const cells = computed(() => {
+      const y = view.value.getFullYear(), m = view.value.getMonth()
+      const first = new Date(y, m, 1), lead = (first.getDay() + 6) % 7       // 周一开头
+      const out = []
+      for (let i = 0; i < 42; i++) {
+        const d = new Date(y, m, 1 - lead + i), v = ymd(d)
+        out.push({ v, day: d.getDate(), other: d.getMonth() !== m, today: v === ymd(new Date()),
+                   on: v === p.modelValue, off: (p.min && v < p.min) || (p.max && v > p.max) })
+      }
+      return out
+    })
+    const move = n => { view.value = new Date(view.value.getFullYear(), view.value.getMonth() + n, 1) }
+    const pick = c => { if (c.off) return; emit('update:modelValue', c.v); emit('change', c.v); close() }
+    const clear = () => { emit('update:modelValue', ''); emit('change', ''); close() }
+    const today = () => pick({ v: ymd(new Date()), off: (p.min && ymd(new Date()) < p.min) || (p.max && ymd(new Date()) > p.max) })
+    const title = computed(() => `${view.value.getFullYear()} 年 ${view.value.getMonth() + 1} 月`)
+    return { el, pos, text, open, cells, move, pick, clear, today, title }
+  },
+  template: `
+  <span ref="el" class="dp" :class="{on: !!pos}" :style="{width: width + 'px'}" tabindex="0" @click="open" @keydown.enter.prevent="open">
+    <span :class="text ? 'dp-val' : 'dp-ph'">{{ text || placeholder }}</span>
+    <a v-if="clearable && text" class="dp-x" @click.stop="clear">×</a><Icon v-else name="calendar" :size="15"/>
+    <Teleport to="body"><div v-if="pos" class="dp-pop" :style="{left: pos.left + 'px', top: pos.top + 'px'}" @click.stop>
+      <div class="dp-head"><button @click="move(-12)">«</button><button @click="move(-1)">‹</button>
+        <b>{{ title }}</b><button @click="move(1)">›</button><button @click="move(12)">»</button></div>
+      <div class="dp-week"><span v-for="w in ['一','二','三','四','五','六','日']" :key="w">{{ w }}</span></div>
+      <div class="dp-days"><button v-for="c in cells" :key="c.v" :class="{other: c.other, today: c.today, on: c.on, off: c.off}"
+        :disabled="c.off" @click="pick(c)">{{ c.day }}</button></div>
+      <div class="dp-foot"><a @click="today">今天</a><a v-if="clearable" @click="clear">清空</a></div>
+    </div></Teleport>
+  </span>`,
+}
+
+// 起止日期：两个日历，结束不能早于开始
+export const DateRange = {
+  components: { DatePicker },
+  props: { start: String, end: String, placeholder: { type: Array, default: () => ['开始日期', '结束日期'] },
+           max: String, clearable: { type: Boolean, default: true } },
+  emits: ['update:start', 'update:end', 'change'],
+  template: `<span class="dr">
+    <DatePicker :model-value="start" :placeholder="placeholder[0]" :max="end || max" :clearable="clearable"
+      @update:model-value="v => { $emit('update:start', v); $emit('change') }"/>
+    <span class="dr-sep">至</span>
+    <DatePicker :model-value="end" :placeholder="placeholder[1]" :min="start" :max="max" :clearable="clearable"
+      @update:model-value="v => { $emit('update:end', v); $emit('change') }"/></span>`,
+}
+
 // ── 开关 ──────────────────────────────────────────────────────────────
 export const Switch = {
   props: { modelValue: Boolean, disabled: Boolean, size: String },
@@ -158,5 +230,5 @@ export const Switch = {
 
 // 全局注册（app.js 调用）
 export function installUI(app) {
-  for (const [n, c] of Object.entries({ Icon, Tag, StatusTag, Avatar, Empty, STable, Switch, Tip })) app.component(n, c)
+  for (const [n, c] of Object.entries({ Icon, Tag, StatusTag, Avatar, Empty, STable, Switch, Tip, DatePicker, DateRange })) app.component(n, c)
 }

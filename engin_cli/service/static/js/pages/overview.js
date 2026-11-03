@@ -144,7 +144,7 @@ export default {
           <template v-if="wk.b">质量回退 <b>{{ wk.b }} 次</b>，去「数据质量」看原因。</template>
           <template v-else>推送<b>{{ d.push_enabled ? '已开启' : '已关闭' }}</b>，启用任务 <b>{{ d.tasks.enabled }}/{{ d.tasks.total }}</b>。</template>
         </div>
-        <router-link to="/tasks/new" class="cta">新建任务<span><Icon name="arrowR" :size="14" :sw="2.6"/></span></router-link>
+        <router-link to="/tasks" class="cta">管理任务<span><Icon name="arrowR" :size="14" :sw="2.6"/></span></router-link>
       </section>
     </div>
 

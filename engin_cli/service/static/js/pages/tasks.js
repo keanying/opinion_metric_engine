@@ -54,16 +54,16 @@ export const TaskBody = {
   template: `
   <div class="tb">
     <div class="card sect">
-      <div class="sect-head"><h3>日期范围<Tip text="这次算哪几天，按服务器日期算；「当天」= 执行那天"/></h3></div>
+      <div class="sect-head"><h3>{{ $slots.schedule ? '定时与日期' : '日期范围' }}<Tip text="目标日期按服务器日期算；「当天」= 执行那天"/></h3></div>
       <div class="sect-body">
+        <slot name="schedule"/>
         <div class="frow"><label>目标日期</label>
           <div class="seg"><button v-for="m in DATE_MODES" :key="m[0]" :class="{on: cfg.date_mode===m[0]}"
             @click="cfg.date_mode=m[0]">{{ m[1] }}</button></div></div>
         <div class="frow" v-if="cfg.date_mode==='recent'"><label>近几天</label>
           <input type="number" min="1" v-model.number="cfg.recent_days" class="w100" /><span class="hint">天，含当天</span></div>
         <div class="frow" v-if="cfg.date_mode==='range'"><label>区间</label>
-          <input v-model="cfg.start_date" placeholder="20260701" class="w140" /><span class="hint">~</span>
-          <input v-model="cfg.end_date" placeholder="20261102" class="w140" /></div>
+          <DateRange v-model:start="cfg.start_date" v-model:end="cfg.end_date" :clearable="false" /></div>
         <div class="frow"><label>景区</label>
           <input v-model="cfg.scenics" class="grow" placeholder="景区编号，逗号分隔；不填 = 有评论的全部景区" /></div>
       </div>
@@ -254,43 +254,44 @@ export const TaskEdit = {
       <Tag :color="f.enabled ? 'green' : 'grey'" :icon="f.enabled ? 'tickCircle' : 'minus'">{{ f.enabled ? '已启用' : '已停用' }}</Tag>
     </div>
 
-    <div class="te-grid">
-      <div class="card sect">
-        <div class="sect-head"><h3>定时<Tip text="每天几点自动执行（服务器时间）。不加时间 = 只手动执行；多个时间各跑一次，例如 08:10 跑完、20:10 再补一遍晚到的评论"/></h3></div>
-        <div class="sect-body">
-          <div class="frow"><label>每天</label>
-            <div class="chips">
-              <span v-for="(t,i) in f.times" :key="t" class="time-chip">{{ t }}<a @click="f.times.splice(i,1)">×</a></span>
-              <span class="time-add"><input v-model="newTime" type="time" @keyup.enter="addTime"/><Icon name="clock" :size="14"/></span>
-              <button class="btn light sm" @click="addTime">添加</button></div></div>
-          <div v-if="sched.data && !sched.data.enabled" class="alert orange small">定时总开关已暂停，到点不会执行</div>
+    <div class="te-layout">
+      <div class="te-main">
+        <TaskBody :cfg="f.config" :push-off="!!(preview && preview.push_off)">
+          <template #schedule>
+            <div class="frow"><label>定时<Tip text="每天几点自动执行（服务器时间）。不加时间 = 只手动执行；多个时间各跑一次，例如 08:10 跑完、20:10 再补一遍晚到的评论"/></label>
+              <div class="chips">
+                <span v-for="(t,i) in f.times" :key="t" class="time-chip">{{ t }}<a @click="f.times.splice(i,1)">×</a></span>
+                <span class="time-add"><input v-model="newTime" type="time" @keyup.enter="addTime"/><Icon name="clock" :size="14"/></span>
+                <button class="btn light sm" @click="addTime">添加</button></div></div>
+            <div v-if="sched.data && !sched.data.enabled" class="alert orange small">定时总开关已暂停，到点不会执行</div>
+          </template>
+        </TaskBody>
+        <div class="savebar">
+          <span class="hint">下次运行：{{ preview && preview.ok && preview.next_fires.length && f.enabled ? preview.next_fires[0] : '—' }}</span>
+          <a href="#/tasks" class="btn light">取消</a>
+          <button class="btn primary" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存任务' }}</button>
         </div>
       </div>
-      <div class="card sect">
-        <div class="sect-head"><h3>预览<Tip text="按当前设置，这次定时会跑什么"/></h3></div>
-        <div v-if="preview && preview.ok" class="preview">
-          <div class="pv-row"><span>下次运行</span><b>{{ preview.next_fires.length ? preview.next_fires.join('、') : '仅手动' }}</b></div>
-          <div class="pv-row"><span>目标日期</span><b>{{ preview.start === preview.end ? preview.start : preview.start + ' ~ ' + preview.end }}</b><em>（按今天算）</em></div>
-          <div class="pv-row"><span>景区</span><b>{{ preview.scenics.length ? preview.scenics.join('、') : '有评论的全部景区' }}</b></div>
-          <div class="pv-row"><span>计算</span><div class="chips">
-            <Tag v-if="!preview.tables.length" color="indigo">全部 6 张表</Tag>
-            <Tag v-for="k in preview.tables" :key="k" color="indigo">{{ TABLE_LABEL[k] }}</Tag></div></div>
-          <div class="pv-row"><span>推送</span><div class="chips">
-            <Tag v-for="k in preview.push" :key="k" color="cyan" icon="send">{{ TABLE_LABEL[k] }}</Tag>
-            <Tag v-if="!preview.push.length" color="grey">{{ preview.push_off ? '推送总开关关闭，不推送' : '不推送' }}</Tag></div></div>
-          <code class="cmd">{{ preview.command }}</code>
+      <aside class="te-side">
+        <div class="card sect">
+          <div class="sect-head"><h3>预览<Tip text="按当前设置，这次定时会跑什么（目标日期按今天算）"/></h3></div>
+          <div v-if="preview && preview.ok" class="preview">
+            <div class="pv-row"><span>下次运行</span><div class="pv-list"><b v-for="x in preview.next_fires" :key="x">{{ x }}</b>
+              <b v-if="!preview.next_fires.length">仅手动</b></div></div>
+            <div class="pv-row"><span>目标日期</span><b>{{ preview.start === preview.end ? preview.start : preview.start + ' ~ ' + preview.end }}</b></div>
+            <div class="pv-row"><span>景区</span><b>{{ preview.scenics.length ? preview.scenics.join('、') : '有评论的全部景区' }}</b></div>
+            <div class="pv-row"><span>计算</span><div class="chips">
+              <Tag v-if="!preview.tables.length" color="indigo">全部 6 张表</Tag>
+              <Tag v-for="k in preview.tables" :key="k" color="indigo">{{ TABLE_LABEL[k] }}</Tag></div></div>
+            <div class="pv-row"><span>推送</span><div class="chips">
+              <Tag v-for="k in preview.push" :key="k" color="cyan" icon="send">{{ TABLE_LABEL[k] }}</Tag>
+              <Tag v-if="!preview.push.length" color="grey">{{ preview.push_off ? '推送总开关关闭' : '不推送' }}</Tag></div></div>
+            <code class="cmd block">{{ preview.command }}</code>
+          </div>
+          <div v-else-if="preview" class="alert red">{{ preview.error }}</div>
         </div>
-        <div v-else-if="preview" class="alert red">{{ preview.error }}</div>
-      </div>
-    </div>
-
-    <TaskBody :cfg="f.config" :push-off="!!(preview && preview.push_off)" />
-    <EventLog v-if="id" :events="events" sub="这个任务的触发 / 跳过记录" />
-
-    <div class="savebar">
-      <span class="hint">下次运行：{{ preview && preview.ok && preview.next_fires.length && f.enabled ? preview.next_fires[0] : '—' }}</span>
-      <a href="#/tasks" class="btn light">取消</a>
-      <button class="btn primary" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存任务' }}</button>
+        <EventLog v-if="id" :events="events" sub="这个任务的触发 / 跳过记录" />
+      </aside>
     </div>
   </div>`,
 }

@@ -70,7 +70,7 @@ export default {
       <div class="toolbar wrap">
         <select v-model="q.scenic" class="w240"><option v-for="s in scenics" :key="s.scenic_id" :value="s.scenic_id">
           {{ s.scenic_name || s.scenic_id }}（{{ s.scenic_id }}）</option></select>
-        <input v-model="q.date" class="w160" placeholder="yyyyMMdd（默认最新）" @keyup.enter="load" />
+        <DatePicker v-model="q.date" placeholder="默认最新一天" @change="load" />
         <button class="btn primary sm" @click="load"><Icon name="search" :size="14"/>查询</button>
         <div class="seg"><button v-for="g in GRANULARITIES" :key="g[0]" :class="{on: q.granularity===g[0]}"
           @click="q.granularity=g[0]">{{ g[1] }}</button></div>

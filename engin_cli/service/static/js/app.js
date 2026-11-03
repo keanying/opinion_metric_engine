@@ -83,7 +83,6 @@ const App = {
       <header class="topbar">
         <span class="tb-space"></span>
         <div class="tb-right">
-          <a href="#/tasks/new" class="btn primary pill"><Icon name="plus" :size="15" :sw="2.4"/>新建任务</a>
           <a v-if="pill" href="#/tasks" class="status-pill" :class="pill.cls"><i></i>{{ pill.text }}</a>
           <a href="#/quality" class="tb-bell" title="数据质量"><Icon name="bell" :size="19"/></a>
           <span class="tb-me">OPS</span>

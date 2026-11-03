@@ -109,8 +109,7 @@ export default {
             <div class="frow"><label>表</label><div class="chips">
               <button v-for="t in TABLES" :key="t.key" class="chip-btn" :class="{on: re.tables.split(',').includes(t.key)}"
                 @click="toggleRe(t.key)">{{ t.label }}</button></div></div>
-            <div class="frow"><label>日期</label><input v-model="re.start" class="w140" placeholder="不填 = 全部" /><span class="hint">~</span>
-              <input v-model="re.end" class="w140" placeholder="yyyyMMdd" />
+            <div class="frow"><label>日期</label><DateRange v-model:start="re.start" v-model:end="re.end" :placeholder="['不选 = 全部', '结束日期']" />
               <button class="btn primary" @click="doRepush"><Icon name="send" :size="14"/>开始补推</button></div>
           </div>
         </div>
@@ -120,8 +119,7 @@ export default {
     <div class="card">
       <div class="card-head"><h3>推送记录<Tip text="每个请求一行：推了哪个表、哪个景区、对方怎么回的；点右边的眼睛看完整响应"/></h3>
         <div class="toolbar">
-          <select v-model="q.date" @change="loadLogs"><option v-for="d in (logs ? logs.dates : [])" :key="d" :value="d">{{ ymd(d) }}</option>
-            <option v-if="!logs || !logs.dates.length" value="">暂无记录</option></select>
+          <DatePicker v-model="q.date" :clearable="false" placeholder="推送日期" @change="loadLogs" />
           <select v-model="q.result" @change="loadLogs"><option value="">全部结果</option>
             <option v-for="(v,k) in PUSH_RESULT" :key="k" :value="k">{{ v.text }}</option></select>
           <span class="search"><Icon name="search" :size="15"/><input v-model="q.kw" placeholder="景区 / 表 / 响应内容" @keyup.enter="loadLogs"/></span>

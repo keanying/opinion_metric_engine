@@ -81,6 +81,27 @@ def _mask(v: str, keep: int = 6) -> str:
     return v[:keep] + "***" if len(v) > keep else "***"
 
 
+def _issues_by_day(issues: List[dict]) -> List[dict]:
+    """质量检测明细 → 按日期汇总：哪天不对、几处、哪些渠道、举几个例子。"""
+    by: Dict[int, dict] = {}
+    for it in issues:
+        d = by.setdefault(int(it["date"]), {"date": str(it["date"]), "count": 0, "same_range": 0,
+                                            "period_sum": 0, "channels": [], "samples": []})
+        d["count"] += 1
+        d[it["check"]] = d.get(it["check"], 0) + 1
+        if it["channel"] not in d["channels"]:
+            d["channels"].append(it["channel"])
+        if len(d["samples"]) < 4:
+            r, v = it.get("rows") or [], it.get("values") or []
+            if it["check"] == "same_range" and len(r) > 1 and len(v) > 1:
+                txt = f"{it['channel']} · {it['field']}：{r[0]} = {v[0]}，{r[1]} = {v[1]}"
+            else:
+                txt = (f"{it['channel']} · {r[0] if r else ''} 评论数 {v[0] if v else ''}，"
+                       f"区间内每天 td 合计 {v[1] if len(v) > 1 else ''}")
+            d["samples"].append(txt)
+    return [by[k] for k in sorted(by)]
+
+
 def open_store(settings, data_dir: str) -> Store:
     """按 settings.service_store 打开系统表存储：mysql（默认，数仓规范的系统表）/ sqlite（本机试用）。"""
     kind = str(getattr(settings, "service_store", "mysql") or "mysql").lower()
@@ -429,12 +450,41 @@ class App:
         ctx = RunContext(settings=st, output_dates=[end], load_start=start, load_end=end)
         lb = {g["name"]: _lookback(ctx, g) for g in specs}
         checks = ["区间相同的行指标一致（td@T-1 = latest_1d@T、周一 wtd = 当天 td …）"]
-        errs = validate_macro_same_range(df, specs, lb)
+        issues: List[dict] = []
+        errs = validate_macro_same_range(df, specs, lb, issues=issues)
         if len(set(ctx.backfill_lookback().values())) <= 1:
             checks.append("各周期评论数 = 区间内每天 td 之和")
-            errs += validate_period_sums(df, specs)
-        return {"rows": len(df), "errors": errs, "checks": checks,
-                "message": "全部通过" if not errs else f"{len(errs)} 项不通过"}
+            errs += validate_period_sums(df, specs, issues=issues)
+        days = _issues_by_day(issues)
+        return {"scenic": scenic, "start": start, "end": end, "rows": len(df), "errors": errs,
+                "checks": checks, "days": days, "push_ready": self.push_ready(),
+                "message": "全部通过" if not errs else f"{len(days)} 天有问题，共 {len(issues)} 处"}
+
+    def push_ready(self) -> bool:
+        """推送能用：总开关开着、且配了推送地址（页面设置或 settings_local）。"""
+        ps = self.runner.push_settings()
+        return bool(ps["enabled"] and (ps.get("push_url") or getattr(self.settings, "push_url", "")))
+
+    def quality_repair(self, body: dict) -> dict:
+        """数据修复：把有问题的日期按当前源数据重算一遍（写库，可选推送）。"""
+        scenic = str(body.get("scenic") or "").strip()
+        dates = sorted({str(d) for d in (body.get("dates") or [])})
+        if not scenic or not dates or not all(re.fullmatch(r"\d{8}", d) for d in dates):
+            raise ApiError(400, "要选景区和要修复的日期（yyyyMMdd）")
+        # 推送没开 / 没配地址：只重算写库，不推（否则 run 会因为没地址直接退出，什么都没修）
+        push = ",".join(t for t in str(body.get("push_tables") or "drill,macro").split(",") if t) \
+            if body.get("push", True) and self.push_ready() else ""
+        try:
+            argv, title = build_run_argv({"scenics": scenic, "date_mode": "range", "start_date": dates[0],
+                                          "end_date": dates[-1], "rerun_days": 0, "push": push,
+                                          "verbose": True})
+        except ValueError as e:
+            raise ApiError(400, str(e))
+        run_id = self.runner.submit("run", argv, "数据修复 · " + title)
+        span = dates[0] if dates[0] == dates[-1] else f"{dates[0]}~{dates[-1]}"
+        self.store.add_event(f"数据质量修复：{scenic} {span}（{len(dates)} 天有问题）已提交执行 #{run_id}"
+                             + ("，修复后推送" if push else "，不推送"))
+        return {"run_id": run_id, "start": dates[0], "end": dates[-1], "push": bool(push)}
 
     # ------------------------------------------------------------ 指标查看
     def metric_scenics(self) -> List[dict]:
@@ -580,6 +630,7 @@ def _route_table(app: App):
         ("POST", r"/api/runs/(\d+)/cancel", lambda m, q, b: {"ok": app.runner.cancel(I(m[1]))}),
         ("GET", r"/api/quality", lambda m, q, b: app.quality(I(q1(q, "days", "14")))),
         ("POST", r"/api/quality/check", lambda m, q, b: app.quality_check(b)),
+        ("POST", r"/api/quality/repair", lambda m, q, b: app.quality_repair(b)),
         ("GET", r"/api/metrics/scenics", lambda m, q, b: app.metric_scenics()),
         ("GET", r"/api/metrics/cell", lambda m, q, b: app.metric_cell(
             q1(q, "scenic"), q1(q, "date"), q1(q, "granularity", "td"))),

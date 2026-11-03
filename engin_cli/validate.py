@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import json
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
@@ -290,14 +290,25 @@ MACRO_SAME_RANGE_GROUPS = [
 ]
 
 
+def _plain(v):
+    """issues 里的值转成能 JSON 的（numpy / Decimal → float，其余转字符串，截短）。"""
+    try:
+        f = round(float(v), 6)
+        return int(f) if f.is_integer() else f
+    except (TypeError, ValueError):
+        return str(v)[:80]
+
+
 def validate_macro_same_range(macro: pd.DataFrame, specs: list,
-                              lookbacks: dict = None) -> List[str]:
+                              lookbacks: dict = None, issues: Optional[list] = None) -> List[str]:
     """大盘表里区间相同的行，指标必须一样。
 
     同景区 × 渠道，不同日期 / 周期粒度的两行，只要算某个指标用到的区间相同，这个指标就必须相等。
     例如 td@T-1 与 latest_1d@T，本期都是 T-1；还有周一的 wtd 与当天 td、1 号的 mtd 与当天 td。
     哪些指标用哪几段区间见 MACRO_SAME_RANGE_GROUPS。
     lookbacks {周期名: 补数上限}：上限不同的两个周期补出来的明细本来就可能不同，不放在一起比。
+    issues    传一个 list 进来就把每处不一致明细追加进去（哪天、哪个渠道、哪个字段），页面「数据质量」用：
+              {"date", "check": "same_range", "channel", "field", "rows": ["td@20261101", "latest_1d@20261102"]}
     """
     errs: List[str] = []
     if macro is None or macro.empty or not specs:
@@ -335,6 +346,12 @@ def validate_macro_same_range(macro: pd.DataFrame, specs: list,
                     differs = v.astype(str) != str(v.iloc[0])
                 if differs.any():
                     bad += 1
+                    if issues is not None and len(issues) < 5000:
+                        rows = [g["_who"].iloc[0]] + g["_who"][differs].tolist()
+                        for d in sorted({int(x.split("@")[1]) for x in rows}):
+                            issues.append({"date": d, "check": "same_range", "channel": g["channel"].iloc[0],
+                                           "field": c, "rows": rows[:6],
+                                           "values": [_plain(x) for x in [v.iloc[0]] + v[differs].tolist()[:5]]})
                     if sample is None:
                         who = g["_who"]
                         sample = (f"景区 {g['scenic_id'].iloc[0]} 渠道 {g['channel'].iloc[0]}："
@@ -345,7 +362,7 @@ def validate_macro_same_range(macro: pd.DataFrame, specs: list,
     return errs
 
 
-def validate_period_sums(macro: pd.DataFrame, specs: list) -> List[str]:
+def validate_period_sums(macro: pd.DataFrame, specs: list, issues: Optional[list] = None) -> List[str]:
     """补数上限统一时（settings.backfill_lookback 是一个数）：每天只有一份补齐结果，
     所以任意周期的 comment_total == 本期区间内每天 td 的 comment_total 之和（每个渠道、all 都是）。
 
@@ -379,6 +396,10 @@ def validate_period_sums(macro: pd.DataFrame, specs: list) -> List[str]:
             checked += 1
             if int(got.sum()) != int(total):
                 bad += 1
+                if issues is not None and len(issues) < 5000:
+                    issues.append({"date": int(t), "check": "period_sum", "channel": ch,
+                                   "field": "comment_total", "rows": [f"{spec['name']}@{t}"],
+                                   "values": [int(total), int(got.sum())]})
                 sample = sample or ((sc, t, spec["name"], ch), int(got.sum()), int(total))
     _fail(errs, bad == 0,
           f"macro: 周期 comment_total != 区间内每天 td 之和，{bad} 处（共核对 {checked} 处）"
