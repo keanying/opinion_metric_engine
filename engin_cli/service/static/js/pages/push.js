@@ -117,7 +117,7 @@ export default {
     </div>
 
     <div class="card">
-      <div class="card-head"><h3>推送记录<Tip text="每个请求一行：推了哪个表、哪个景区、对方怎么回的；点右边的眼睛看完整响应"/></h3>
+      <div class="card-head stick"><h3>推送记录<Tip text="每个请求一行：推了哪个表、哪个景区、对方怎么回的；点右边的眼睛看完整响应"/></h3>
         <div class="toolbar">
           <DatePicker v-model="q.date" :clearable="false" placeholder="推送日期" @change="loadLogs" />
           <select v-model="q.result" @change="loadLogs"><option value="">全部结果</option>

@@ -185,6 +185,15 @@ input::placeholder { color: #b3b1aa; }
 .tip-pop.below { transform: translate(-50%, 0); }
 .card-head h3, .sect-head h3 { align-items: center; }
 
+/* 筛选栏：上下滑动时固定在内容区顶部 */
+.stick { position: sticky; top: 0; z-index: 6; }
+.card.toolbar-card.stick { box-shadow: 0 -8px 0 8px var(--frame), 0 8px 18px rgba(40, 45, 38, .06); }
+.card-head.stick { background: #fff; margin: -22px -24px 16px; padding: 18px 24px 12px; border-radius: 18px 18px 0 0;
+  box-shadow: 0 1px 0 var(--line); }
+.sect-body.stick { background: #fff; border-bottom: 1px solid var(--line); }
+.sect.open { overflow: visible; }
+.sect.open > .sect-head { border-radius: 18px 18px 0 0; }
+
 /* 日期选择 */
 .dp { position: relative; display: inline-flex; align-items: center; justify-content: space-between; gap: 6px; height: 36px; padding: 0 10px 0 12px;
   border-radius: 10px; background: #f3f2ee; border: 1px solid transparent; cursor: pointer; color: var(--muted); outline: none; flex: none; }

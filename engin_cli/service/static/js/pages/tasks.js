@@ -117,8 +117,10 @@ export const TaskBody = {
 export const TaskList = {
   components: { EventLog },
   setup() {
+    // 顶栏搜索带过来的关键字只用一次，用完清掉，免得之后再进任务页还被筛着
     const tasks = ref([]), err = ref(''), kw = ref(search.q), events = ref([]), loading = ref(true)
-    watch(() => search.n, () => { kw.value = search.q })
+    search.q = ''
+    watch(() => search.n, () => { kw.value = search.q; search.q = '' })
     const load = async () => {
       try {
         tasks.value = await api('/api/tasks'); err.value = ''
@@ -166,7 +168,7 @@ export const TaskList = {
     <div v-if="err" class="alert red">{{ err }}</div>
 
     <div class="card">
-      <div class="card-head"><h3>定时任务<small>{{ tasks.length }} 个</small></h3>
+      <div class="card-head stick"><h3>定时任务<small>{{ tasks.length }} 个</small></h3>
         <div class="toolbar">
           <span class="search"><Icon name="search" :size="15"/><input v-model="kw" placeholder="搜索任务 / 景区" /></span>
           <button class="btn light" @click="kw=''; load()">重置</button>

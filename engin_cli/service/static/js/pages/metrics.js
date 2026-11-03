@@ -66,7 +66,7 @@ export default {
   },
   template: `
   <div>
-    <div class="card toolbar-card">
+    <div class="card toolbar-card stick">
       <div class="toolbar wrap">
         <select v-model="q.scenic" class="w240"><option v-for="s in scenics" :key="s.scenic_id" :value="s.scenic_id">
           {{ s.scenic_name || s.scenic_id }}（{{ s.scenic_id }}）</option></select>

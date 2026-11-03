@@ -36,7 +36,7 @@ export const RunList = {
   template: `
   <div>
     <div class="card">
-      <div class="card-head"><h3>执行记录<Tip text="每一次跑批 / 补推的状态；点一行看各景区结果和完整日志"/></h3>
+      <div class="card-head stick"><h3>执行记录<Tip text="每一次跑批 / 补推的状态；点一行看各景区结果和完整日志"/></h3>
         <div class="toolbar">
           <div class="seg"><button v-for="s in ['', 'running', 'success', 'blocked', 'failed', 'cancelled']" :key="s"
             :class="{on: f.status===s}" @click="f.status=s">{{ s ? STATUS_TAG[s].text : '全部' }}</button></div>

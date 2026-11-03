@@ -63,9 +63,9 @@ export default {
   },
   template: `
   <div>
-    <div class="card sect">
+    <div class="card sect open">
         <div class="sect-head"><h3>数据检测<Tip wide text="只读检测库里大盘表已有的数据：区间相同的行指标一致（td@T-1 = latest_1d@T …）、各周期评论数 = 每天 td 之和。检测出来哪天不对，可以点「修复」按当前源数据把那几天重算一遍"/></h3></div>
-        <div class="sect-body">
+        <div class="sect-body stick">
           <div class="frow">
             <select v-if="scenics.length" v-model="chk.scenic" class="w240">
               <option v-for="s in scenics" :key="s.scenic_id" :value="s.scenic_id">{{ s.scenic_name || s.scenic_id }}（{{ s.scenic_id }}）</option></select>
@@ -114,7 +114,7 @@ export default {
         </div>
       </div>
       <div class="card">
-        <div class="card-head"><h3>检测记录<Tip text="每次跑批算完都检测；不通过先重算，还不通过就回退（不写库、不推送）并发飞书通知"/></h3>
+        <div class="card-head stick"><h3>检测记录<Tip text="每次跑批算完都检测；不通过先重算，还不通过就回退（不写库、不推送）并发飞书通知"/></h3>
           <div class="toolbar">
             <div class="seg"><button v-for="d in [7,14,30]" :key="d" :class="{on: days===d}" @click="days=d; load()">近 {{ d }} 天</button></div>
             <span class="search"><Icon name="search" :size="15"/><input v-model="kw" placeholder="景区 / 问题"/></span>

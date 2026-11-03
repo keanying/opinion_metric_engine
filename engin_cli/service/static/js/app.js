@@ -67,7 +67,7 @@ const App = {
       return { cls: 'green', text: d.next ? `调度运行中 · 下次 ${d.next.at.slice(5)}${run}` : `调度运行中 · 暂无定时${run}` }
     })
     const kw = ref('')
-    const doSearch = () => { search.q = kw.value.trim(); search.n++; location.hash = '/tasks' }
+    const doSearch = () => { search.q = kw.value.trim(); search.n++; kw.value = ''; location.hash = '/tasks' }
     return { current, route, NAV, toast, pill, kw, doSearch }
   },
   template: `
