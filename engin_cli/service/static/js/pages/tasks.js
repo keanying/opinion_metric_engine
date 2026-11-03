@@ -305,7 +305,7 @@ export const TaskEdit = {
               <div class="chips">
                 <span v-for="(t,i) in f.times" :key="t" class="time-chip">{{ t }}<a @click="f.times.splice(i,1)">×</a></span>
                 <span class="time-add"><input v-model="newTime" type="time" @keyup.enter="addTime"/><Icon name="clock" :size="14"/></span>
-                <button class="btn light sm" @click="addTime">添加</button></div></div>
+                <button class="btn light" @click="addTime"><Icon name="plus" :size="13" :sw="2.4"/>添加</button></div></div>
             <div v-if="sched.data && !sched.data.enabled" class="alert orange small">定时总开关已暂停，到点不会执行</div>
           </template>
         </TaskBody>
