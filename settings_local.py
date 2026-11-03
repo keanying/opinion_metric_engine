@@ -20,10 +20,12 @@
 
     # 补推（不重算，读 output/<景区编码>/ 下的 CSV）
     python -m engin_cli.cli push --scenic PFTSCE01001721 --start-date 20260909 --end-date 20260909
+    python -m engin_cli.cli run --push drill,macro --scenic PFTSCA01016184 --start-date 20261012 --end-date 20261012
 """
 
+# 192.168.110.250
 DB = {
-    "host": "localhost",
+    "host": "192.168.110.250",
     "port": 3306,
     "user": "opinionhub",
     "password": "8drfEYnxAdcW5aP3",     # 也可以删掉这行，改用环境变量 OPINION_DB_PASSWORD
@@ -50,7 +52,8 @@ ETL = {
     # 整窗前移，挪到有数据为止（不是累计）。下面就是默认上限，写出来方便对照。
     # 大盘表的日历周期借用档位：本周 → 7 日档、本月 → 30 日档、本季度 → 90 日档。
     "backfill_mode": "shift",
-    "backfill_lookback": {1: 5, 7: 10, 14: 15, 30: 20, 60: 30, 90: 60, 365: 90},
+    # "backfill_lookback": {1: 5, 7: 10, 14: 15, 30: 20, 60: 30, 90: 60, 365: 90},
+    "backfill_lookback": 7,
 
     # ── 指标口径 ────────────────────────────────────────────────────
     "score_formula": "weighted_v2",
@@ -89,12 +92,12 @@ ETL = {
     "push_enabled": False,
 
     # 本地（切到本地时：本机 3001 端口必须有服务在跑，否则会提示「推送地址连不上」并停止）
-    "push_url": "http://localhost:3000/v1/data/opinion/dataSync/crossDomainSync",
-    "push_headers": {"xpftkey": "pfk_d9975a31ee5624fdb741c80f9325a69b728b6c447e70b9c7"},
+    # "push_url": "http://localhost:3000/v1/data/opinion/dataSync/crossDomainSync",
+    # "push_headers": {"xpftkey": "pfk_d9975a31ee5624fdb741c80f9325a69b728b6c447e70b9c7"},
 
     # 线上（push_url 和 push_headers 要成对切换）
-    # "push_url": "https://data.12ev.com/v1/data/quickBiData/dataSync/crossDomainSync",
-    # "push_headers": {"xpftkey": "pfk_c123996df44e88d58acb27b61ed10a944493993c4bd2dcd5"},
+    "push_url": "https://data.12301dev.com/v1/data/quickBiData/dataSync/crossDomainSync",
+    "push_headers": {"xpftkey": "pfk_c123996df44e88d58acb27b61ed10a944493993c4bd2dcd5"},
 
     # 报文就是 {"tableName": ..., "pkId": [...], "data": [...]}，不带其他顶层字段。
     # tableName 用本地表名原样推（网关报错信息里的表名就是 ads_trf_... 这一串）。
@@ -115,7 +118,7 @@ ETL = {
         # 下钻表：下游没有 detail_uk，改用这组字段。
         # ⚠ comment_id 只在「同一渠道、同一作品」内唯一（源表唯一键是 景区+渠道+作品+评论ID），
         #   不同平台的评论 ID 撞号时会互相覆盖。下游允许的话建议加上 platform_code、work_id。
-        "ads_trf_social_opinion_drill_analysis_di": ["scenic_id", "emotion_word", "emotion_type", "platform_code", "work_id", "comment_id", "publish_time", "travel_date"],
+        "ads_trf_social_opinion_drill_analysis_di": ["scenic_id", "emotion_word", "emotion_type", "channel", "work_id", "comment_id", "publish_time", "travel_date", "time_granularity"],
         "ads_trf_social_opinion_macro_gran_metric_di": ["scenic_id", "channel", "time_granularity", "publish_time", "travel_date"],
         "ads_trf_social_opinion_comment_core_di": ["scenic_spot_code", "publish_time", "travel_date"],
         "ads_trf_social_opinion_comment_platform_di": ["scenic_spot_code", "platform_code", "publish_time", "travel_date"],
@@ -123,7 +126,7 @@ ETL = {
         "ads_trf_social_opinion_comment_content_di": ["scenic_spot_code", "emotion_type", "emotion_word", "publish_time", "travel_date"],
     },
 
-    # ⚠ push_exclude_columns（从报文里去掉字段）当前版本还没实现，写了也不生效；
+
     #   下游表缺字段时，先让下游补上该列。
 
     "push_batch_size": 500,             # 每个请求 500 行
@@ -140,4 +143,16 @@ ETL = {
     "push_strict": False,               # True = 推送失败时跑批退出码为 1（调度告警）
 
     "log_level": "INFO",
+
+    # 【数据质量检测】每次算完都检测（恒等关系、下钻↔大盘对账、区间相同的行指标一致）。
+    #   不通过 → 重新取数重算 quality_retries 次 → 还不通过：quality_gate=True 就回退
+    #   （不写库、不推送，保留上一次的数据）并发飞书通知。
+    "quality_gate": True,
+    "quality_retries": 1,
+    #
+    # 【飞书通知】数据质量检测不通过、指标计算异常时发。不填不发。
+    #   配好后执行 python -m engin_cli.cli notify-test 发一条测试消息。
+    "notify_feishu_webhook": "https://open.feishu.cn/open-apis/bot/v2/hook/a8a66f23-a890-40ee-84d8-4c544412b874",
+    # "notify_feishu_secret": "",       # 机器人开了「签名校验」才填
+
 }
