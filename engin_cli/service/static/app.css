@@ -44,9 +44,9 @@ input, select, textarea, button { font: inherit; color: inherit; }
 /* 顶栏和侧栏固定不动，只有右边内容区滚动 */
 html, body { height: 100%; overflow: hidden; }
 .frame {
-  /* 白色面板贴满窗口，只在左边留一条流动的渐变细边 */
-  position: relative; display: flex; flex-direction: column; margin: 0 0 0 6px; height: 100vh;
-  background: linear-gradient(100deg, #ffffff 0%, #ffffff 62%, #f6f4fe 100%); padding: 26px 0 0 26px;
+  /* 白色面板上 / 右 / 下贴满窗口；左边留出半个侧栏宽，侧栏贴着窗口左边、压在面板圆角上，上下露出流动渐变 */
+  position: relative; display: flex; flex-direction: column; margin: 0 0 0 34px; height: 100vh;
+  background: linear-gradient(100deg, #ffffff 0%, #ffffff 62%, #f6f4fe 100%); border-radius: 34px 0 0 34px; padding: 26px 0 0 26px;
 }
 /* 顶栏：logo + 问候 + 搜索 / 状态 / 圆形图标按钮 */
 .topbar { flex: none; display: flex; align-items: center; gap: 16px; margin: 4px 0 20px; padding-right: 28px; }
@@ -71,7 +71,7 @@ html, body { height: 100%; overflow: hidden; }
 .body { display: flex; gap: 26px; flex: 1; min-height: 0; }
 /* 深紫悬浮胶囊，压在白色面板左边缘外面 */
 .side {
-  position: relative; z-index: 3; flex: none; align-self: center; margin-top: -60px;
+  position: relative; z-index: 3; flex: none; align-self: center; margin-left: -60px; margin-top: -60px;
   width: 64px; padding: 18px 0; gap: 18px;
   background: linear-gradient(180deg, #5f50c9 0%, #4a3bb0 100%); border-radius: 32px;
   box-shadow: 0 18px 40px rgba(70, 55, 168, .45);
