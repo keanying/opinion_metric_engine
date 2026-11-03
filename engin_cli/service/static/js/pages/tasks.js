@@ -167,12 +167,28 @@ export const TaskList = {
       try { await api(`/api/tasks/${t.id}`, { method: 'DELETE' }); notify('已删除'); load() }
       catch (e) { notify(e.message, 'err') }
     }
+    // 定时时刻压缩显示：同一分钟、连着每小时的合成一段（19:10、20:10 … 23:10 → 19:10–23:10 每小时）
+    const timeGroups = times => {
+      const xs = [...(times || [])].sort(), out = []
+      for (const t of xs) {
+        const g = out[out.length - 1], [h, m] = t.split(':').map(Number)
+        if (g && g.m === m && g.h2 + 1 === h) { g.h2 = h; g.n++ } else out.push({ h1: h, h2: h, m, n: 1 })
+      }
+      const f = (h, m) => `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
+      return out.flatMap(g => g.n >= 3 ? [{ text: `${f(g.h1, g.m)}–${f(g.h2, g.m)}`, sub: '每小时' }]
+        : Array.from({ length: g.n }, (_, i) => ({ text: f(g.h1 + i, g.m) })))
+    }
+    const ALL = TABLES.map(t => t.key)
+    const tablesText = keys => keys.length === ALL.length ? '全部表' : keys.map(k => TABLE_LABEL[k] || k).join('、')
+    const calcText = c => c.tables ? tablesText(split(c.tables)) : '全部表'
+    const pushText = c => c.push ? tablesText(split(c.push)) : '不推送'
     const cols = [
-      { key: 'name', title: '任务', width: 300 }, { key: 'times', title: '定时', width: 150 },
-      { key: 'tables', title: '计算 / 推送', width: 230 }, { key: 'last', title: '上次执行', width: 170 },
+      { key: 'name', title: '任务', width: 280 }, { key: 'times', title: '定时', width: 200 },
+      { key: 'tables', title: '计算 / 推送', width: 300 }, { key: 'last', title: '上次执行', width: 170 },
       { key: 'next', title: '下次执行', width: 140 }, { key: 'enabled', title: '启用', width: 70 },
       { key: 'op', title: '', width: 130, align: 'r' }]
-    return { tasks, shown, err, kw, events, loading, cols, sched, setMaster, runNow, toggle, remove, modeText, split, TABLE_LABEL, load }
+    return { tasks, shown, err, kw, events, loading, cols, sched, setMaster, runNow, toggle, remove, modeText, split, TABLE_LABEL, load,
+             timeGroups, calcText, pushText }
   },
   template: `
   <div>
@@ -195,15 +211,18 @@ export const TaskList = {
         <template #name="{ row }"><span class="s-name"><Avatar square :text="row.name" :size="24"/>
           <span class="s-ell"><a :href="'#/tasks/'+row.id" :title="row.name"><b>{{ row.name }}</b></a>
             <small :title="row.config.scenics">{{ row.config.scenics || '全部景区' }} · {{ modeText(row.config) }}</small></span></span></template>
-        <template #times="{ row }"><div class="chips">
-          <span v-for="x in (row.schedule.times||[])" :key="x" class="chip">{{ x }}</span>
-          <span v-if="!(row.schedule.times||[]).length" class="muted">仅手动</span></div></template>
-        <template #tables="{ row }"><div class="chips">
-          <Tag v-for="c in (row.config.copies || [])" :key="c.to_scenic" color="violet" icon="file">跑完复制 → {{ c.to_name || c.to_scenic }}</Tag>
-          <Tag v-if="!row.config.tables" color="indigo">全部表</Tag>
-          <Tag v-for="k in split(row.config.tables)" :key="k" color="indigo">{{ TABLE_LABEL[k] }}</Tag>
-          <template v-if="true"><Tag v-if="row.config.push" color="cyan" icon="send">{{ split(row.config.push).map(k => TABLE_LABEL[k]).join('、') }}</Tag>
-          <Tag v-else color="grey">不推送</Tag></template></div></template>
+        <template #times="{ row }">
+          <div v-if="(row.schedule.times||[]).length" class="tk-times" :title="'每天 ' + row.schedule.times.join('、')">
+            <span v-for="g in timeGroups(row.schedule.times)" :key="g.text" class="chip">{{ g.text }}<em v-if="g.sub">{{ g.sub }}</em></span>
+            <small>每天 {{ row.schedule.times.length }} 次</small></div>
+          <span v-else class="muted">仅手动</span></template>
+        <template #tables="{ row }"><dl class="tk-what">
+          <dt>计算</dt><dd :title="calcText(row.config)">{{ calcText(row.config) }}</dd>
+          <dt>推送</dt><dd :class="{muted: !row.config.push}" :title="pushText(row.config)">
+            <Icon v-if="row.config.push" name="send" :size="12" :sw="2.2"/>{{ pushText(row.config) }}</dd>
+          <template v-if="(row.config.copies || []).length"><dt>复制</dt>
+            <dd class="copy" :title="row.config.copies.map(c => (c.to_name || c.to_scenic) + '（' + c.to_scenic + '）').join('、')">
+              跑完 → {{ row.config.copies.map(c => c.to_name || c.to_scenic).join('、') }}</dd></template></dl></template>
         <template #last="{ row }"><template v-if="row.last_run"><StatusTag :status="row.last_run.status"/>
           <a class="link small" :href="'#/runs/'+row.last_run.id"> {{ row.last_run.created_at.slice(5,16) }}</a></template>
           <span v-else class="muted">未执行</span></template>

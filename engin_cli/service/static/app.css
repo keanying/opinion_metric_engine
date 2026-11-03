@@ -834,3 +834,14 @@ details summary { cursor: pointer; color: var(--primary); font-size: 13px; margi
 
 .lg-item { display: inline-flex; align-items: center; gap: 2px; white-space: nowrap; margin-right: 8px; }
 .copy-row { flex-wrap: nowrap; } .copy-row > .ico { color: var(--muted); flex: none; }
+
+/* 任务列表：定时（合并连续时刻）、计算 / 推送 / 复制（三行「名称 · 内容」） */
+.tk-times { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.tk-times .chip em { margin-left: 5px; font-style: normal; font-size: 11px; font-weight: 500; color: var(--muted); }
+.tk-times small { flex-basis: 100%; font-size: 11px; color: var(--muted); }
+.tk-what { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 10px; margin: 0; font-size: 12px; align-items: center; }
+.tk-what dt { color: var(--muted); font-size: 11px; padding: 1px 6px; border-radius: 6px; background: var(--lav); text-align: center; }
+.tk-what dd { margin: 0; color: var(--ink); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  display: flex; align-items: center; gap: 4px; }
+.tk-what dd .ico { flex: none; color: #0f8ba0; }
+.tk-what dd.copy { color: var(--primary); }
