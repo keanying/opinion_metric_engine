@@ -163,7 +163,7 @@ const App = {
               服务器上重新启动：<code>python -m engin_cli.cli serve</code></p>
             <ul class="hp-list"><li v-for="c in checks" :key="c.key">
               <i :class="c.ok === true ? 'ok' : c.ok === false ? 'bad' : 'warn'"></i>
-              <b>{{ c.label }}</b><span>{{ c.detail }}</span></li></ul>
+              <b>{{ c.label }}</b><span>{{ c.detail }}<small v-if="c.sub">{{ c.sub }}</small></span></li></ul>
             <div class="hp-foot"><span>{{ health.state === 'down' ? '上次正常 ' + (health.lastOk || '—') : '检测于 ' + (health.lastOk || '—') }}</span>
               <a @click="recheck">重新检测</a></div>
           </div></Transition>
