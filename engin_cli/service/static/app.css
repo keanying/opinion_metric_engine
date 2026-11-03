@@ -50,13 +50,22 @@ html, body { height: 100%; overflow: hidden; }
   background: linear-gradient(100deg, #ffffff 0%, #ffffff 62%, #f6f4fe 100%); border-radius: 34px; padding: 26px 0 0 26px;
 }
 /* 顶栏：logo + 问候 + 搜索 / 状态 / 圆形图标按钮 */
-.topbar { flex: none; display: flex; align-items: center; gap: 16px; margin: 4px 0 20px; padding-right: 28px; }
+/* 三栏：左（logo + 问候）、中（菜单，放在最顶部正中间）、右（搜索 / 状态 / 按钮 / 头像）。
+   左右两栏等宽，菜单就正好居中；屏幕窄、右栏放不下时右栏按内容撑开，菜单往左让，不会压到搜索框 */
+.topbar { flex: none; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 16px;
+  margin: 4px 0 20px; padding-right: 28px; }
+.tb-left { display: flex; align-items: center; gap: 16px; min-width: 0; }
+/* 一行里放不下居中的菜单（< 1760px）：菜单单独一行，居中 */
+@media (max-width: 1759px) and (min-width: 861px) {
+  .topbar { grid-template-columns: 1fr auto; row-gap: 14px; }
+  .topnav { grid-column: 1 / -1; grid-row: 2; justify-self: center; }
+}
 .brand { flex: none; display: grid; place-items: center; width: 56px; }
 .brand img { display: block; width: 40px; height: 40px; object-fit: contain; }
 .hello { flex: 1; min-width: 0; }
 .hello h1 { font-size: 22px; font-weight: 600; letter-spacing: .2px; line-height: 1.25; color: #1f1c3d; }
 .hello p { margin: 4px 0 0; color: var(--ink-2); font-size: 13px; }
-.tb-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
+.tb-right { display: flex; align-items: center; gap: 12px; justify-content: flex-end; justify-self: end; }
 .tb-search { display: flex; align-items: center; gap: 8px; height: 46px; padding: 0 5px 0 18px; border-radius: 12px; background: var(--lav); }
 .tb-search input { width: 200px; height: 38px !important; border: 0 !important; background: transparent !important; box-shadow: none !important; padding: 0 !important; }
 .tb-search button { display: grid; place-items: center; width: 36px; height: 36px; border: 0; border-radius: 10px; background: var(--solid); color: #fff; cursor: pointer; box-shadow: 0 6px 14px rgba(90, 75, 196, .3); }
@@ -120,6 +129,7 @@ html, body { height: 100%; overflow: hidden; }
 }
 .topnav a:hover::after { opacity: 1; }
 .tn-sep { width: 1px; height: 20px; margin: 0 2px; background: rgba(255, 255, 255, .25); }
+
 .side-me {
   flex: none; width: 46px; height: 46px; border-radius: 50%; display: grid; place-items: center; color: #fff; font-weight: 700;
   background: linear-gradient(135deg, #ffb35c, #f2766a); box-shadow: 0 0 0 3px rgba(255, 255, 255, .35);
@@ -799,7 +809,8 @@ details summary { cursor: pointer; color: var(--primary); font-size: 13px; margi
   .topnav { order: 3; width: 100%; justify-content: space-between; margin: 0; }   /* 手机：菜单单独一行 */
   .topnav a { padding: 0 8px; } .topnav a::after { display: none; } .tn-sep { display: none; }
   .side-me { width: 44px; height: 44px; font-size: 14px; }
-  .topbar { flex-wrap: wrap; margin-bottom: 14px; }
+  .topbar { display: flex; flex-wrap: wrap; margin-bottom: 14px; }
+  .tb-left { flex: 1; } .tb-right { flex-wrap: wrap; }
   .brand { width: 40px; } .brand img { width: 34px; height: 34px; } .hello h1 { font-size: 19px; }
   .tb-right { width: 100%; justify-content: flex-start; gap: 8px; }
   .tb-search { flex: 1; height: 44px; } .tb-search input { width: 100%; }

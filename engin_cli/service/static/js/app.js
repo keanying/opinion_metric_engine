@@ -135,8 +135,10 @@ const App = {
   <LoginPage v-else-if="!auth.user" />
   <div v-else class="frame">
     <header class="topbar">
+      <div class="tb-left">
       <a href="#/" class="brand" title="标签计算中心"><img src="/logo.png" width="40" height="40" alt="标签计算中心" /></a>
       <div class="hello"><h1>你好，{{ auth.user.display_name }}！<span v-if="auth.user.readonly" class="ro-badge" title="只读账号：只能查看，不能执行、修改">只读</span></h1></div>
+      </div>
       <!-- 菜单：横向紫色胶囊，在顶栏中间；当前页显示名称，其他的鼠标移上去显示 -->
       <nav class="topnav" aria-label="菜单">
         <a v-for="n in NAV" :key="n.to" :href="'#'+n.to" :class="{on: current.r.nav===n.to}" :data-tip="n.label" :aria-label="n.label">
