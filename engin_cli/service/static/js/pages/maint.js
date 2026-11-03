@@ -32,7 +32,7 @@ export default {
       try { const r = await api('/api/maint/run', { method: 'POST', body }); notify(`已提交执行 #${r.run_id}`); go(r.run_id) }
       catch (e) { notify(e.message, 'err') }
     }
-    // 飞书通知设置：地址里带令牌，页面上只显示打码后的；输入框留空 = 不改
+    // 通知设置（飞书机器人）：地址里带令牌，页面上只显示打码后的；输入框留空 = 不改
     const openFs = () => { fsEdit.value = { webhook: '', secret: '', keepSecret: !!(fs.value && fs.value.page_set) } }
     const saveFs = async () => {
       fsSaving.value = true
@@ -40,12 +40,12 @@ export default {
         const e = fsEdit.value, body = { webhook: e.webhook.trim() }
         if (!e.keepSecret || e.secret) body.secret = e.secret.trim()
         fs.value = await api('/api/notify/settings', { method: 'PUT', body }); fsEdit.value = null
-        notify('飞书通知设置已保存，下一次执行生效'); loadConfig()
+        notify('通知设置已保存，下一次执行生效'); loadConfig()
       } catch (e) { notify(e.message, 'err') } finally { fsSaving.value = false }
     }
     const clearFs = async () => {
-      if (!await confirmBox({ title: '清除页面上的飞书设置', okText: '清除',
-        message: '清除后改用配置文件里的飞书机器人地址（没有就不发通知）。' })) return
+      if (!await confirmBox({ title: '清除页面上的通知设置', okText: '清除',
+        message: '清除后改用配置文件里的通知地址（没有就不发通知）。' })) return
       try { fs.value = await api('/api/notify/settings', { method: 'PUT', body: { clear: true } }); fsEdit.value = null
         notify('已清除'); loadConfig() } catch (e) { notify(e.message, 'err') }
     }
@@ -80,7 +80,7 @@ export default {
       </div>
       <div class="card tool">
         <span class="icon-sq green"><Icon name="bell" :size="18" :sw="2.2"/></span>
-        <div class="tool-main"><h3>飞书通知<Tip wide text="数据质量检测不通过、回退或计算出错时发飞书通知。页面上设置的优先；没设置就用配置文件里的。设置后下一次执行生效"/></h3>
+        <div class="tool-main"><h3>通知<Tip wide text="数据质量检测不通过、回退或计算出错时发通知（飞书机器人）。页面上设置的优先；没设置就用配置文件里的。设置后下一次执行生效"/></h3>
           <p v-if="fs"><Tag :color="fs.source === 'none' ? 'grey' : fs.source === 'page' ? 'violet' : 'cyan'">{{ FS_SRC[fs.source] }}</Tag>
             <span v-if="fs.webhook" class="mono"> {{ fs.webhook }}</span><span v-if="fs.secret"> · 已开签名校验</span></p></div>
         <div class="tool-btns"><button class="btn light" @click="openFs"><Icon name="gear" :size="14"/>设置</button>
@@ -98,7 +98,7 @@ export default {
     <Transition name="dlg">
       <div v-if="fsEdit" class="modal-mask" @click.self="fsEdit=null">
         <div class="modal narrow">
-          <div class="card-head"><h3>飞书通知设置</h3><button class="s-btn-icon" @click="fsEdit=null"><Icon name="clear" :size="18"/></button></div>
+          <div class="card-head"><h3>通知设置</h3><button class="s-btn-icon" @click="fsEdit=null"><Icon name="clear" :size="18"/></button></div>
           <div class="form fs-form">
             <div class="frow"><label>机器人地址</label><input v-model="fsEdit.webhook" autocomplete="off"
               :placeholder="fs && fs.page_set ? '当前：' + fs.webhook + '（留空不改）' : 'https://open.feishu.cn/open-apis/bot/v2/hook/…'" /></div>

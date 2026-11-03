@@ -482,7 +482,7 @@ class Runner:
                 logf.write("（推送设置来自服务页面：" + "，".join(
                     f"{k}={v}" for k, v in over.items()) + "）\n")
             if nover:
-                logf.write("（飞书通知地址来自服务页面）\n")       # 地址里带令牌，不写进日志
+                logf.write("（通知地址来自服务页面）\n")       # 地址里带令牌，不写进日志
             logf.write("\n")
             logf.flush()
             with self._lock:

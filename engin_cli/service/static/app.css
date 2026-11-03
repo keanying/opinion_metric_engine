@@ -81,9 +81,22 @@ html, body { height: 100%; overflow: hidden; }
 .tb-gear.green { background: #dcf5f1; color: #11806f; box-shadow: 0 6px 16px rgba(17, 128, 111, .16); }
 .tb-gear.red { background: #fde6ec; color: #d03a5f; box-shadow: 0 6px 16px rgba(208, 58, 95, .2); }
 .tb-gear:hover { transform: translateY(-1px); }
-.tb-gear.busy .ico { animation: spin 3.2s linear infinite; }
+/* 动态效果：齿轮一直慢慢转（正在执行时转快一点），外圈呼吸光晕；有问题时红点闪烁、齿轮轻微晃动 */
+.tb-gear .ico { animation: spin 7s linear infinite; }
+.tb-gear.busy .ico { animation-duration: 2.4s; }
+.tb-gear.green { animation: gear-glow-g 2.6s ease-in-out infinite; }
+.tb-gear.red { animation: gear-glow-r 1.4s ease-in-out infinite; }
+.tb-gear.red .ico { animation: gear-shake 2.4s ease-in-out infinite; }
 .tb-gear i { position: absolute; right: 6px; top: 6px; width: 9px; height: 9px; border-radius: 50%; border: 2px solid #fff; }
-.tb-gear.green i { background: #21b8a6; } .tb-gear.red i { background: #ee5a7c; animation: hp-blink 1.2s ease-in-out infinite; }
+.tb-gear.green i { background: #21b8a6; animation: dot-pulse-g 2.6s ease-in-out infinite; }
+.tb-gear.red i { background: #ee5a7c; animation: hp-blink 1.2s ease-in-out infinite; }
+@keyframes gear-glow-g { 0%, 100% { box-shadow: 0 6px 16px rgba(17, 128, 111, .16), 0 0 0 0 rgba(33, 184, 166, .28); }
+  50% { box-shadow: 0 6px 16px rgba(17, 128, 111, .16), 0 0 0 7px rgba(33, 184, 166, 0); } }
+@keyframes gear-glow-r { 0%, 100% { box-shadow: 0 6px 16px rgba(208, 58, 95, .2), 0 0 0 0 rgba(238, 90, 124, .4); }
+  50% { box-shadow: 0 6px 16px rgba(208, 58, 95, .2), 0 0 0 8px rgba(238, 90, 124, 0); } }
+@keyframes dot-pulse-g { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.25); } }
+@keyframes gear-shake { 0%, 70%, 100% { transform: rotate(0); } 76% { transform: rotate(-14deg); } 84% { transform: rotate(12deg); } 92% { transform: rotate(-6deg); } }
+@media (prefers-reduced-motion: reduce) { .tb-gear, .tb-gear .ico, .tb-gear i { animation: none !important; } }
 .hp-now { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; padding: 9px 12px; border-radius: 12px; font-size: 13px; font-weight: 600;
   background: #f2fbf9; color: #11806f; }
 .hp-now i { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none; }

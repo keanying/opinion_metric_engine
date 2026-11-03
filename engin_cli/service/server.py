@@ -682,7 +682,7 @@ class App:
             raise ApiError(400, str(e))
         return {"run_id": self.runner.submit("run", argv, "临时 · " + title)}
 
-    # ------------------------------------------------------------ 飞书通知设置
+    # ------------------------------------------------------------ 通知设置（飞书机器人）
     def notify_settings_view(self) -> dict:
         """页面上配的飞书机器人（优先）；没配就用 settings_local / 环境变量的。地址里带令牌，只回打码后的。"""
         ns, st = self.runner.notify_settings(), self.settings
@@ -708,11 +708,11 @@ class App:
             except ValueError as e:
                 raise ApiError(400, str(e))
         self.store.set_kv("notify", ns)
-        self.store.add_event("飞书通知设置已" + ("清除（改用配置文件的）" if body.get("clear") else "更新"))
+        self.store.add_event("通知设置已" + ("清除（改用配置文件的）" if body.get("clear") else "更新"))
         return self.notify_settings_view()
 
     def maint_notify(self) -> dict:
-        return {"run_id": self.runner.submit("notify", ["notify-test"], "飞书通知测试")}
+        return {"run_id": self.runner.submit("notify", ["notify-test"], "通知测试")}
 
     def maint_cleanup(self, body: dict) -> dict:
         days = max(int(body.get("days") or 90), 7)
