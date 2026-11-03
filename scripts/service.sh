@@ -51,7 +51,8 @@ OUT_FILE="$APP_DIR/logs/service.out"
 is_ours() {
     local pid=$1
     [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 1
-    ps -p "$pid" -o args= 2>/dev/null | grep -q "engin_cli.cli serve" || return 1
+    # 必须是 python 进程本身（命令行里恰好带着这几个字的 shell / watch 不算）
+    ps -p "$pid" -o args= 2>/dev/null | grep -Eq '^[^ ]*python[0-9.]*( [^ ]+)* -m engin_cli\.cli serve( |$)' || return 1
     [ "$(readlink "/proc/$pid/cwd" 2>/dev/null || echo "$APP_DIR")" = "$APP_DIR" ]
 }
 
@@ -81,9 +82,9 @@ from engin_cli.settings import load_settings
 st = load_settings()
 args = os.environ.get("SERVE_ARGS", "")
 m = re.search(r"--port[ =](\d+)", args)
-port = int(m.group(1)) if m else int(st.service_port)
+port = int(m.group(1)) if m else int(getattr(st, "service_port", 8765))
 m = re.search(r"--host[ =](\S+)", args)
-host = m.group(1) if m else st.service_host
+host = m.group(1) if m else getattr(st, "service_host", "127.0.0.1")
 host = "127.0.0.1" if host in ("0.0.0.0", "", "::") else host
 url = f"http://{host}:{port}/api/health?refresh=1"
 # 本机直连请求 /api/health 不用登录（服务端只对本机、不经过代理的请求放行）
@@ -169,12 +170,18 @@ do_start() {
             awk -v m="$mark" 'f{print} $0==m{f=1}' "$OUT_FILE" | tail -n 15 | sed 's/^/    /'
             return 1
         fi
-        if health quiet; [ $? -ne 3 ]; then
-            echo "✓ 已启动（PID $pid）"
-            health; local rc=$?
-            [ $rc -eq 2 ] && echo "  注意：有依赖不可用（看上面打 ✗ 的项），服务本身已经起来了"
-            return 0
-        fi
+        health quiet; local hrc=$?
+        case $hrc in
+            0|2|4)                                   # 接口有响应了（2 = 有依赖不可用，4 = 要求登录）
+                echo "✓ 已启动（PID $pid）"
+                health; local rc=$?
+                [ $rc -eq 2 ] && echo "  注意：有依赖不可用（看上面打 ✗ 的项），服务本身已经起来了"
+                return 0 ;;
+            3) ;;                                    # 还连不上：接着等
+            *)                                       # 检测脚本自己出错了：不能说「已启动」
+                echo "✗ 检测服务状态时出错（退出码 $hrc，报错见上面）；服务进程 PID $pid 还在，看日志：$OUT_FILE"
+                return 1 ;;
+        esac
         sleep 0.5
     done
     echo "✗ 进程在（PID $pid），但 30 秒内页面接口一直没有响应，看日志：$OUT_FILE"
