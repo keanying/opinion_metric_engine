@@ -2,7 +2,7 @@ import { ref, reactive, onMounted, computed, watch } from 'vue'
 import { api, GRANULARITIES, CHANNELS, fmtNum, notify } from '../api.js'
 import { Ring, Wave } from '../charts.js'
 
-const WORD_GROUPS = [['positiveWord', '好评', 'var(--green)'], ['neutralWord', '中评', 'var(--primary)'],
+const WORD_GROUPS = [['positiveWord', '好评', 'var(--green)'], ['neutralWord', '中评', '#8f948e'],
   ['negativeWord', '差评', 'var(--red)']]
 
 export default {
@@ -49,9 +49,9 @@ export default {
     })
     const dims = computed(() => row.value?.dimension_breakdown || [])
     const sentParts = computed(() => row.value ? [
-      { value: row.value.positive_comment_cnt, label: '好评', colors: ['#3fe0a5', '#16b87f'], icon: 'tick' },
-      { value: row.value.neutral_comment_cnt, label: '中评', colors: ['#8b6cff', '#4f7cff'], icon: 'comment' },
-      { value: row.value.negative_comment_cnt, label: '差评', colors: ['#ff7aa2', '#f2456e'], icon: 'clear' }] : [])
+      { value: row.value.positive_comment_cnt, label: '好评', colors: ['#9cc2a6', '#5f8f6e'], icon: 'tick' },
+      { value: row.value.neutral_comment_cnt, label: '中评', colors: ['#d3d1ca', '#9fa39c'], icon: 'comment' },
+      { value: row.value.negative_comment_cnt, label: '差评', colors: ['#e2a197', '#c9655b'], icon: 'clear' }] : [])
     const md = d => { const s = String(d); return s.slice(4, 6) + '/' + s.slice(6) }
     const trendPts = computed(() => trend.value.map(x => ({ label: md(x.travel_date), value: x.comment_total })))
     const scorePts = computed(() => trend.value.map(x => ({ label: md(x.travel_date), value: x.overall_sentiment_score })))
@@ -101,7 +101,7 @@ export default {
           <Ring :parts="sentParts" :size="200" :thickness="20" :gap="12" :hole="0.52" :value="fmtNum(row.comment_total)" sub="条评论" />
           <div class="mini-legend">
             <span><i class="dot" style="background:var(--green)"></i>好 {{ fmtNum(row.positive_comment_cnt) }}</span>
-            <span><i class="dot" style="background:var(--primary)"></i>中 {{ fmtNum(row.neutral_comment_cnt) }}</span>
+            <span><i class="dot" style="background:#9fa39c"></i>中 {{ fmtNum(row.neutral_comment_cnt) }}</span>
             <span><i class="dot" style="background:var(--red)"></i>差 {{ fmtNum(row.negative_comment_cnt) }}</span></div></div>
       </div>
 
@@ -125,7 +125,7 @@ export default {
               <div class="hbar-prev" :style="{left: (d.preDimension1Score/5*100)+'%'}"></div></div>
             <b>{{ fmtNum(d.dimension1Score, 2) }}</b></div></div>
         <div class="card"><div class="card-head"><h3>每日得分<small>td · 综合情感得分</small></h3></div>
-          <Wave :points="scorePts" :height="190" :labels="false" :ticks="7" :colors="['#16b87f', '#4fd1d9']" :fmt="v => fmtNum(v, 2)" /></div>
+          <Wave :points="scorePts" :height="190" :labels="false" :ticks="7" :colors="['#5f8f6e', '#a9c9c4']" :fmt="v => fmtNum(v, 2)" /></div>
       </div>
 
       <div class="card"><div class="card-head"><h3>各渠道对比<Tip text="点一行切换上面图表的渠道"/></h3></div>

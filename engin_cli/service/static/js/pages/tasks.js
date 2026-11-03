@@ -1,5 +1,5 @@
 import { ref, reactive, onMounted, onUnmounted, computed, watch } from 'vue'
-import { api, TABLES, TABLE_LABEL, notify, sched, refreshSched } from '../api.js'
+import { api, TABLES, TABLE_LABEL, notify, sched, refreshSched, search } from '../api.js'
 
 const DATE_MODES = [['today', '当天'], ['yesterday', '昨天'], ['recent', '近 N 天'], ['range', '固定区间']]
 const KEYS = TABLES.map(t => t.key)
@@ -117,7 +117,8 @@ export const TaskBody = {
 export const TaskList = {
   components: { EventLog },
   setup() {
-    const tasks = ref([]), err = ref(''), kw = ref(''), events = ref([]), loading = ref(true)
+    const tasks = ref([]), err = ref(''), kw = ref(search.q), events = ref([]), loading = ref(true)
+    watch(() => search.n, () => { kw.value = search.q })
     const load = async () => {
       try {
         tasks.value = await api('/api/tasks'); err.value = ''

@@ -1,6 +1,6 @@
 // 入口：外框 + 图标侧栏 + 顶栏 + 极简 hash 路由（#/tasks、#/runs/12 …）。新增页面：在 ROUTES 里加一行即可。
-import { createApp, reactive, computed, h, watchEffect, onMounted, onUnmounted } from 'vue'
-import { toast, sched, refreshSched } from './api.js'
+import { createApp, reactive, computed, h, ref, watchEffect, onMounted, onUnmounted } from 'vue'
+import { toast, sched, refreshSched, search } from './api.js'
 import { installUI } from './ui.js'
 import Overview from './pages/overview.js'
 import { TaskList, TaskEdit } from './pages/tasks.js'
@@ -30,7 +30,6 @@ const NAV = [
   { to: '/quality', label: '数据质量', icon: 'shield' },
   { to: '/metrics', label: '指标查看', icon: 'chart' },
   { to: '/push', label: '推送', icon: 'send' },
-  { to: '/maint', label: '维护', icon: 'tool' },
 ]
 
 const route = reactive({ path: '/' })
@@ -64,32 +63,37 @@ const App = {
       const run = d.running ? ` · 正在执行 #${d.running}` : ''
       return { cls: 'green', text: d.next ? `调度运行中 · 下次 ${d.next.at.slice(5)}${run}` : `调度运行中 · 暂无定时${run}` }
     })
-    return { current, route, NAV, toast, pill }
+    const kw = ref('')
+    const doSearch = () => { search.q = kw.value.trim(); search.n++; location.hash = '/tasks' }
+    return { current, route, NAV, toast, pill, kw, doSearch }
   },
   template: `
   <div class="frame">
-    <div v-if="current.r.nav==='/'" class="deco-tri"></div>
-    <aside class="side">
-      <a href="#/" class="logo" title="舆情指标计算服务"><svg viewBox="0 0 32 32" width="30" height="30">
-        <defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#8b6cff"/><stop offset="1" stop-color="#4f7cff"/></linearGradient></defs>
-        <path d="M16 4a12 12 0 00-12 12v12h7V16a5 5 0 0110 0v12h7V16A12 12 0 0016 4z" fill="url(#lg)"/></svg></a>
-      <nav>
-        <a v-for="n in NAV" :key="n.to" :href="'#'+n.to" :class="{on: current.r.nav===n.to}" :data-tip="n.label" :aria-label="n.label">
-          <Icon :name="n.icon" :size="20" /></a>
-      </nav>
-      <div class="side-me" title="运维">运</div>
-    </aside>
-    <main class="main">
-      <header class="topbar">
-        <span class="tb-space"></span>
-        <div class="tb-right">
-          <a v-if="pill" href="#/tasks" class="status-pill" :class="pill.cls"><i></i>{{ pill.text }}</a>
-          <a href="#/quality" class="tb-bell" title="数据质量"><Icon name="bell" :size="19"/></a>
-          <span class="tb-me">OPS</span>
+    <header class="topbar">
+      <a href="#/" class="brand" title="舆情指标计算服务"><svg viewBox="0 0 40 40" width="38" height="38" aria-hidden="true">
+        <g fill="#4f6f5b"><rect v-for="i in 12" :key="i" x="18" y="2" width="4" height="11" rx="2" :transform="'rotate(' + i*30 + ' 20 20)'"/></g></svg></a>
+      <div class="hello"><h1>你好，运维！</h1><p>舆情指标计算 · 任务、数据质量和推送一览</p></div>
+      <div class="tb-right">
+        <label class="tb-search"><input v-model="kw" placeholder="搜索任务 / 景区…" @keyup.enter="doSearch"/>
+          <button @click="doSearch" aria-label="搜索"><Icon name="search" :size="16" :sw="2.2"/></button></label>
+        <a v-if="pill" href="#/tasks" class="status-pill" :class="pill.cls" :title="pill.text"><i></i><span>{{ pill.text }}</span></a>
+        <a href="#/quality" class="tb-round" title="数据质量"><Icon name="shield" :size="18"/></a>
+        <a href="#/runs" class="tb-round" title="执行记录"><Icon name="bell" :size="18"/></a>
+      </div>
+    </header>
+    <div class="body">
+      <aside class="side">
+        <nav>
+          <a v-for="n in NAV" :key="n.to" :href="'#'+n.to" :class="{on: current.r.nav===n.to}" :data-tip="n.label" :aria-label="n.label">
+            <Icon :name="n.icon" :size="19" /></a>
+        </nav>
+        <div class="side-foot">
+          <a href="#/maint" class="side-mini" title="维护" :class="{on: current.r.nav==='/maint'}"><Icon name="gear" :size="18"/></a>
+          <div class="side-me" title="运维">运</div>
         </div>
-      </header>
-      <component :is="current.r.comp" v-bind="current.props" :key="route.path" />
-    </main>
+      </aside>
+      <main class="main"><component :is="current.r.comp" v-bind="current.props" :key="route.path" /></main>
+    </div>
     <div class="toasts"><div v-for="t in toast.items" :key="t.id" class="toast" :class="t.type">{{ t.text }}</div></div>
   </div>`,
 }

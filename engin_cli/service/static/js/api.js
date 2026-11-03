@@ -85,6 +85,7 @@ export function todayYmd(offset = 0) {
 // 全局轻提示 / 顶栏调度状态
 import { reactive } from 'vue'
 export const sched = reactive({ data: null })
+export const search = reactive({ q: '', n: 0 })      // 顶栏搜索 → 任务列表
 export async function refreshSched() {
   try { sched.data = await api('/api/scheduler') } catch (e) { /* 忽略 */ }
 }

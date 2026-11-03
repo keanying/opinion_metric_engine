@@ -95,7 +95,7 @@ function smoothPath(xs, ys) {
 
 export const Wave = {
   props: { points: Array, height: { type: Number, default: 150 }, selected: { type: Number, default: -1 },
-           colors: { type: Array, default: () => ['#7b5cff', '#4f7cff'] }, avg: { type: Boolean, default: true },
+           colors: { type: Array, default: () => ['#6e8c78', '#4a6a56'] }, avg: { type: Boolean, default: true },
            fmt: { type: Function, default: v => v }, labels: { type: Boolean, default: true },
            ticks: { type: Number, default: 0 } },
   emits: ['select'],
@@ -122,7 +122,8 @@ export const Wave = {
       const n = (p.points || []).length
       if (!p.ticks || !n) return []
       const step = Math.max(1, Math.ceil(n / p.ticks))
-      return [...Array(n).keys()].filter(i => i % step === 0 || i === n - 1)
+      // 最后一个刻度总显示；离它太近的普通刻度不显示，免得两个日期挤在一起
+      return [...Array(n).keys()].filter(i => i === n - 1 || (i % step === 0 && n - 1 - i >= Math.max(2, step * 0.6)))
     })
     const onMove = e => {
       const g = geo.value
@@ -148,8 +149,8 @@ export const Wave = {
             <stop offset="0" :stop-color="colors[0]"/><stop offset="1" :stop-color="colors[1]"/></linearGradient>
         </defs>
         <path :d="geo.area" :fill="'url(#'+id+'f)'"/>
-        <line v-if="avg" x1="0" :x2="W" :y1="geo.ay" :y2="geo.ay" stroke="#b9bdd6" stroke-dasharray="5 6" vector-effect="non-scaling-stroke"/>
-        <line :x1="geo.xs[sel]" :x2="geo.xs[sel]" y1="0" :y2="height" stroke="#d9dcf0" vector-effect="non-scaling-stroke"/>
+        <line v-if="avg" x1="0" :x2="W" :y1="geo.ay" :y2="geo.ay" stroke="#bcbab3" stroke-dasharray="5 6" vector-effect="non-scaling-stroke"/>
+        <line :x1="geo.xs[sel]" :x2="geo.xs[sel]" y1="0" :y2="height" stroke="#dcdad3" vector-effect="non-scaling-stroke"/>
         <path :d="geo.line" fill="none" :stroke="'url(#'+id+'s)'" stroke-width="3" vector-effect="non-scaling-stroke"/>
       </svg>
       <span class="wave-knob" :style="{left: (geo.xs[sel]/W*100)+'%', top: geo.ys[sel]+'px'}"></span>
@@ -221,4 +222,62 @@ export const MiniRing = {
   components: { Ring },
   props: { parts: Array, size: { type: Number, default: 170 }, value: String, sub: String },
   template: `<Ring :parts="parts" :size="size" :thickness="16" :gap="10" :value="value" :sub="sub" :hole="0.56" :icons="false"/>`,
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Gauge：半圆仪表（参考稿 Earnings 卡），value 0~100
+// ══════════════════════════════════════════════════════════════════
+export const Gauge = {
+  props: { value: { type: Number, default: 0 }, text: String, size: { type: Number, default: 220 },
+           color: { type: String, default: '#5a7a65' }, track: { type: String, default: '#e3ebe5' } },
+  setup(p) {
+    const geo = computed(() => {
+      const v = Math.max(0, Math.min(100, Number(p.value) || 0)) / 100
+      const cx = 110, cy = 104, r = 78, th = Math.PI * (1 - v)
+      const x = cx + r * Math.cos(th), y = cy - r * Math.sin(th)
+      const arc = v <= 0 ? '' : `M${cx - r},${cy} A${r},${r} 0 0 1 ${x.toFixed(2)},${y.toFixed(2)}`
+      // 指针：从弧外侧往外伸一截
+      const n1 = [cx + (r + 4) * Math.cos(th), cy - (r + 4) * Math.sin(th)]
+      const n2 = [cx + (r + 26) * Math.cos(th), cy - (r + 26) * Math.sin(th)]
+      return { cx, cy, r, arc, n1, n2, track: `M${cx - r},${cy} A${r},${r} 0 0 1 ${cx + r},${cy}` }
+    })
+    return { geo }
+  },
+  template: `
+  <div class="gauge" :style="{width: size + 'px'}">
+    <svg viewBox="0 0 220 120" :width="size" :height="size * 120 / 220">
+      <path :d="geo.track" fill="none" :stroke="track" stroke-width="30"/>
+      <path v-if="geo.arc" :d="geo.arc" fill="none" :stroke="color" stroke-width="30"/>
+      <line :x1="geo.n1[0]" :y1="geo.n1[1]" :x2="geo.n2[0]" :y2="geo.n2[1]" stroke="#2b302d" stroke-width="3" stroke-linecap="round"/>
+    </svg>
+    <b class="gauge-val">{{ text ?? (Math.round(value) + '%') }}</b>
+  </div>`,
+}
+
+// 迷你竖条（参考稿 Spent this month）：values 数组，最后一根深色
+export const MiniBars = {
+  props: { values: Array, height: { type: Number, default: 44 } },
+  setup(p) { return { max: computed(() => Math.max(1, ...(p.values || []).map(v => v || 0))) } },
+  template: `<div class="minibars" :style="{height: height + 'px'}">
+    <i v-for="(v,i) in values" :key="i" :class="{on: i === values.length - 1}" :style="{height: Math.max(8, (v||0)/max*100) + '%'}"
+      :title="v"></i></div>`,
+}
+
+// 迷你折线（参考稿 New clients / Activity 右边那条线）
+export const Spark = {
+  props: { values: Array, color: { type: String, default: '#8fa898' }, width: { type: Number, default: 90 },
+           height: { type: Number, default: 34 } },
+  setup(p) {
+    const d = computed(() => {
+      const v = (p.values || []).map(x => Number(x) || 0)
+      if (v.length < 2) return ''
+      const lo = Math.min(...v), hi = Math.max(...v), span = hi - lo || 1
+      const xs = v.map((_, i) => 2 + i / (v.length - 1) * (p.width - 4))
+      const ys = v.map(x => p.height - 4 - (x - lo) / span * (p.height - 8))
+      return smoothPath(xs, ys)
+    })
+    return { d }
+  },
+  template: `<svg class="spark" :width="width" :height="height" :viewBox="'0 0 ' + width + ' ' + height">
+    <path v-if="d" :d="d" fill="none" :stroke="color" stroke-width="2.4" stroke-linecap="round"/></svg>`,
 }

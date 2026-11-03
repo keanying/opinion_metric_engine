@@ -1,17 +1,15 @@
+// 概览：版式对齐参考稿（第一行 4 个小卡、第二行曲线 + 半圆仪表 + 下次执行、第三行执行次数 + 需要关注 + 数据检测）
 import { ref, onMounted, onUnmounted, computed } from 'vue'
-import { api, TRIGGER, KIND, duration, WEEK } from '../api.js'
-import { Ring, Wave, PillBars, DayLine } from '../charts.js'
+import { api, TRIGGER, KIND, duration } from '../api.js'
+import { Wave, PillBars, Gauge, MiniBars, Spark } from '../charts.js'
 
-const C = {
-  success: ['#8b6cff', '#4f7cff'], blocked: ['#ffc15e', '#ff8a3d'],
-  failed: ['#ff7aa2', '#f2456e'], other: ['#3a4699', '#25306f'],
-}
 const pct = (a, b) => (b ? Math.round(a / b * 1000) / 10 : 0)
+const sum = (arr, k) => arr.reduce((a, x) => a + (x[k] || 0), 0)
 
 export default {
-  components: { Ring, Wave, PillBars, DayLine },
+  components: { Wave, PillBars, Gauge, MiniBars, Spark },
   setup() {
-    const d = ref(null), err = ref(''), pick = ref(-1)
+    const d = ref(null), err = ref('')
     let timer
     const load = async () => {
       try { d.value = await api('/api/overview'); err.value = '' } catch (e) { err.value = e.message }
@@ -19,33 +17,25 @@ export default {
     onMounted(() => { load(); timer = setInterval(load, 10000) })
     onUnmounted(() => clearInterval(timer))
 
-    const sum = (arr, k) => arr.reduce((a, x) => a + (x[k] || 0), 0)
     const wk = computed(() => {
       const days = d.value?.daily || []
       const cur = days.slice(-7), prev = days.slice(0, 7)
-      const s = sum(cur, 'success'), b = sum(cur, 'blocked'), f = sum(cur, 'failed'), o = sum(cur, 'other')
-      const total = s + b + f + o
-      const ps = sum(prev, 'success'), pt = ps + sum(prev, 'blocked') + sum(prev, 'failed') + sum(prev, 'other')
+      const t = x => sum(x, 'success') + sum(x, 'blocked') + sum(x, 'failed') + sum(x, 'other')
+      const s = sum(cur, 'success'), total = t(cur), ps = sum(prev, 'success'), pt = t(prev)
       const rate = total ? pct(s, total) : null, prate = pt ? pct(ps, pt) : null
-      return { s, b, f, o, total, rate, prate, diff: rate !== null && prate !== null ? Math.round((rate - prate) * 10) / 10 : null,
-               pf: sum(prev, 'failed') + sum(prev, 'blocked'), ps }
+      return { s, b: sum(cur, 'blocked'), f: sum(cur, 'failed'), total, rate, ps,
+               diff: rate !== null && prate !== null ? Math.round((rate - prate) * 10) / 10 : null,
+               bad: sum(cur, 'blocked') + sum(cur, 'failed'), pbad: sum(prev, 'blocked') + sum(prev, 'failed') }
     })
-    const ringParts = computed(() => [
-      { value: wk.value.s, label: '成功', colors: C.success, icon: 'tick' },
-      { value: wk.value.b, label: '已回退', colors: C.blocked, icon: 'alert' },
-      { value: wk.value.f, label: '失败', colors: C.failed, icon: 'clear' },
-      { value: wk.value.o, label: '取消 / 进行中', colors: C.other, icon: 'clock' }])
-    const stats = computed(() => {
-      const t = wk.value.total || 1
-      return [['成功', wk.value.s, '#6c63ff'], ['回退', wk.value.b, '#ff9a3d'],
-              ['失败', wk.value.f, '#f2456e'], ['其他', wk.value.o, '#2f3a8f']]
-        .map(([l, v, c]) => ({ l, v, c, p: wk.value.total ? pct(v, t) : 0 }))
+    const dayTotal = x => (x.success || 0) + (x.blocked || 0) + (x.failed || 0) + (x.other || 0)
+    const last7 = computed(() => (d.value?.daily || []).slice(-7))
+    const rateSeries = computed(() => last7.value.map(x => dayTotal(x) ? x.success / dayTotal(x) * 100 : 0))
+    // 执行耗时（近 14 天平均）
+    const durPts = computed(() => (d.value?.durations || []).map(x => ({ label: x.date.slice(5).replace('-', '/'), value: x.avg })))
+    const avgDur = computed(() => {
+      const a = (d.value?.durations || []).slice(-7).filter(x => x.n)
+      return a.length ? Math.round(a.reduce((s, x) => s + x.avg, 0) / a.length * 10) / 10 : 0
     })
-    // 近 7 天平均耗时曲线
-    const dur7 = computed(() => (d.value?.durations || []).slice(-7))
-    const wavePts = computed(() => dur7.value.map(x => ({ label: WEEK[new Date(x.date + 'T00:00').getDay()], value: x.avg })))
-    const selIdx = computed(() => pick.value >= 0 ? pick.value : wavePts.value.length - 1)
-    const durSel = computed(() => dur7.value[selIdx.value] || null)
     const durDelta = computed(() => {
       const all = d.value?.durations || []
       const a = all.slice(-7).filter(x => x.n), b = all.slice(0, 7).filter(x => x.n)
@@ -54,98 +44,104 @@ export default {
       return mb ? Math.round((ma - mb) / mb * 1000) / 10 : null
     })
     const series = [
-      { key: 'other', label: '其他', color: 'linear-gradient(180deg,#3a4699,#25306f)' },
-      { key: 'failed', label: '失败', color: 'linear-gradient(180deg,#ff7aa2,#f2456e)' },
-      { key: 'blocked', label: '回退', color: 'linear-gradient(180deg,#ffc15e,#ff8a3d)' },
-      { key: 'success', label: '成功', color: 'linear-gradient(180deg,#8b6cff,#5b6cff)' },
+      { key: 'other', label: '其他', color: '#c9c7c0' },
+      { key: 'failed', label: '失败', color: '#c9655b' },
+      { key: 'blocked', label: '回退', color: '#d8b26e' },
+      { key: 'success', label: '成功', color: '#4f6f5b' },
     ]
     const barRows = computed(() => (d.value?.daily || []).map(x => ({ label: x.date.slice(5).replace('-', '/'), values: x })))
     const fmtDur = v => !v ? '0s' : v < 60 ? `${v}s` : `${Math.floor(v / 60)}m${Math.round(v % 60)}s`
-    const range7 = computed(() => dur7.value.length ? `${dur7.value[0].date.slice(5)} ~ ${dur7.value[dur7.value.length - 1].date.slice(5)}` : '')
+    const next = computed(() => d.value?.upcoming?.[0] || null)
     const cols = [
       { key: 'title', title: '执行', width: 340 }, { key: 'trigger', title: '触发', width: 110 },
       { key: 'status', title: '状态', width: 110 }, { key: 'created_at', title: '时间', width: 150 },
       { key: 'dur', title: '耗时', width: 90 }, { key: 'op', title: '', width: 56, align: 'r' }]
-    return { d, err, pick, wk, ringParts, stats, wavePts, selIdx, durSel, durDelta, series, barRows, fmtDur, range7,
+    return { d, err, wk, last7, rateSeries, durPts, avgDur, durDelta, series, barRows, fmtDur, next, dayTotal,
              cols, TRIGGER, KIND, duration }
   },
   template: `
   <div>
     <div v-if="err" class="alert red">{{ err }}</div>
-    <div v-if="d" class="ov">
-      <!-- 左：今日执行 + 分段环 + 四项占比 -->
-      <section class="ov-left">
-        <div class="card balance">
-          <div class="chip-card"><small>{{ d.running ? 'RUNNING' : 'IDLE' }}</small><b>{{ d.running ? '№ ' + d.running : '空闲' }}</b></div>
-          <div class="grow"><span class="cap">今日执行</span>
-            <div class="big">{{ d.today }}<em> 次</em></div></div>
-          <router-link to="/runs" class="round-btn" title="执行记录"><Icon name="down" :size="14" :sw="2.6"/></router-link>
-        </div>
-        <div class="ring-box">
-          <Ring :parts="ringParts" :size="300" label="近 7 天成功率"
-            :value="wk.rate === null ? '—' : wk.rate + '%'" :sub="'共 ' + wk.total + ' 次'" />
-        </div>
-        <div class="stat4">
-          <div v-for="s in stats" :key="s.l"><span class="cap">{{ s.l }}</span><b>{{ s.p }}%</b>
-            <i class="ubar"><em :style="{width: Math.max(s.p, 4)+'%', background: s.c}"></em></i></div>
-        </div>
-      </section>
+    <div v-if="d" class="ov2">
+      <!-- 第一行：4 个小卡 -->
+      <div class="card mini">
+        <div><span class="lbl">今日执行</span><b class="num">{{ d.today }} <em>次</em></b></div>
+        <MiniBars :values="last7.map(dayTotal)" />
+      </div>
+      <div class="card mini">
+        <span class="circ green"><Icon name="list" :size="20"/></span>
+        <div class="grow"><span class="lbl">启用任务</span><b class="num">{{ d.tasks.enabled }}<em> / {{ d.tasks.total }}</em></b></div>
+        <Spark :values="last7.map(x => x.success)" />
+      </div>
+      <div class="card mini">
+        <span class="circ sand"><Icon name="clock" :size="20"/></span>
+        <div class="grow"><span class="lbl">下次执行</span><b class="num">{{ next ? next.at.slice(11) : '--:--' }}</b></div>
+      </div>
+      <div class="card mini hero">
+        <div class="grow"><span class="lbl">近 7 天成功率</span><b class="num">{{ wk.rate === null ? '—' : wk.rate + '%' }}</b></div>
+        <Spark :values="rateSeries" color="#ffffff" :width="80" :height="40" />
+      </div>
 
-      <!-- 中：执行耗时曲线 + 执行次数柱 -->
-      <section class="ov-mid">
-        <div class="card week">
-          <div class="week-head">
-            <span class="icon-sq grad"><Icon name="bolt" :size="18" :sw="2.2"/></span>
-            <div class="grow"><h3>执行耗时</h3><span class="cap">近 7 天 · {{ range7 }}</span></div>
-            <div class="r"><div class="big sm">{{ fmtDur(durSel ? durSel.avg : 0) }}</div>
-              <span v-if="durDelta !== null" class="delta" :class="durDelta <= 0 ? 'up' : 'down'">
-                {{ durDelta > 0 ? '+' : '' }}{{ durDelta }}% 较上周</span>
-              <span v-else class="cap">平均 / 次</span></div>
-          </div>
-          <Wave :points="wavePts" :selected="selIdx" :height="130" :fmt="fmtDur" @select="i => pick = i" />
-          <router-link v-if="d.attention.length" :to="'/runs/' + d.attention[0].id" class="callout">
-            <b>最近一次{{ d.attention[0].status === 'blocked' ? '质量回退' : '失败' }}</b>
-            <span>{{ d.attention[0].task_name || '临时执行' }} · {{ d.attention[0].created_at.slice(5,16) }} »</span></router-link>
-          <div v-else class="callout calm"><b>运行平稳</b><span>最近没有失败和质量回退</span></div>
+      <!-- 第二行 -->
+      <div class="card span2 bal">
+        <div class="bal-head"><h3>执行耗时</h3>
+          <span class="ontrack" :class="{bad: durDelta !== null && durDelta > 20}"><i></i>{{ durDelta !== null && durDelta > 20 ? '变慢了' : '运行平稳' }}</span>
+          <span class="grow"></span><span class="muted small">近 14 天 · 每天平均</span></div>
+        <div class="bubbles">
+          <div class="bubble"><span>成功（近 7 天）</span><b>{{ wk.s }} 次</b>
+            <em :class="wk.s >= wk.ps ? 'up' : 'down'">{{ wk.s >= wk.ps ? '+' : '' }}{{ wk.s - wk.ps }}</em></div>
+          <div class="bubble"><span>平均耗时</span><b>{{ fmtDur(avgDur) }}</b>
+            <em v-if="durDelta !== null" :class="durDelta <= 0 ? 'up' : 'down'">{{ durDelta > 0 ? '+' : '' }}{{ durDelta }}%</em></div>
         </div>
+        <Wave :points="durPts" :height="150" :labels="false" :ticks="7" :avg="false" :colors="['#8fa898', '#5a7a65']" :fmt="fmtDur" />
+      </div>
 
-        <div class="card expenses">
-          <div class="exp-head">
-            <div class="grow"><h3>执行次数</h3><span class="cap">近 14 天 · 跑批</span></div>
-            <div class="kpi-mini"><span class="cap">成功</span><b>{{ wk.s }}</b>
-              <em :class="wk.s >= wk.ps ? 'up' : 'down'">{{ wk.s >= wk.ps ? '+' : '' }}{{ wk.s - wk.ps }} 较上周</em></div>
-            <div class="kpi-mini"><span class="cap">失败 / 回退</span><b>{{ wk.f + wk.b }}</b>
-              <em :class="wk.f + wk.b <= wk.pf ? 'up' : 'down'">{{ wk.f + wk.b - wk.pf > 0 ? '+' : '' }}{{ wk.f + wk.b - wk.pf }} 较上周</em></div>
-          </div>
-          <PillBars :rows="barRows" :series="series" :height="150" :fmt="v => v + ' 次'" />
-        </div>
-      </section>
+      <div class="card gcard">
+        <h3>执行结果</h3>
+        <span class="lbl">近 7 天跑批</span>
+        <b class="big-green">{{ wk.total }} 次</b>
+        <p class="muted small">成功率<template v-if="wk.diff !== null">比上周{{ wk.diff >= 0 ? '高' : '低' }} {{ Math.abs(wk.diff) }}%</template><template v-else>（上周没有数据）</template></p>
+        <Gauge :value="wk.rate || 0" :text="wk.rate === null ? '—' : Math.round(wk.rate) + '%'" :size="210" />
+      </div>
 
-      <!-- 右：下次执行 + 时间轴 + 需要关注 + 小结 + 主按钮 -->
-      <section class="card ov-right">
-        <div class="next-head">
-          <div class="grow"><div class="big">{{ d.upcoming.length ? d.upcoming[0].at.slice(11) : '--:--' }}</div>
-            <span class="cap">{{ d.upcoming.length ? '下次执行 · ' + d.upcoming[0].at.slice(5,10) : (d.scheduler.enabled ? '没有启用定时的任务' : '定时已暂停') }}</span></div>
-          <span class="icon-sq green"><Icon name="clock" :size="18" :sw="2.2"/></span>
+      <div class="card pcard">
+        <span class="p-avatar"><Icon name="clock" :size="34" :sw="1.8"/></span>
+        <b class="p-name">{{ next ? next.task_name : (d.scheduler.enabled ? '暂无定时任务' : '定时已暂停') }}</b>
+        <span class="muted small">{{ next ? '下次执行 ' + next.at.slice(5) : '在任务页设置定时' }}</span>
+        <div class="p-stats">
+          <div><span>任务</span><b>{{ d.tasks.total }}</b></div>
+          <div><span>今日执行</span><b>{{ d.today }}</b></div>
+          <div><span>需关注</span><b :class="{'t-red': d.attention.length}">{{ d.attention.length }}</b></div>
         </div>
-        <div class="next-task" v-if="d.upcoming.length">{{ d.upcoming[0].task_name }}</div>
-        <DayLine :slots="d.today_slots" :runs="d.today_runs" :now="d.now.slice(11,16)" />
-        <div class="sub-head"><span class="cap">需要关注</span><router-link to="/runs" class="btn xs">查看全部</router-link></div>
-        <div v-for="r in d.attention" :key="r.id" class="person" @click="$router.push('/runs/'+r.id)">
-          <span class="ring-av" :class="r.status"><Avatar :text="r.task_name || '临'" :size="34"/></span>
-          <div class="grow"><b>{{ r.task_name || '临时执行' }}</b>
-            <span :class="r.status === 'blocked' ? 't-orange' : 't-red'">{{ r.status === 'blocked' ? '已回退' : '失败' }} · {{ r.created_at.slice(5,16) }}</span></div>
+      </div>
+
+      <!-- 第三行 -->
+      <div class="card span2 wallet">
+        <div class="w-text">
+          <h3>近 14 天执行次数</h3>
+          <p>成功 <b>{{ wk.s }}</b> 次，失败 / 回退 <b>{{ wk.bad }}</b> 次（近 7 天），
+            比上周{{ wk.bad <= wk.pbad ? '少' : '多' }} {{ Math.abs(wk.bad - wk.pbad) }} 次。</p>
+          <div class="legend"><template v-for="s in series.slice().reverse()" :key="s.key"><i :style="{background: s.color}"></i><span>{{ s.label }}</span></template></div>
+          <router-link to="/runs" class="btn primary sm">执行记录 <Icon name="arrowR" :size="13" :sw="2.4"/></router-link>
         </div>
-        <div v-if="!d.attention.length" class="person calm"><span class="ring-av"><Avatar icon="tick" color="green" :size="34"/></span>
-          <div class="grow"><b>一切正常</b><span class="muted">近期没有失败 / 回退</span></div></div>
-        <div class="info-box">
-          近 7 天跑批 <b>{{ wk.total }} 次</b>，成功率 <b>{{ wk.rate === null ? '—' : wk.rate + '%' }}</b><template v-if="wk.diff !== null">，
-          比上周<b>{{ wk.diff >= 0 ? '提高' : '降低' }} {{ Math.abs(wk.diff) }}%</b></template>。
-          <template v-if="wk.b">质量回退 <b>{{ wk.b }} 次</b>，去「数据质量」看原因。</template>
-          <template v-else>推送<b>{{ d.push_enabled ? '已开启' : '已关闭' }}</b>，启用任务 <b>{{ d.tasks.enabled }}/{{ d.tasks.total }}</b>。</template>
-        </div>
-        <router-link to="/tasks" class="cta">管理任务<span><Icon name="arrowR" :size="14" :sw="2.6"/></span></router-link>
-      </section>
+        <div class="w-chart"><PillBars :rows="barRows" :series="series" :height="150" :bar-width="10" :fmt="v => v + ' 次'" /></div>
+      </div>
+
+      <div class="card transfers">
+        <div class="t-head"><h3>需要关注</h3><router-link to="/runs" class="link small">全部</router-link></div>
+        <a v-for="r in d.attention" :key="r.id" class="t-item" :href="'#/runs/' + r.id">
+          <i :class="r.status"></i>
+          <div class="grow"><b>{{ r.task_name || '临时执行' }}</b><span>{{ r.created_at.slice(5,16) }}</span></div>
+          <StatusTag :status="r.status"/></a>
+        <div v-if="!d.attention.length" class="t-empty"><Icon name="tickCircle" :size="28" :sw="1.6"/><span>近期没有失败和回退</span></div>
+      </div>
+
+      <div class="card safe">
+        <span class="safe-ico"><Icon name="shield" :size="48" :sw="1.3"/></span>
+        <b>数据质量检测</b>
+        <span class="muted small">{{ wk.b ? '近 7 天质量回退 ' + wk.b + ' 次' : '近 7 天没有质量回退' }}</span>
+        <router-link to="/quality" class="btn primary sm">去检测</router-link>
+      </div>
     </div>
 
     <div v-if="d" class="card">
