@@ -272,7 +272,7 @@ export const ScenicPicker = {
   },
   template: `
   <div ref="el" class="sp" :class="{on: !!pos, single}" :style="{width, flex: width === '100%' ? null : 'none'}" @click="open">
-    <span v-for="id in picked" :key="id" class="sp-chip" :title="id">{{ nameOf(id) || id }}<small v-if="nameOf(id)">{{ id }}</small>
+    <span v-for="id in picked" :key="id" class="sp-chip" :title="(nameOf(id) ? nameOf(id) + ' ' : '') + id"><span class="sp-name">{{ nameOf(id) || id }}</span><small v-if="nameOf(id)">{{ id }}</small>
       <a v-if="!single" @click.stop="remove(id)">×</a></span>
     <span v-if="!picked.length" class="sp-ph">{{ placeholder }}</span>
     <span class="grow"></span>
