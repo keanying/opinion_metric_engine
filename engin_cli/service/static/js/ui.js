@@ -98,8 +98,8 @@ export const Empty = {
       <rect x="58" y="44" width="50" height="7" rx="3.5" fill="#cfcbe6"/>
       <rect x="58" y="59" width="68" height="7" rx="3.5" fill="#dbd8ec"/>
       <rect x="58" y="74" width="40" height="7" rx="3.5" fill="#dbd8ec"/>
-      <circle cx="128" cy="88" r="22" fill="#fff" stroke="#8475de" stroke-width="5"/>
-      <path d="M144 104l16 16" stroke="#8475de" stroke-width="7" stroke-linecap="round"/>
+      <circle cx="128" cy="88" r="22" fill="#fff" stroke="#8488ec" stroke-width="5"/>
+      <path d="M144 104l16 16" stroke="#8488ec" stroke-width="7" stroke-linecap="round"/>
       <path d="M121 81l14 14M135 81l-14 14" stroke="#cfc8f7" stroke-width="4" stroke-linecap="round"/>
     </svg>
     <div class="s-empty-desc">{{ text }}</div>

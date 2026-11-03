@@ -144,7 +144,7 @@ export default {
     })
     const parts = computed(() => [
       { value: stats.value.pass, label: '通过', colors: ['#8fe0d3', '#21b8a6'], icon: 'tickCircle' },
-      { value: stats.value.fixed, label: '重算后通过', colors: ['#a194ec', '#5446b8'], icon: 'refresh' },
+      { value: stats.value.fixed, label: '重算后通过', colors: ['#a3a6f3', '#5458d8'], icon: 'refresh' },
       { value: stats.value.blocked, label: '已回退', colors: ['#ffd88a', '#f5a524'], icon: 'alert' },
       { value: stats.value.fail, label: '不通过', colors: ['#f6a4b8', '#ee5a7c'], icon: 'clear' }])
     const cols = [

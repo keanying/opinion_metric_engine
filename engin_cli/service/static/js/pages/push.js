@@ -2,7 +2,7 @@ import { ref, reactive, onMounted, computed } from 'vue'
 import { api, TABLES, TABLE_LABEL, PUSH_RESULT, fmtNum, notify, refreshSched, todayYmd } from '../api.js'
 import { Ring } from '../charts.js'
 
-const RING_C = { ok: ['#a194ec', '#5446b8'], dry_run: ['#8be3ef', '#22b8cf'], business_fail: ['#f6a4b8', '#ee5a7c'],
+const RING_C = { ok: ['#a3a6f3', '#5458d8'], dry_run: ['#8be3ef', '#22b8cf'], business_fail: ['#f6a4b8', '#ee5a7c'],
   http_error: ['#f28aa3', '#e04a6e'], network_error: ['#ffd88a', '#f5a524'], timeout: ['#ffe3a8', '#f7b43c'],
   ssl_error: ['#54506c', '#282441'] }
 

@@ -121,6 +121,11 @@ const App = {
       const run = d.running ? ` · 正在执行 #${d.running}` : ''
       return { cls: 'green', text: d.next ? `调度运行中 · 下次 ${d.next.at.slice(5)}${run}` : `调度运行中 · 暂无定时${run}` }
     })
+    // 问候语下面一行：星期 + 日期 + 当前页面（每分钟刷新，过了零点日期跟着变）
+    const today = reactive({ week: '', date: '' })
+    const tick = () => { const d = new Date()
+      today.week = '星期' + '日一二三四五六'[d.getDay()]; today.date = `${d.getFullYear()} 年 ${d.getMonth() + 1} 月 ${d.getDate()} 日` }
+    tick(); const dayTimer = setInterval(tick, 60000); onUnmounted(() => clearInterval(dayTimer))
     const kw = ref('')
     // 弹窗键盘：Esc 取消、Enter 确认
     const onKey = e => {
@@ -131,24 +136,27 @@ const App = {
     }
     window.addEventListener('keydown', onKey)
     const doSearch = () => { search.q = kw.value.trim(); search.n++; kw.value = ''; location.hash = '/tasks' }
-    return { current, route, NAV, toast, pill, kw, doSearch, dialog, health, hp, me, hpHover, meHover, checks, recheck, auth, doLogout, sched }
+    return { current, route, NAV, toast, pill, kw, doSearch, today, dialog, health, hp, me, hpHover, meHover, checks, recheck, auth, doLogout, sched }
   },
   template: `
   <div v-if="auth.user === undefined" class="boot">加载中…</div>
   <LoginPage v-else-if="!auth.user" />
   <div v-else class="frame">
+    <!-- 菜单：左侧紫色圆角竖条；logo 在最上面，维护放在最下面；鼠标移上去在右边显示名称 -->
+    <aside class="sidenav" aria-label="菜单">
+      <a href="#/" class="brand" title="标签计算中心"><img src="/logo.png" width="34" height="34" alt="标签计算中心" /></a>
+      <nav class="sn-list">
+        <a v-for="n in NAV" :key="n.to" :href="'#'+n.to" :class="{on: current.r.nav===n.to}" :data-tip="n.label" :aria-label="n.label">
+          <Icon :name="n.icon" :size="21" /></a>
+      </nav>
+      <a href="#/maint" class="sn-bottom" :class="{on: current.r.nav==='/maint'}" data-tip="维护" aria-label="维护"><Icon name="gear" :size="21"/></a>
+    </aside>
+    <div class="workspace">
     <header class="topbar">
       <div class="tb-left">
-      <a href="#/" class="brand" title="标签计算中心"><img src="/logo.png" width="40" height="40" alt="标签计算中心" /></a>
-      <div class="hello"><h1>你好，{{ auth.user.display_name }}！<span v-if="auth.user.readonly" class="ro-badge" title="只读账号：只能查看，不能执行、修改">只读</span></h1></div>
+      <div class="hello"><h1>你好，{{ auth.user.display_name }}！<span v-if="auth.user.readonly" class="ro-badge" title="只读账号：只能查看，不能执行、修改">只读</span></h1>
+        <p class="hello-sub"><b>{{ today.week }}</b>，{{ today.date }} · {{ current.r.title }}</p></div>
       </div>
-      <!-- 菜单：横向紫色胶囊，在顶栏中间；当前页显示名称，其他的鼠标移上去显示 -->
-      <nav class="topnav" aria-label="菜单">
-        <a v-for="n in NAV" :key="n.to" :href="'#'+n.to" :class="{on: current.r.nav===n.to}" :data-tip="n.label" :aria-label="n.label">
-          <Icon :name="n.icon" :size="18" /><span>{{ n.label }}</span></a>
-        <i class="tn-sep"></i>
-        <a href="#/maint" :class="{on: current.r.nav==='/maint'}" data-tip="维护" aria-label="维护"><Icon name="gear" :size="18"/><span>维护</span></a>
-      </nav>
       <div class="tb-right">
         <label class="tb-search"><input v-model="kw" placeholder="搜索任务 / 景区…" @keyup.enter="doSearch"/>
           <button @click="doSearch" aria-label="搜索"><Icon name="search" :size="16" :sw="2.2"/></button></label>
@@ -183,6 +191,7 @@ const App = {
     </header>
     <div class="body">
       <main class="main"><component :is="current.r.comp" v-bind="current.props" :key="route.path + '#' + health.epoch" /></main>
+    </div>
     </div>
     <div class="toasts"><TransitionGroup name="toast">
       <div v-for="t in toast.items" :key="t.id" class="toast" :class="t.type">
