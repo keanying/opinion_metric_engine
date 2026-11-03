@@ -230,7 +230,8 @@ def _compute(settings: EtlSettings,
               "platform_codes": codes,
               "backfill_mode": settings.backfill_mode,
               "score_formula": settings.score_formula,
-              "score_weights": settings.score_weights}
+              "score_weights": settings.score_weights,
+              "content_expected": _content_expected(kw_facts, ctx, settings)}
     if macro is not None:
         checks["macro"] = macro
         checks["macro_granularities"] = [g["name"] for g in ctx.macro_granularities]
@@ -289,6 +290,18 @@ def _compute(settings: EtlSettings,
     scenics = scenic_codes or sorted(cf["scenic_spot_code"].astype(str).unique())
     res.elapsed = time.time() - t0
     return res, scenics
+
+
+def _content_expected(kw_facts: pd.DataFrame, ctx: RunContext, settings: EtlSettings) -> bool:
+    """内容表这次该不该出行：目标日期往前 content_row_window 天（默认 30）里有没有关键词明细。
+    景区是按取数区间（约半年）挑的，近一个月没有评论 / 评论里没词的景区，内容表为空是正常的。"""
+    from datetime import datetime, timedelta
+    from .metric_calc_domain import CONTENT_ROW_WINDOW
+    if kw_facts is None or kw_facts.empty or not ctx.output_dates:
+        return False
+    rw = int(getattr(settings, "content_row_window", CONTENT_ROW_WINDOW))
+    lo = (datetime.strptime(min(ctx.output_dates), "%Y%m%d") - timedelta(days=rw - 1)).strftime("%Y%m%d")
+    return bool(kw_facts["travel_date"].astype(str).between(lo, max(ctx.output_dates)).any())
 
 
 def run(settings: EtlSettings,

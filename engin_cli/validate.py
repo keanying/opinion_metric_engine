@@ -47,6 +47,7 @@ CHECK_INFO = {
         "同一天同一个一级 / 二级维度只有一个得分",
         "维度路径不重复"]),
     "content": ("内容表", [
+        "目标日期往前 30 天里有评论关键词时不能为空（近一个月没词的景区，为空正常）",
         "景区 × 日期 × 词不重复",
         "情感类型只有 好 / 中 / 差",
         "各项计数不为负；词频不超过当日评论总数",
@@ -252,10 +253,12 @@ def validate_dimension(dim: pd.DataFrame) -> List[str]:
     return errs
 
 
-def validate_content(content: pd.DataFrame, core: pd.DataFrame) -> List[str]:
+def validate_content(content: pd.DataFrame, core: pd.DataFrame, expected: bool = True) -> List[str]:
+    """expected：这次该不该出行（pipeline 看目标日期往前 30 天有没有关键词明细）。
+    景区是按取数区间挑的，近一个月没有评论 / 评论里没词的景区，表为空是正常的。"""
     errs: List[str] = []
     if content.empty:
-        return ["content 表为空"]
+        return ["content 表为空（目标日期往前 30 天里有评论关键词，却一行都没出）"] if expected else []
 
     dup = content.duplicated(subset=["scenic_spot_code", "travel_date",
                                      "emotion_word"]).sum()
@@ -512,7 +515,8 @@ def validate_all(tables: dict, trace: Optional[list] = None) -> List[str]:
     dim = tables.get("dimension", pd.DataFrame())
     errs += run_check(trace, "dimension", _rows(dim), validate_dimension, dim)
     content = tables.get("content", pd.DataFrame())
-    errs += run_check(trace, "content", _rows(content), validate_content, content, core)
+    errs += run_check(trace, "content", _rows(content), validate_content, content, core,
+                      tables.get("content_expected", True))
     if "macro" in tables and "drill" in tables:
         errs += run_check(trace, "drill", _rows(tables["drill"]), validate_drill, tables["drill"], tables["macro"],
                       tables.get("macro_specs", []), tables.get("output_dates", []),
