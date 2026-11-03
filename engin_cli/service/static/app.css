@@ -52,6 +52,7 @@ html, body { height: 100%; overflow: hidden; }
 /* 顶栏：logo + 问候 + 搜索 / 状态 / 圆形图标按钮 */
 .topbar { flex: none; display: flex; align-items: center; gap: 16px; margin: 4px 0 20px; padding-right: 28px; }
 .brand { flex: none; display: grid; place-items: center; width: 56px; }
+.brand img { display: block; width: 40px; height: 40px; object-fit: contain; }
 .hello { flex: 1; min-width: 0; }
 .hello h1 { font-size: 22px; font-weight: 600; letter-spacing: .2px; line-height: 1.25; color: #1f1c3d; }
 .hello p { margin: 4px 0 0; color: var(--ink-2); font-size: 13px; }
@@ -772,7 +773,7 @@ details summary { cursor: pointer; color: var(--primary); font-size: 13px; margi
   .side nav a::after, .side-me { display: none; }
   .side-foot { flex-direction: row; } .side-mini { width: 38px; height: 38px; }
   .topbar { flex-wrap: wrap; margin-bottom: 14px; }
-  .brand { width: 40px; } .hello h1 { font-size: 19px; }
+  .brand { width: 40px; } .brand img { width: 34px; height: 34px; } .hello h1 { font-size: 19px; }
   .tb-right { width: 100%; justify-content: flex-start; gap: 8px; }
   .tb-search { flex: 1; height: 44px; } .tb-search input { width: 100%; }
   .status-pill, .tb-round { height: 44px; } .tb-round { width: 44px; } .status-pill { display: none; }
