@@ -5,7 +5,7 @@ import { installUI } from './ui.js'
 import Overview from './pages/overview.js'
 import { TaskList, TaskEdit } from './pages/tasks.js'
 import { RunList, RunDetail } from './pages/runs.js'
-import Quality from './pages/quality.js'
+import Quality, { QualityDetail } from './pages/quality.js'
 import Metrics from './pages/metrics.js'
 import Push from './pages/push.js'
 import Maint from './pages/maint.js'
@@ -18,6 +18,7 @@ const ROUTES = [
   { path: /^\/runs$/, comp: RunList, nav: '/runs', title: '执行记录', crumb: '任务管理 / 执行记录' },
   { path: /^\/runs\/(\d+)$/, comp: RunDetail, nav: '/runs', title: '执行详情', crumb: '任务管理 / 执行记录 / 详情', props: m => ({ id: m[1] }) },
   { path: /^\/quality$/, comp: Quality, nav: '/quality', title: '数据质量', crumb: '质量 / 检测记录' },
+  { path: /^\/quality\/(\d+)$/, comp: QualityDetail, nav: '/quality', title: '检测详情', crumb: '质量 / 检测记录 / 详情', props: m => ({ id: m[1] }) },
   { path: /^\/metrics$/, comp: Metrics, nav: '/metrics', title: '指标查看', crumb: 'ADS / 大盘指标' },
   { path: /^\/push$/, comp: Push, nav: '/push', title: '推送', crumb: '下游 / 推送设置与记录' },
   { path: /^\/maint$/, comp: Maint, nav: '/maint', title: '维护', crumb: '系统 / 维护' },

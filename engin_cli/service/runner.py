@@ -367,6 +367,38 @@ class Runner:
         except OSError:
             pass
 
+    def _record_checks(self, run: dict, summary: dict) -> None:
+        """跑批结束：每个景区记一条数据质量检测记录（检测过程从执行摘要里挪出来）。"""
+        if run.get("kind") != "run":
+            return
+        trigger = "repair" if str(run.get("title") or "").startswith("数据修复") else (run.get("trigger") or "manual")
+        task = {"id": run["task_id"], "name": run["task_name"]} if run.get("task_id") else None
+        dates = (summary or {}).get("dates") or []
+        for sc in (summary or {}).get("scenics") or []:
+            trace = sc.pop("quality_trace", None) or []
+            d = sc.get("dates") or dates or ["", ""]
+            last = trace[-1] if trace else {}
+            errs = list(last.get("errors") or sc.get("errors") or [])
+            if sc.get("exception") and not trace:
+                status, text = "fail", f"跑批异常，没走到检测：{sc['exception']}"
+            elif sc.get("quality_blocked"):
+                status, text = "blocked", f"{len(trace)} 次检测都不通过，已回退：" + (errs[0] if errs else "")
+            elif errs:
+                status, text = "fail", "检测不通过（闸门关闭，照常写库）：" + errs[0]
+            elif len(trace) > 1:
+                status, text = "fixed", f"第 {len(trace)} 次重算后通过（{len(last.get('steps') or [])} 项）"
+            else:
+                status, text = "pass", f"全部通过（{len(last.get('steps') or [])} 项）"
+            if len(errs) > 1 and status in ("blocked", "fail"):
+                text += f" 等 {len(errs)} 项"
+            self.store.add_check(
+                check_type="run", trigger=trigger, scenic=str(sc.get("scenic") or ""), start=str(d[0] or ""),
+                end=str(d[-1] or ""), status=status, attempts=len(trace) or int(sc.get("quality_attempts") or 0),
+                items=len(last.get("steps") or []), issues=len(errs) if status != "pass" and status != "fixed" else 0,
+                summary=text, run_id=int(run["id"]), task=task,
+                detail={"attempts": trace, "dates": d, "run_title": run.get("title"), "exception": sc.get("exception", ""),
+                        "tables": sc.get("tables") or {}, "command": run.get("command") or []})
+
     def cancel(self, run_id: int) -> bool:
         run = self.store.get_run(run_id)
         if not run or run["status"] not in ("queued", "running"):
@@ -442,6 +474,10 @@ class Runner:
             status = final_status(code, summary)
             msg = {"success": "", "blocked": "数据质量检测不通过，已回退（未写库/未推送）",
                    "failed": f"退出码 {code}"}[status]
+        try:
+            self._record_checks(run, summary)        # 检测过程存进检测记录表，执行摘要里不再留一份
+        except Exception:                             # noqa: BLE001 —— 记录失败不影响执行结果
+            log.exception("执行 #%s 的数据质量检测记录保存失败", run_id)
         self.store.update_run(run_id, status=status, exit_code=code, finished_at=now_str(),
                               summary=summary, message=msg)
         self._follow_up(run_id, status, summary, run["log_path"])

@@ -323,6 +323,9 @@ def _run_one_scenic(st, scenic: str, dates: List[str], db, comments_df, works_df
                   for r in res.push.results] if res.push is not None else []),
         "quality_attempts": int(res.quality_attempts),
         "quality_blocked": bool(res.quality_blocked),
+        # 数据质量检测过程（每次计算一份：查了哪些、核对多少、哪里不对），服务存进检测记录表
+        "quality_trace": res.quality_trace,
+        "dates": [min(dates), max(dates)] if dates else [],
         "elapsed": round(float(res.elapsed), 2)})
 
     for t, df in res.tables.items():

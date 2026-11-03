@@ -730,7 +730,11 @@ def test_push_settings_and_logs_api(server, tmp_path, monkeypatch):
     assert lg["date"] == "20261102" and lg["counts"] == {"ok": 1, "http_error": 1} and lg["rows_ok"] == 10
     assert lg["items"][0]["result"] == "http_error" and "url" not in lg["items"][1]
     code, lg = _call(base, "/api/push/logs?result=ok")
-    assert [x["result"] for x in lg["items"]] == ["ok"]
+    assert [x["result"] for x in lg["items"]] == ["ok"] and lg["total"] == 1
+    code, lg = _call(base, "/api/push/logs?limit=1")                  # 分页：新的在前
+    assert lg["total"] == 2 and [x["result"] for x in lg["items"]] == ["http_error"]
+    code, lg = _call(base, "/api/push/logs?limit=1&offset=1")
+    assert lg["total"] == 2 and [x["result"] for x in lg["items"]] == ["ok"] and lg["counts"]["ok"] == 1
     assert _call(base, "/api/push/logs?date=bad")[0] == 400
 
 
@@ -784,7 +788,7 @@ def mysql_store():
 
 def test_mysql_tables_follow_naming_rules(mysql_store):
     st, conn = mysql_store
-    from engin_cli.service.store import TABLE_RUN, TABLE_SCHEDULE_LOG, TABLE_SETTING, TABLE_TASK
+    from engin_cli.service.store import TABLE_QUALITY, TABLE_RUN, TABLE_SCHEDULE_LOG, TABLE_SETTING, TABLE_TASK
     with conn.cursor() as c:
         c.execute("select table_schema, table_name, table_comment from information_schema.tables "
                   "where table_schema='omx_t_db' order by table_name")
@@ -792,14 +796,14 @@ def test_mysql_tables_follow_naming_rules(mysql_store):
         c.execute("select table_name, column_name, column_comment from information_schema.columns "
                   "where table_schema='omx_t_db'")
         cols = c.fetchall()
-    assert {t[1] for t in tables} == {TABLE_TASK, TABLE_SETTING, TABLE_RUN, TABLE_SCHEDULE_LOG}   # 同一个库
+    assert {t[1] for t in tables} == {TABLE_TASK, TABLE_SETTING, TABLE_RUN, TABLE_SCHEDULE_LOG, TABLE_QUALITY}   # 同一个库
     assert all(t[2] for t in tables)                                     # 表注释
     assert [c for c in cols if not c[2]] == []                           # 每个字段都有注释
     assert all(re.fullmatch(r"[a-z][a-z0-9_]*", c[1]) for c in cols)     # snake_case
     names = {c[0]: set() for c in cols}
     for t, c, _ in cols:
         names[t].add(c)
-    assert "travel_date" in names[TABLE_RUN] and "travel_date" in names[TABLE_SCHEDULE_LOG]
+    assert all("travel_date" in names[t] for t in (TABLE_RUN, TABLE_SCHEDULE_LOG, TABLE_QUALITY))
     status = [c for c in cols if c[1].endswith("_status")]
     assert status and all("-" in c[2] for c in status)                    # 状态字段注释写清每个取值
 
@@ -850,11 +854,12 @@ def test_mysql_store_reconnects(mysql_store):
 def test_mysql_ddl_renders_database_names():
     from engin_cli.service.store import render_mysql_ddl
     stmts = render_mysql_ddl("opinion")
-    assert len(stmts) == 9
+    assert len(stmts) == 13                                           # 5 张表 + 8 个索引
     heads = [s.split("(")[0] for s in stmts]                             # 建表 / 建索引的表名都带库名
     assert all("`opinion`." in h for h in heads)
     assert any("`opinion`.dim_trf_social_opinion_task_f" in h for h in heads)
     assert any("`opinion`.dwd_trf_social_opinion_task_run_di" in h for h in heads)
+    assert any("`opinion`.dwd_trf_social_opinion_quality_check_di" in h for h in heads)
     assert "（dim_trf_social_opinion_task_f.task_id）" in "".join(stmts)   # 注释里的表名不动
 
 
@@ -1106,3 +1111,47 @@ def test_mysql_login_with_smc_user_table():
         with conn.cursor() as c:
             c.execute("drop database if exists omx_t_src")
         conn.close()
+
+
+def test_every_run_records_a_quality_check_with_its_process(runner, tmp_path):
+    """跑批每个景区都记一条检测记录：查了哪些项（规则）、核对多少行、断言几次、结果；执行摘要里不再留一份。"""
+    src = tmp_path / "comments.csv"
+    _rows().to_csv(src, index=False, encoding="utf-8-sig")
+    argv = ["run", "--comments-csv", str(src), "--skip-db", "--no-push", "--rerun-days", "0",
+            "--date", "20261102", "--no-progress"]
+    rid = runner.submit("run", argv, "测试", trigger="schedule", task={"id": 7, "name": "九寨沟 · 每日跑批"})
+    run = _done(runner, rid)
+    assert run["status"] == "success"
+    assert "quality_trace" not in run["summary"]["scenics"][0]            # 过程挪到检测记录表了
+    lst = runner.store.list_checks(since="2000-01-01")
+    assert lst["total"] == 1 and lst["counts"] == {"pass": 1}
+    c = runner.store.get_check(lst["items"][0]["id"])
+    assert (c["type"], c["trigger"], c["run_id"], c["task_name"], c["scenic"]) == \
+        ("run", "schedule", rid, "九寨沟 · 每日跑批", "S1")
+    assert c["start"] == c["end"] == "20261102" and c["status"] == "pass" and c["summary"].startswith("全部通过")
+    att = c["detail"]["attempts"]
+    assert len(att) == 1 and att[0]["ok"] and att[0]["at"]
+    steps = {s["key"]: s for s in att[0]["steps"]}
+    assert {"core", "platform", "dimension", "content", "same_range", "macro"} <= set(steps)
+    assert c["items"] == len(att[0]["steps"])
+    for s in steps.values():                                             # 每一项：规则、行数、断言次数、结果
+        assert s["rules"] and s["rows"] > 0 and s["asserts"] >= 1 and s["ok"] and s["errors"] == []
+    assert steps["same_range"]["compared"] > 0                           # 区间一致：比了多少对
+
+
+def test_manual_quality_check_is_recorded_with_operator(server):
+    base, app, holder = server
+    m = holder["macro"]
+    m.loc[(m.channel == "douyin") & (m.travel_date == 20261101) & (m.time_granularity == "td"), "comment_total"] += 1
+    code, r = _call(base, "/api/quality/check", "POST", {"scenic": "S1", "start": "20261031", "end": "20261102"})
+    assert code == 200 and r["check_id"]
+    code, lst = _call(base, "/api/quality/checks?days=1")
+    assert code == 200 and lst["items"][0]["id"] == r["check_id"]
+    assert (lst["items"][0]["type"], lst["items"][0]["trigger"], lst["items"][0]["operator"]) == ("manual", "page", "运维小王")
+    code, c = _call(base, f"/api/quality/checks/{r['check_id']}")
+    assert c["status"] == "fail" and c["issues"] >= 1 and "库里已有的大盘表" in c["detail"]["source"]
+    sr = c["detail"]["attempts"][0]["steps"][0]
+    assert sr["key"] == "same_range" and not sr["ok"] and sr["issue_total"] >= 1
+    it = sr["issues"][0]                                                 # 对比的是哪两行、各是多少
+    assert it["field"] and len(it["rows"]) >= 2 and len(it["values"]) >= 2
+    assert _call(base, "/api/quality/checks/99999")[0] == 404
