@@ -115,9 +115,13 @@ export default {
       <div class="card span2 wallet">
         <div class="w-text">
           <h3>近 14 天执行次数</h3>
-          <p>成功 <b>{{ wk.s }}</b> 次，失败 / 回退 <b>{{ wk.bad }}</b> 次（近 7 天），
-            比上周{{ wk.bad <= wk.pbad ? '少' : '多' }} {{ Math.abs(wk.bad - wk.pbad) }} 次。</p>
-          <div class="legend"><span v-for="s in series.slice().reverse()" :key="s.key" class="lg-item"><i :style="{background: s.color}"></i>{{ s.label }}</span></div>
+          <ul class="w-stats">
+            <li><span>成功<small>近 7 天</small></span><b>{{ wk.s }}<em>次</em></b></li>
+            <li><span>失败 / 回退<small>近 7 天</small></span><b :class="{'t-red': wk.bad}">{{ wk.bad }}<em>次</em></b></li>
+            <li><span>失败 / 回退<small>比上周</small></span>
+              <b :class="wk.bad > wk.pbad ? 't-red' : 't-green'">{{ wk.bad === wk.pbad ? '持平' : (wk.bad < wk.pbad ? '少 ' : '多 ') + Math.abs(wk.bad - wk.pbad) }}<em v-if="wk.bad !== wk.pbad">次</em></b></li>
+          </ul>
+          <div class="w-legend"><span v-for="s in series.slice().reverse()" :key="s.key"><i :style="{background: s.color}"></i>{{ s.label }}</span></div>
           <router-link to="/runs" class="btn primary sm">执行记录 <Icon name="arrowR" :size="13" :sw="2.4"/></router-link>
         </div>
         <div class="w-chart"><PillBars :rows="barRows" :series="series" :height="150" :bar-width="10" :fmt="v => v + ' 次'" /></div>

@@ -1,4 +1,4 @@
-// 入口：外框 + 图标侧栏 + 顶栏 + 极简 hash 路由（#/tasks、#/runs/12 …）。新增页面：在 ROUTES 里加一行即可。
+// 入口：外框 + 顶栏（含横向菜单）+ 极简 hash 路由（#/tasks、#/runs/12 …）。新增页面：在 ROUTES 里加一行即可。
 import { createApp, reactive, computed, h, ref, watch, onMounted, onUnmounted } from 'vue'
 import { toast, sched, refreshSched, search, dialog, health, checkHealth, auth, loadMe, login, logout, confirmBox } from './api.js'
 import { installUI } from './ui.js'
@@ -137,6 +137,13 @@ const App = {
     <header class="topbar">
       <a href="#/" class="brand" title="标签计算中心"><img src="/logo.png" width="40" height="40" alt="标签计算中心" /></a>
       <div class="hello"><h1>你好，{{ auth.user.display_name }}！<span v-if="auth.user.readonly" class="ro-badge" title="只读账号：只能查看，不能执行、修改">只读</span></h1></div>
+      <!-- 菜单：横向紫色胶囊，在顶栏中间；当前页显示名称，其他的鼠标移上去显示 -->
+      <nav class="topnav" aria-label="菜单">
+        <a v-for="n in NAV" :key="n.to" :href="'#'+n.to" :class="{on: current.r.nav===n.to}" :data-tip="n.label" :aria-label="n.label">
+          <Icon :name="n.icon" :size="18" /><span>{{ n.label }}</span></a>
+        <i class="tn-sep"></i>
+        <a href="#/maint" :class="{on: current.r.nav==='/maint'}" data-tip="维护" aria-label="维护"><Icon name="gear" :size="18"/><span>维护</span></a>
+      </nav>
       <div class="tb-right">
         <label class="tb-search"><input v-model="kw" placeholder="搜索任务 / 景区…" @keyup.enter="doSearch"/>
           <button @click="doSearch" aria-label="搜索"><Icon name="search" :size="16" :sw="2.2"/></button></label>
@@ -156,19 +163,10 @@ const App = {
         </div>
         <a href="#/quality" class="tb-round" title="数据质量"><Icon name="shield" :size="18"/></a>
         <a href="#/runs" class="tb-round" title="执行记录"><Icon name="bell" :size="18"/></a>
+        <button class="side-me" :title="auth.user.display_name + ' · ' + auth.user.role_text + '（点击退出登录）'" @click="doLogout">{{ auth.user.display_name.slice(0, 1) }}</button>
       </div>
     </header>
     <div class="body">
-      <aside class="side">
-        <nav>
-          <a v-for="n in NAV" :key="n.to" :href="'#'+n.to" :class="{on: current.r.nav===n.to}" :data-tip="n.label" :aria-label="n.label">
-            <Icon :name="n.icon" :size="19" /></a>
-        </nav>
-        <div class="side-foot">
-          <a href="#/maint" class="side-mini" title="维护" :class="{on: current.r.nav==='/maint'}"><Icon name="gear" :size="18"/></a>
-          <button class="side-me" :title="auth.user.display_name + ' · ' + auth.user.role_text + '（点击退出登录）'" @click="doLogout">{{ auth.user.display_name.slice(0, 1) }}</button>
-        </div>
-      </aside>
       <main class="main"><component :is="current.r.comp" v-bind="current.props" :key="route.path + '#' + health.epoch" /></main>
     </div>
     <div class="toasts"><TransitionGroup name="toast">
