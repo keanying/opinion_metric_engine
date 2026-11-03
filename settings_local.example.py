@@ -424,11 +424,10 @@ ETL = {
     # ══════════════════════════════════════════════════════════════
     # 指标计算服务（python -m engin_cli.cli serve，页面上管任务 / 定时 / 推送）
     # ══════════════════════════════════════════════════════════════
-    # 默认只监听本机 127.0.0.1。要让别的电脑用浏览器打开，改成 "0.0.0.0"，
-    # 这时必须配 service_password（不配拒绝启动）；浏览器弹框，用户名随便填，密码填这个。
+    # 默认只监听本机 127.0.0.1。要让别的电脑用浏览器打开，改成 "0.0.0.0"。
+    # 页面必须登录：用 SMC 系统的账号（源表库里的 src_opinion_sys_user），用户在 SMC 的「用户管理」里维护。
     # "service_host": "127.0.0.1",
     # "service_port": 8765,
-    # "service_password": "",           # 也可以用环境变量 OPINION_SERVICE_PASSWORD
     # "service_data_dir": "service_data",  # 执行日志放这里
     # 任务 / 设置 / 执行记录 / 调度日志存哪："mysql"（默认，建在上面 DB 的 database 同一个库里，
     #   表见 sql/sys_trf_social_opinion_service_ddl.sql，缺表自动建）；"sqlite" = 没有库时本机试用
