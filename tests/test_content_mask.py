@@ -251,7 +251,7 @@ def _run(**kw):
         ds = d.strftime("%Y%m%d")
         rows.append(_comment(f"bg{ds}", "景色很好玩", ["好玩"], ds))
     st = EtlSettings()
-    st.write_db = st.write_csv = False
+    st.write_db = False
     st.lookback_days = 30
     for k, v in kw.items():
         setattr(st, k, v)

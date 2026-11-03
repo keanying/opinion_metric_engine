@@ -21,6 +21,7 @@ from engin_cli.loader import TABLE_DRILL_ANALYSIS, TABLE_MACRO, scenic_key
 from engin_cli.pipeline import run
 from engin_cli.pusher import _jsonable
 from engin_cli.settings import EtlSettings
+from fake_ads import FakeAdsDB
 
 SRC, DST, NAME = "S1", "S_MOCK", "演示景区"
 
@@ -48,43 +49,14 @@ def produced():
         if i % 3:
             rows.append(_comment(f"b{ds}", "排队太久了", ["排队"], ds, "xiaohongshu"))
     st = EtlSettings()
-    st.write_db = st.write_csv = False
+    st.write_db = False
     st.lookback_days = 30
     res = run(st, ["20260910", "20260911", "20260912"], comments_df=pd.DataFrame(rows))
     return res.tables
 
 
-class FakeDB:
-    """只认 mock.py 发的两种 SQL：查列名、按景区 + 日期区间取数。"""
-
-    class cfg:                                   # noqa: N801
-        @staticmethod
-        def ads_db():
-            return "ads"
-
-    EXTRA = ["id", "handle_flag", "created_time"]
-
-    def __init__(self, tables):
-        self.tables = {t: df.assign(id=range(len(df)), handle_flag=0,
-                                    created_time=datetime(2026, 10, 1))
-                       for t, df in tables.items()}
-        self.queries = []
-
-    def query_df(self, sql, params=()):
-        self.queries.append((sql, params))
-        if "information_schema" in sql:
-            t = params[1]
-            cols = list(self.tables[t].columns) if t in self.tables else []
-            return pd.DataFrame({"column_name": cols})
-        t = re.search(r"from `ads`\.`(\w+)`", sql).group(1)
-        cols = re.findall(r"`(\w+)`", sql.split(" from ")[0])
-        df = self.tables[t]
-        sc, lo, hi = params
-        df = df[(df[scenic_key(t)] == sc) & df["travel_date"].between(lo, hi)]
-        return df[cols].reset_index(drop=True)
-
-    def close(self):
-        pass
+class FakeDB(FakeAdsDB):
+    """假 ADS 库（见 tests/fake_ads.py）：表数据来自一次真实跑批，外加客户表上才有的列。"""
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -125,7 +97,7 @@ def test_date_range_is_respected(produced):
     db = FakeDB(produced)
     out, _ = M.build_mock(db, SRC, DST, NAME, "20260911", "20260911", [TABLE_MACRO])
     assert set(out[TABLE_MACRO]["travel_date"]) == {20260911}
-    assert any(p == (SRC, 20260911, 20260911) for _, p in db.queries)
+    assert any(list(p or []) == [SRC, 20260911, 20260911] for _, p in db.queries)
 
 
 def test_same_scenic_id_is_refused(produced):

@@ -78,13 +78,18 @@ def feishu():
 def _settings(tmp_path, webhook="", **kw):
     st = EtlSettings()
     st.write_db = False
-    st.write_csv = True
-    st.output_dir = str(tmp_path / "out")
     st.lookback_days = 40
     st.notify_feishu_webhook = webhook
     for k, v in kw.items():
         setattr(st, k, v)
     return st
+
+
+def _spy_load(monkeypatch):
+    """记录有没有走到写库（结果只写库、不出 CSV，测试里不连库，截下 load_all 的调用）。"""
+    loaded = []
+    monkeypatch.setattr(P, "load_all", lambda db, tables, **k: loaded.append(sorted(tables)) or [])
+    return loaded
 
 
 def _fail_validate(monkeypatch, times):
@@ -106,7 +111,7 @@ def _fail_validate(monkeypatch, times):
 # 新检测项：区间相同的行指标一致
 # ══════════════════════════════════════════════════════════════════
 def _macro(tmp_path):
-    st = _settings(tmp_path, write_csv=False)
+    st = _settings(tmp_path)
     return run(st, ["20261101", "20261102"], comments_df=_rows())
 
 
@@ -145,10 +150,11 @@ def test_same_range_check_ignores_periods_with_different_lookback(tmp_path):
 def test_passing_on_retry_writes_normally(tmp_path, monkeypatch, feishu):
     url, fs = feishu
     calls = _fail_validate(monkeypatch, times=1)
-    res = run(_settings(tmp_path, url), ["20261102"], comments_df=_rows())
+    loaded = _spy_load(monkeypatch)
+    res = run(_settings(tmp_path, url, write_db=True), ["20261102"], comments_df=_rows())
     assert calls["n"] == 2 and res.quality_attempts == 2
     assert res.ok and not res.quality_blocked
-    assert (tmp_path / "out" / f"{TABLE_CORE}.csv").exists()
+    assert loaded and TABLE_CORE in loaded[0]                 # 正常写库
     assert any("重算后通过" in n for n in res.notes)
     assert not fs.bodies                                  # 修好了，不发通知
 
@@ -156,11 +162,13 @@ def test_passing_on_retry_writes_normally(tmp_path, monkeypatch, feishu):
 def test_failing_twice_rolls_back_and_notifies(tmp_path, monkeypatch, feishu):
     url, fs = feishu
     calls = _fail_validate(monkeypatch, times=None)
-    st = _settings(tmp_path, url, push_enabled=True, push_url=url.replace("/open-apis", "/push"))
+    loaded = _spy_load(monkeypatch)
+    st = _settings(tmp_path, url, write_db=True, push_enabled=True,
+                   push_url=url.replace("/open-apis", "/push"))
     res = run(st, ["20261101", "20261102"], comments_df=_rows(), scenic_codes=["S1"])
     assert calls["n"] == 2                               # 算 1 次 + 重算 1 次
     assert res.quality_blocked and not res.ok
-    assert not (tmp_path / "out").exists()               # 回退：一个文件都没写
+    assert not loaded                                    # 回退：没走到写库
     assert res.load_results == [] and res.push is None   # 没写库、没推送
     assert len(fs.bodies) == 1                           # 只有飞书通知，没有推送请求
     text = fs.bodies[0]["content"]["text"]
@@ -181,9 +189,11 @@ def test_retries_are_configurable(tmp_path, monkeypatch):
 def test_gate_off_still_writes_but_notifies(tmp_path, monkeypatch, feishu):
     url, fs = feishu
     _fail_validate(monkeypatch, times=None)
-    res = run(_settings(tmp_path, url, quality_gate=False), ["20261102"], comments_df=_rows())
+    loaded = _spy_load(monkeypatch)
+    res = run(_settings(tmp_path, url, quality_gate=False, write_db=True), ["20261102"],
+              comments_df=_rows())
     assert not res.quality_blocked and not res.ok
-    assert (tmp_path / "out" / f"{TABLE_CORE}.csv").exists()
+    assert loaded and TABLE_CORE in loaded[0]
     assert "照常写库" in fs.bodies[0]["content"]["text"]
 
 
@@ -209,8 +219,7 @@ def _cli(tmp_path, *argv):
     src = tmp_path / "comments.csv"
     _rows().to_csv(src, index=False, encoding="utf-8-sig")
     return cli.main(["run", "--comments-csv", str(src), "--skip-db", "--no-push",
-                     "--rerun-days", "0", "--output-dir", str(tmp_path / "out"),
-                     "--date", "20261102", *argv])
+                     "--rerun-days", "0", "--date", "20261102", *argv])
 
 
 def test_cli_exception_sends_notification(tmp_path, monkeypatch, feishu, capsys):
@@ -239,9 +248,11 @@ def test_cli_reports_rollback(tmp_path, monkeypatch, feishu, capsys):
 def test_cli_no_quality_gate_and_retries_flags(tmp_path, monkeypatch, feishu):
     url, fs = feishu
     calls = _fail_validate(monkeypatch, times=None)
+    got, real = [], cli.run_pipeline
+    monkeypatch.setattr(cli, "run_pipeline", lambda *a, **k: got.append(real(*a, **k)) or got[-1])
     _cli(tmp_path, "--no-quality-gate", "--quality-retries", "0")
     assert calls["n"] == 1
-    assert (tmp_path / "out" / "S1").exists()            # 闸门关了，照常写
+    assert got and not got[0].quality_blocked and got[0].tables   # 闸门关了，照常产出
 
 
 def test_notify_test_command(feishu, capsys):

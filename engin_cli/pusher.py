@@ -794,30 +794,6 @@ def push_table(table: str, df: pd.DataFrame, *, settings, progress=None) -> Push
     return res
 
 
-def cleanup_pushed_csv(out_dir: str, results: Sequence["PushResult"]) -> List[str]:
-    """推送成功的表 → 删掉 out_dir 下对应的 <表名>.csv；目录删空了就把目录也删掉。
-
-    推失败 / 跳过的表不删（留着补推）。返回删掉的文件路径。
-    """
-    import os
-    removed = []
-    for r in results:
-        if r.skipped or not r.ok:
-            continue
-        path = os.path.join(out_dir, f"{r.table}.csv")
-        try:
-            if os.path.isfile(path):
-                os.remove(path)
-                removed.append(path)
-        except OSError as e:                     # 删不掉（被 Excel 打开等）不影响推送结果
-            log.warning("删除本地 CSV 失败：%s（%s）", path, e)
-    try:
-        if removed and os.path.isdir(out_dir) and not os.listdir(out_dir):
-            os.rmdir(out_dir)
-    except OSError:
-        pass
-    return removed
-
 
 def _response_fields(settings) -> Dict[str, str]:
     """响应体里成败 / 错误码 / 错误信息 / 追踪号 的字段名（settings 可改）。"""

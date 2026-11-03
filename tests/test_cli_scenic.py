@@ -21,6 +21,7 @@ import pytest
 from engin_cli import cli
 from engin_cli.pipeline import run
 from engin_cli.settings import EtlSettings
+from fake_ads import FakeAdsDB
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = "ads_trf_social_opinion_comment_core_di"
@@ -83,9 +84,32 @@ def sample(tmp_path_factory):
 def _run(sample, out, *extra):
     # 默认不往前重跑（--rerun-days 0），各用例按「只跑指定日期」数行数；测重跑的用例自己传
     rerun = [] if "--rerun-days" in extra else ["--rerun-days", "0"]
-    return cli.main(["run", "--comments-csv", str(sample / "comments.csv"),
-                     "--works-csv", str(sample / "works.csv"), "--skip-db",
-                     "--output-dir", str(out), "--lookback-days", "40", *rerun, *extra])
+    cwd = os.getcwd()
+    os.chdir(out)                    # 在临时目录里跑，顺便确认不会在当前目录落任何 CSV
+    try:
+        return cli.main(["run", "--comments-csv", str(sample / "comments.csv"),
+                         "--works-csv", str(sample / "works.csv"), "--skip-db",
+                         "--lookback-days", "40", *rerun, *extra])
+    finally:
+        os.chdir(cwd)
+
+
+def _produce(sample, tmp_path, monkeypatch, *extra):
+    """跑一遍（不推），把算出来的各表收起来当作「库里的数据」，返回假 ADS 库并替换掉 cli.MySQL。"""
+    got = {}
+    real = cli.run_pipeline
+
+    def spy(st, *a, **k):
+        res = real(st, *a, **k)
+        for t, df in (res.tables or {}).items():
+            got.setdefault(t, []).append(df)
+        return res
+    monkeypatch.setattr(cli, "run_pipeline", spy)
+    assert _run(sample, tmp_path, *extra) == 0
+    monkeypatch.setattr(cli, "run_pipeline", real)
+    db = FakeAdsDB({t: pd.concat(v, ignore_index=True) for t, v in got.items()})
+    monkeypatch.setattr(cli, "MySQL", lambda cfg: db)
+    return db
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -131,24 +155,23 @@ def test_scenic_parsing():
 # 按景区跑 + 整体推送
 # ══════════════════════════════════════════════════════════════════
 def test_run_one_scenic_and_push_all(sample, tmp_path, gateway):
-    rc = _run(sample, tmp_path, "--push", "all", "--keep-local", "--scenic", "PFTSCA01002434",
+    rc = _run(sample, tmp_path, "--push", "all", "--scenic", "PFTSCA01002434",
               "--start-date", "20260901", "--end-date", "20260911")
     assert rc == 0
     # 只算、只推这一个景区；六张表都推了
     assert set(gateway.store) == {CORE, PLATFORM, DIMENSION, CONTENT, DRILL, MACRO}
     assert {s for _, _, ss in gateway.calls for s in ss} == {"PFTSCA01002434"}
     assert len(gateway.store[CORE]) == 11
-    # 产物写在景区子目录
-    assert (tmp_path / "PFTSCA01002434" / f"{CORE}.csv").exists()
-    assert not (tmp_path / "PFT_S_00001").exists()
+    # 结果只写库，本地不落 CSV
+    assert not list(tmp_path.rglob("*.csv"))
 
 
 def test_run_all_scenics_one_by_one(sample, tmp_path, gateway):
     """不给 --scenic：源表里的每个景区逐个跑、逐个推。"""
-    rc = _run(sample, tmp_path, "--push", "all", "--keep-local",
+    rc = _run(sample, tmp_path, "--push", "all",
               "--start-date", "20260910", "--end-date", "20260911")
     assert rc == 0
-    assert sorted(os.listdir(tmp_path)) == ["PFTSCA01002434", "PFT_S_00001"]
+    assert {s for _, _, ss in gateway.calls for s in ss} == {"PFTSCA01002434", "PFT_S_00001"}
     # 每个请求只含一个景区 —— 按景区整体推，不混推
     assert all(len(ss) == 1 for _, _, ss in gateway.calls)
     assert len(gateway.store[CORE]) == 4                 # 2 景区 × 2 天
@@ -196,63 +219,52 @@ def test_fail_fast_stops(sample, tmp_path, gateway):
     assert rc == 1 and gateway.store == {}
 
 
-def test_push_subcommand_by_scenic_and_date(sample, tmp_path, gateway):
-    """补推：按景区目录 + 日期过滤。与跑批直推的键完全一致（不产生重复行）。"""
-    assert _run(sample, tmp_path, "--start-date", "20260909", "--end-date", "20260911") == 0
+def test_push_subcommand_by_scenic_and_date(sample, tmp_path, gateway, monkeypatch):
+    """补推：从库里按景区 + 日期读出来再推。与跑批直推的键完全一致（不产生重复行）。"""
+    db = _produce(sample, tmp_path, monkeypatch, "--start-date", "20260909", "--end-date", "20260911")
     assert gateway.store == {}                            # 没 --push 就不推
 
-    rc = cli.main(["push", "--output-dir", str(tmp_path), "--scenic", "PFT_S_00001",
-                   "--date", "20260911"])
+    rc = cli.main(["push", "--scenic", "PFT_S_00001", "--date", "20260911"])
     assert rc == 0
     assert {r["travel_date"] for r in gateway.store[CORE].values()} == {20260911}
     assert {r["scenic_spot_code"] for r in gateway.store[CORE].values()} == {"PFT_S_00001"}
+    assert not any("id" in r or "handle_flag" in r for r in gateway.store[CORE].values())
 
-    rc = cli.main(["push", "--output-dir", str(tmp_path)])   # 全部景区、全部日期
+    rc = cli.main(["push", "--start-date", "20260909", "--end-date", "20260911"])   # 全部景区
     assert rc == 0
     assert len(gateway.store[CORE]) == 6
+    # 每个请求只含一个景区：补推也是一个景区一个景区地推
+    assert all(len(ss) == 1 for _, _, ss in gateway.calls)
 
     # 跑批直推一遍同样的数据：键一致 → 行数不变
     n = {t: len(v) for t, v in gateway.store.items()}
     assert _run(sample, tmp_path, "--push", "--start-date", "20260909",
                 "--end-date", "20260911") == 0
     assert {t: len(v) for t, v in gateway.store.items()} == n
+    assert db.queries                                     # 确实是从库里读的
 
 
-# ══════════════════════════════════════════════════════════════════
-# 推送成功后清理本地 CSV（本地不留存，免得越积越大）
-# ══════════════════════════════════════════════════════════════════
-def test_run_push_removes_local_csv_after_success(sample, tmp_path, gateway):
-    assert _run(sample, tmp_path, "--push", "--scenic", "PFT_S_00001", "--date", "20260911") == 0
-    assert gateway.store[CORE]
-    assert not (tmp_path / "PFT_S_00001").exists()          # 全部推成功 → CSV 和目录都删掉
+def test_push_subcommand_requires_dates(sample, tmp_path, gateway, monkeypatch, capsys):
+    """库里是全部历史：补推不给日期就拒绝，免得把整张表重推一遍。"""
+    _produce(sample, tmp_path, monkeypatch, "--scenic", "PFT_S_00001", "--date", "20260911")
+    assert cli.main(["push", "--scenic", "PFT_S_00001"]) == 2
+    assert "要指定日期" in capsys.readouterr().out and gateway.store == {}
 
 
-def test_run_push_keep_local(sample, tmp_path, gateway):
-    assert _run(sample, tmp_path, "--push", "--keep-local", "--scenic", "PFT_S_00001",
-                "--date", "20260911") == 0
-    assert (tmp_path / "PFT_S_00001" / f"{CORE}.csv").exists()
+def test_push_subcommand_nothing_in_db(sample, tmp_path, gateway, monkeypatch, capsys):
+    _produce(sample, tmp_path, monkeypatch, "--scenic", "PFT_S_00001", "--date", "20260911")
+    assert cli.main(["push", "--date", "20250101"]) == 2
+    assert "库里没有可推送的数据" in capsys.readouterr().out and gateway.store == {}
 
 
-def test_run_without_push_keeps_csv(sample, tmp_path, gateway):
-    """没推送就不删：CSV 是补推的来源。"""
-    assert _run(sample, tmp_path, "--scenic", "PFT_S_00001", "--date", "20260911") == 0
-    assert (tmp_path / "PFT_S_00001" / f"{CORE}.csv").exists()
-
-
-def test_push_subcommand_removes_only_the_pushed_rows(sample, tmp_path, gateway):
-    """按日期补推一部分：推过的行从 CSV 里删掉，没推的行留着；全推完文件就删掉。"""
-    assert _run(sample, tmp_path, "--scenic", "PFT_S_00001",
-                "--start-date", "20260909", "--end-date", "20260911") == 0
-    path = tmp_path / "PFT_S_00001" / f"{CORE}.csv"
-    assert cli.main(["push", "--output-dir", str(tmp_path), "--tables", "core",
-                     "--date", "20260911"]) == 0
-    left = pd.read_csv(path)
-    assert sorted(left.travel_date) == [20260909, 20260910]
-    assert (tmp_path / "PFT_S_00001" / f"{PLATFORM}.csv").exists()   # 没推的表不动
-
-    assert cli.main(["push", "--output-dir", str(tmp_path), "--tables", "core"]) == 0
-    assert not path.exists()
-    assert {r["travel_date"] for r in gateway.store[CORE].values()} == {20260909, 20260910, 20260911}
+def test_report_reads_the_db(sample, tmp_path, gateway, monkeypatch, capsys):
+    """report 从库里读四张表打印看板取数结果（不再读本地 CSV）。"""
+    _produce(sample, tmp_path, monkeypatch, "--scenic", "PFT_S_00001",
+             "--start-date", "20260905", "--end-date", "20260911")
+    capsys.readouterr()
+    assert cli.main(["report", "--date", "20260911", "--period", "week"]) == 0
+    out = capsys.readouterr().out
+    assert "[PFT_S_00001] 锚点 20260911" in out and "核心数值卡" in out
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -270,7 +282,7 @@ def test_range_run_equals_daily_run(sample, mode):
 
     def go(dates):
         st = EtlSettings()
-        st.write_db = st.write_csv = False
+        st.write_db = False
         st.enable_drill_analysis = False
         st.lookback_days = 20                     # 故意比区间短，逼出「视野」差异
         st.backfill_window_mode = mode
@@ -307,9 +319,11 @@ def test_content_rank_is_deterministic():
 
 def test_push_without_url_stops_early(sample, tmp_path, monkeypatch):
     monkeypatch.delenv("OPINION_PUSH_URL", raising=False)
+    ran = []
+    monkeypatch.setattr(cli, "run_pipeline", lambda *a, **k: ran.append(1))
     rc = _run(sample, tmp_path, "--push", "--date", "20260911")
     assert rc == 2
-    assert not tmp_path.joinpath("PFT_S_00001").exists()     # 一个景区都没跑
+    assert not ran                                           # 一个景区都没跑
 
 
 def test_compute_and_push_without_writing_tables(sample, tmp_path, gateway):

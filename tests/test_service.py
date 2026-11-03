@@ -118,6 +118,8 @@ def test_build_push_argv():
                     "--start-date", "20261101", "--end-date", "20261101"]
     with pytest.raises(ValueError):
         R.build_push_argv(start="2026-11-01")
+    with pytest.raises(ValueError, match="日期"):          # 补推从库里读，日期必填
+        R.build_push_argv("S1", "drill")
 
 
 def test_final_status():
@@ -276,7 +278,7 @@ def test_runner_runs_engin_cli_and_reads_the_summary(runner, tmp_path):
     src = tmp_path / "comments.csv"
     _rows().to_csv(src, index=False, encoding="utf-8-sig")
     argv = ["run", "--comments-csv", str(src), "--skip-db", "--no-push", "--rerun-days", "0",
-            "--output-dir", str(tmp_path / "out"), "--date", "20261102", "--no-progress"]
+            "--date", "20261102", "--no-progress"]
     rid = runner.submit("run", argv, "测试")
     run = _done(runner, rid)
     assert run["status"] == "success" and run["exit_code"] == 0
@@ -350,7 +352,7 @@ class FakeDB:
 @pytest.fixture(scope="module")
 def macro():
     st = EtlSettings()
-    st.write_db = st.write_csv = False
+    st.write_db = False
     st.lookback_days = 40
     return run_pipeline(st, ["20261031", "20261101", "20261102"], comments_df=_rows()).tables[TABLE_MACRO]
 
@@ -511,6 +513,8 @@ def test_maintenance_actions(server, tmp_path):
     base, app, _ = server
     code, r = _call(base, "/api/maint/push", "POST", {"tables": "drill", "start": "bad"})
     assert code == 400
+    code, r = _call(base, "/api/maint/push", "POST", {"tables": "drill"})
+    assert code == 400 and "日期" in r["error"]
     code, r = _call(base, "/api/maint/notify-test", "POST", {})
     assert code == 200 and _done(app.runner, r["run_id"])["kind"] == "notify"
     code, r = _call(base, "/api/maint/run", "POST", {"config": {"date_mode": "range",
@@ -550,8 +554,7 @@ def test_run_summary_json_from_cli(tmp_path):
     _rows().to_csv(src, index=False, encoding="utf-8-sig")
     out = tmp_path / "sum.json"
     rc = cli.main(["run", "--comments-csv", str(src), "--skip-db", "--no-push", "--rerun-days", "0",
-                   "--output-dir", str(tmp_path / "o"), "--date", "20261102", "--no-progress",
-                   "--summary-json", str(out)])
+                   "--date", "20261102", "--no-progress", "--summary-json", str(out)])
     assert rc == 0
     s = json.loads(out.read_text(encoding="utf-8"))
     assert s["exit_code"] == 0 and s["dates"] == ["20261102"]
@@ -562,15 +565,13 @@ def test_run_tables_only_outputs_selected(tmp_path):
     from engin_cli.loader import TABLE_DRILL_ANALYSIS
     src = tmp_path / "comments.csv"
     _rows().to_csv(src, index=False, encoding="utf-8-sig")
-    out = tmp_path / "o"
     rc = cli.main(["run", "--comments-csv", str(src), "--skip-db", "--no-push", "--rerun-days", "0",
-                   "--output-dir", str(out), "--date", "20261102", "--no-progress",
+                   "--date", "20261102", "--no-progress",
                    "--tables", "macro", "--summary-json", str(tmp_path / "s.json")])
     assert rc == 0
     s = json.loads((tmp_path / "s.json").read_text(encoding="utf-8"))["scenics"][0]
     assert list(s["tables"]) == [TABLE_MACRO]                     # 下钻表没算、基础四表没输出
-    files = sorted(p.name for p in out.rglob("*.csv"))
-    assert files == [TABLE_MACRO + ".csv"]
+    assert not list(tmp_path.rglob(TABLE_MACRO + ".csv"))         # 结果只写库，不出本地 CSV
     assert TABLE_DRILL_ANALYSIS not in s["tables"]
 
 

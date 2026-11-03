@@ -40,7 +40,6 @@ DATES = sorted({SPARSE_DAY, "20260915", "20260916", END})
 def _settings(**kw):
     st = EtlSettings()
     st.write_db = False
-    st.write_csv = False
     for k, v in kw.items():
         setattr(st, k, v)
     return st

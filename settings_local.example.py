@@ -5,7 +5,7 @@
 ------
 1. `cp settings_local.example.py settings_local.py`
 2. 填 DB 段（必填），ETL 段里**注释掉的都是可选项，不改就用默认值**
-3. `python -m engin_cli.cli run --date 20260911 --skip-db` 先看 CSV 对不对
+3. `python -m engin_cli.cli run --date 20260911 --skip-db` 先只计算 + 数据质量检测，看有没有报错
 
 优先级：命令行参数 > 环境变量 > 本文件 > engin_cli/settings.py 里的默认值
 
@@ -58,7 +58,8 @@ ETL = {
     # 0 = 不重跑；命令行 --rerun-days 可临时覆盖
     # "rerun_days": 3,
 
-    # 【是什么】CSV 输出目录（跑批产物 + `report`/`push` 子命令读的也是这里）。
+    # 【是什么】推送排查文件目录（pkId 有问题时请求 JSON 写在 <目录>/push_debug/ 下）。
+    #   跑批结果只写库、不出本地 CSV，`report` / `push` 都读库。
     "output_dir": "output",
 
     # 【是什么】写库时每批 INSERT 多少行。
@@ -388,15 +389,9 @@ ETL = {
     # 【是什么】推送失败要不要让跑批的退出码变成非 0。
     # 【为什么默认 False】数据已经落库了，推不出去是下游的事，
     #   不该让调度平台把这次跑批标成失败。失败一定会打进跑批报告，
-    #   之后用 `python -m engin_cli.cli push` 从 CSV 补推一次就行。
+    #   之后用 `python -m engin_cli.cli push --date yyyyMMdd` 从库里读出来补推一次就行。
     # 【什么时候改 True】下游是强依赖，推不过去就必须告警。
     # "push_strict": False,
-
-    # 【是什么】推送成功后删掉本地 CSV（output/<景区>/<表>.csv），本地不留存。
-    #   只删推送成功的表；推失败的留着，修好后用 push 补推。
-    #   push 补推成功后同样把推过的行从 CSV 里删掉。
-    # 【什么时候改 False】想在本地留一份结果核对（命令行也可以临时加 --keep-local）。
-    # "push_cleanup_local": True,
 
     # 【是什么】网关 HTTP 恒为 200，成败写在响应体里：
     #   {"status": false, "code": 5011, "msg": "...", "trace_id": "..."}

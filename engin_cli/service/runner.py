@@ -58,7 +58,6 @@ PUSH_DEFAULTS: Dict[str, Any] = {
     "push_retries": None,
     "push_dry_run": False,        # 试推：只组报文不真发
     "push_strict": False,         # 推送失败也算执行失败
-    "push_cleanup_local": True,   # 推成功后删本地 CSV
 }
 
 
@@ -73,7 +72,7 @@ def normalize_push_settings(data: Optional[dict]) -> Dict[str, Any]:
     for k, lo in (("push_batch_size", 1), ("push_retries", 0)):
         out[k] = None if out[k] in (None, "") else max(int(out[k]), lo)
     out["push_timeout"] = None if out["push_timeout"] in (None, "") else max(float(out["push_timeout"]), 1.0)
-    for k in ("enabled", "push_dry_run", "push_strict", "push_cleanup_local"):
+    for k in ("enabled", "push_dry_run", "push_strict"):
         out[k] = bool(out[k])
     return out
 
@@ -84,8 +83,6 @@ def push_overrides(ps: Dict[str, Any]) -> Dict[str, Any]:
     for k in ("push_dry_run", "push_strict"):
         if not ps.get(k):
             out.pop(k, None)               # 关着 = 用 settings_local 的
-    if ps.get("push_cleanup_local", True):
-        out.pop("push_cleanup_local", None)
     return out
 
 
@@ -259,7 +256,9 @@ def build_task_argv(cfg: Dict[str, Any], today: Optional[dt.date] = None):
 
 def build_push_argv(scenics: str = "", tables: str = "", start: str = "",
                     end: str = "") -> Tuple[List[str], str]:
-    """补推：`engin_cli.cli push`。"""
+    """补推：`engin_cli.cli push`，从库里读算好的结果再推（日期必填）。"""
+    if not start:
+        raise ValueError("补推要选日期")
     argv = ["push", "--no-progress"]
     if tables:
         argv += ["--tables", tables]

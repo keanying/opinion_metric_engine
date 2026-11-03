@@ -146,7 +146,7 @@ def pipeline_out():
                    check=True, cwd=str(root))
     comments = pd.read_csv(out / "comments.csv")
     st = EtlSettings()
-    st.write_db = st.write_csv = False
+    st.write_db = False
     st.lookback_days = 50
     # 目标日期铺满整段历史：线上 core 表本来就是每天跑批攒出来的，
     # repair 读的也是这张有完整历史的表，测试要还原这个前提

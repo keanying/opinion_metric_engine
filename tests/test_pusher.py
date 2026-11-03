@@ -246,7 +246,7 @@ def test_push_failure_does_not_fail_the_run(server):
     srv, rec = server
     rec.status_plan = [400] * 20
     st = _settings(srv)
-    st.write_db = st.write_csv = False
+    st.write_db = False
     st.lookback_days = 30
     st.enable_drill_analysis = False
     r = run(st, ["20260911"], comments_df=_sample_comments())
@@ -261,7 +261,7 @@ def test_push_strict_makes_the_run_fail(server):
     srv, rec = server
     rec.status_plan = [400] * 20
     st = _settings(srv, push_strict=True)
-    st.write_db = st.write_csv = False
+    st.write_db = False
     st.lookback_days = 30
     st.enable_drill_analysis = False
     r = run(st, ["20260911"], comments_df=_sample_comments())
@@ -574,23 +574,25 @@ def test_progress_bar_counts_seconds_while_waiting(silent_server):
     assert "第 1 批等待响应 1s/2.5s" in text and "第 1 批等待响应 2s/2.5s" in text
 
 
-def test_push_from_scenic_dir_does_not_repush_the_same_scenic_from_flat_dir(tmp_path, server):
-    """新老两份 CSV 都在时（output/<景区>/ 和老的平铺 output/），同一个景区只推一次。"""
+def test_push_subcommand_reads_db_and_pushes_scenic_by_scenic(tmp_path, server, monkeypatch):
+    """补推从库里读（不再读本地 CSV）：按景区过滤；不给景区就把这段日期的景区逐个推，每个请求只含一个景区。"""
     from engin_cli import cli
+    from fake_ads import FakeAdsDB
     srv, rec = server
     df = _core_df(1).assign(scenic_spot_code="S1", travel_date=20260911)
-    (tmp_path / "S1").mkdir()
-    df.to_csv(tmp_path / "S1" / f"{CORE}.csv", index=False)
-    pd.concat([df, df.assign(scenic_spot_code="S2")]).to_csv(tmp_path / f"{CORE}.csv", index=False)
+    db = FakeAdsDB({CORE: pd.concat([df, df.assign(scenic_spot_code="S2")])})
+    monkeypatch.setattr(cli, "MySQL", lambda cfg: db)
     url = f"http://127.0.0.1:{srv.server_address[1]}/data/sync"
-    assert cli.main(["push", "--output-dir", str(tmp_path), "--push-url", url,
-                     "--scenic", "S1", "--no-progress"]) == 0
-    assert len(rec.requests) == 1                # 只从景区目录推了一次
+    assert cli.main(["push", "--push-url", url, "--tables", "core", "--scenic", "S1",
+                     "--date", "20260911", "--no-progress"]) == 0
+    assert len(rec.requests) == 1
+    assert [r["scenic_spot_code"] for r in rec.requests[0]["body"]["data"]] == ["S1"]
     rec.requests.clear()
-    assert cli.main(["push", "--output-dir", str(tmp_path), "--push-url", url,
+    assert cli.main(["push", "--push-url", url, "--tables", "core", "--date", "20260911",
                      "--no-progress"]) == 0
-    sent = sorted(r["scenic_spot_code"] for q in rec.requests for r in q["body"]["data"])
-    assert sent == ["S1", "S2"]                  # S1 来自子目录，S2 来自平铺目录，各一次
+    per_req = [sorted({r["scenic_spot_code"] for r in q["body"]["data"]}) for q in rec.requests]
+    assert per_req == [["S1"], ["S2"]]
+    assert "handle_flag" not in rec.requests[0]["body"]["data"][0]   # 客户表上加的列不推
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -716,20 +718,6 @@ def test_null_pk_is_sent_with_a_warning_but_empty_string_is_fine(server, tmp_pat
     df.loc[0, "dimension_level3"] = None
     res = push_table(dim, df, settings=_settings(srv, output_dir=str(tmp_path)))
     assert res.ok and "为空" in res.warning and len(rec.requests) == 2
-
-
-def test_cleanup_pushed_csv_only_removes_successful_tables(tmp_path):
-    from engin_cli.pusher import PushResult, cleanup_pushed_csv
-    for t in (CORE, PLATFORM, "skipped_table"):
-        (tmp_path / f"{t}.csv").write_text("a\n1\n", encoding="utf-8")
-    removed = cleanup_pushed_csv(str(tmp_path), [
-        PushResult(table=CORE, rows=1, batches=1),
-        PushResult(table=PLATFORM, failed_batches=1, error="第 1 批失败"),
-        PushResult(table="skipped_table", skipped=True)])
-    assert removed == [str(tmp_path / f"{CORE}.csv")]
-    assert not (tmp_path / f"{CORE}.csv").exists()
-    assert (tmp_path / f"{PLATFORM}.csv").exists()          # 推失败的留着补推
-    assert (tmp_path / "skipped_table.csv").exists()
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -904,14 +892,14 @@ def test_certificate_error_text_is_readable():
     assert not _is_cert_error(ConnectionRefusedError())
 
 
-def test_cli_push_explains_certificate_error(bad_cert_server, tmp_path, capsys):
+def test_cli_push_explains_certificate_error(bad_cert_server, tmp_path, capsys, monkeypatch):
     import engin_cli.cli as cli_mod
+    from fake_ads import FakeAdsDB
     url, _ = bad_cert_server
-    d = tmp_path / "out" / "S1"
-    d.mkdir(parents=True)
-    _core_df(2).to_csv(d / f"{CORE}.csv", index=False, encoding="utf-8-sig")
-    rc = cli_mod.main(["push", "--output-dir", str(tmp_path / "out"), "--push-url", url,
-                       "--no-progress", "--keep-local"])
+    db = FakeAdsDB({CORE: _core_df(2)})
+    monkeypatch.setattr(cli_mod, "MySQL", lambda cfg: db)
+    rc = cli_mod.main(["push", "--push-url", url, "--tables", "core",
+                       "--start-date", "20260901", "--end-date", "20260902", "--no-progress"])
     assert rc == 1
     out = capsys.readouterr().out
     assert "HTTPS 证书校验失败" in out and "对方运维" in out

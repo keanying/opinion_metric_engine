@@ -52,7 +52,7 @@ TIERED = dict(D.BACKFILL_LOOKBACK)
 
 def _settings(**kw):
     st = EtlSettings()
-    st.write_db = st.write_csv = False
+    st.write_db = False
     st.lookback_days = 60
     for k, v in kw.items():
         setattr(st, k, v)

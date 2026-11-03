@@ -52,7 +52,7 @@ def _rows():
 
 def _run(filter_on, keywords=None, rows=None, dates=("20260911", "20260912"), **kw):
     st = EtlSettings()
-    st.write_db = st.write_csv = False
+    st.write_db = False
     st.lookback_days = 30
     st.drill_keyword_filter = filter_on
     for k, v in kw.items():
@@ -191,12 +191,22 @@ def test_keywords_csv(tmp_path):
 def _cli(tmp_path, *argv):
     src = tmp_path / "comments.csv"
     _rows().to_csv(src, index=False, encoding="utf-8-sig")
-    out = tmp_path / "out"
-    rc = cli.main(["run", "--comments-csv", str(src), "--skip-db", "--no-push",
-                   "--rerun-days", "0", "--output-dir", str(out),
-                   "--start-date", "20260911", "--end-date", "20260912", *argv])
-    path = out / "S1" / f"{DRILL}.csv"
-    return rc, (pd.read_csv(path, dtype=str) if path.exists() else None)
+    got = {}                                 # 结果只写库、不出 CSV：截下 pipeline 算出来的表
+    real = cli.run_pipeline
+
+    def spy(st, *a, **k):
+        res = real(st, *a, **k)
+        got.update(res.tables or {})
+        return res
+    cli.run_pipeline = spy
+    try:
+        rc = cli.main(["run", "--comments-csv", str(src), "--skip-db", "--no-push",
+                       "--rerun-days", "0",
+                       "--start-date", "20260911", "--end-date", "20260912", *argv])
+    finally:
+        cli.run_pipeline = real
+    d = got.get(DRILL)
+    return rc, (d.astype(str) if d is not None else None)
 
 
 def test_cli_switch_on_with_keywords_csv(tmp_path):

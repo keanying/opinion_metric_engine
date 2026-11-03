@@ -30,7 +30,6 @@ def result(sample, tmp_path_factory):
     comments, works = sample
     st = EtlSettings()
     st.write_db = False
-    st.write_csv = False
     st.lookback_days = 60
     return run(st, ["20260830", "20260831", "20260901"],
                comments_df=comments, works_df=works)
@@ -151,7 +150,7 @@ def test_backfill_kicks_in_on_sparse_day(sample):
     """需求六.1：当日数据极少时应向前顺延取数，而不是算出一个 0/100% 的极端比率。"""
     comments, works = sample
     st = EtlSettings()
-    st.write_db = st.write_csv = False
+    st.write_db = False
     st.lookback_days = 60
     st.min_daily_comments = 10 ** 6      # 强制所有行都触发回补
     st.max_backfill_days = 7
@@ -159,7 +158,7 @@ def test_backfill_kicks_in_on_sparse_day(sample):
     core = r.tables["ads_trf_social_opinion_comment_core_di"]
     # 计数事实不受回补影响（默认 backfill_apply_to_counts=False）
     st2 = EtlSettings()
-    st2.write_db = st2.write_csv = False
+    st2.write_db = False
     st2.lookback_days = 60
     st2.enable_backfill = False
     r2 = run(st2, ["20260901"], comments_df=comments, works_df=works)

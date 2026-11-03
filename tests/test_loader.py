@@ -28,7 +28,6 @@ class _FakeDB:
 
 def _settings(**kw):
     st = EtlSettings()
-    st.write_csv = False
     st.write_db = True
     for k, v in kw.items():
         setattr(st, k, v)

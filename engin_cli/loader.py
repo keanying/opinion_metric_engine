@@ -23,7 +23,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence
 
@@ -62,14 +61,6 @@ class LoadResult:
     rows: int
     strategy: str
     deleted: int = 0
-
-
-def write_csv(df: pd.DataFrame, out_dir: str, table: str) -> str:
-    os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, f"{table}.csv")
-    df.to_csv(path, index=False, encoding="utf-8-sig")
-    log.info("导出 %s（%d 行）", path, len(df))
-    return path
 
 
 def _publish_values(dates: Sequence[str], fmt: str) -> List[str]:
@@ -118,7 +109,7 @@ def load_all(db: Optional[MySQL], tables: Dict[str, pd.DataFrame], *,
              settings, only: Optional[Sequence[str]] = None,
              scenics: Optional[Sequence[str]] = None,
              dates: Optional[Sequence[str]] = None) -> List[LoadResult]:
-    """把 builder 的产物按需落 CSV / 落库。
+    """把 builder 的产物写库（只写库，不出本地 CSV）。
 
     scenics / dates：本次跑的景区与目标日期（yyyyMMdd），决定写库前删哪些行。
     不传就从表里的数据推断 —— 但那样「这次一行都没算出来」的表就删不到旧行，
@@ -129,10 +120,7 @@ def load_all(db: Optional[MySQL], tables: Dict[str, pd.DataFrame], *,
     for table, df in tables.items():
         if only and table not in set(only):
             continue
-        if settings.write_csv:
-            write_csv(df, settings.output_dir, table)
         if not settings.write_db:
-            results.append(LoadResult(table, len(df), "csv-only"))
             continue
         sc = scenics
         if sc is None:

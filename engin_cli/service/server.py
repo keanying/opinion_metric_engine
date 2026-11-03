@@ -265,8 +265,7 @@ class App:
         ps = self.runner.push_settings()
         base = {"push_url": st.push_url, "push_batch_size": st.push_batch_size,
                 "push_timeout": st.push_timeout, "push_retries": st.push_retries,
-                "push_dry_run": st.push_dry_run, "push_strict": st.push_strict,
-                "push_cleanup_local": st.push_cleanup_local}
+                "push_dry_run": st.push_dry_run, "push_strict": st.push_strict}
         over = push_overrides(ps)
         return {"settings": ps, "base": base, "effective": {**base, **over},
                 "headers": {k: _mask(v) for k, v in (st.push_headers or {}).items()},
@@ -500,28 +499,15 @@ class App:
                            f"from {self._ads(TABLE_MACRO)} group by scenic_id order by scenic_id")
 
     def scenic_options(self) -> List[dict]:
-        """景区下拉的选项：库里大盘表有数据的景区 + 本地有待补推 CSV 的景区（库连不上也能列本地的）。"""
-        from ..loader import TABLE_DRILL_ANALYSIS, TABLE_MACRO, TABLE_CORE, TABLE_PLATFORM, \
-            TABLE_DIMENSION, TABLE_CONTENT
-        out: Dict[str, dict] = {}
+        """景区下拉的选项：库里大盘表有数据的景区。"""
+        out: List[dict] = []
         db_error = ""
         try:
-            for r in self.metric_scenics():
-                out[str(r["scenic_id"])] = {"scenic_id": str(r["scenic_id"]), "scenic_name": r.get("scenic_name") or "",
-                                            "last_date": r.get("last_date"), "has_csv": False}
+            out = [{"scenic_id": str(r["scenic_id"]), "scenic_name": r.get("scenic_name") or "",
+                    "last_date": r.get("last_date")} for r in self.metric_scenics()]
         except ApiError as e:
             db_error = str(e)
-        base = getattr(self.settings, "output_dir", "") or "output"
-        base = base if os.path.isabs(base) else os.path.join(APP_ROOT, base)
-        tables = {f"{t}.csv" for t in (TABLE_CORE, TABLE_PLATFORM, TABLE_DIMENSION, TABLE_CONTENT,
-                                       TABLE_DRILL_ANALYSIS, TABLE_MACRO)}
-        if os.path.isdir(base):
-            for d in sorted(os.listdir(base)):
-                full = os.path.join(base, d)
-                if os.path.isdir(full) and tables & set(os.listdir(full)):
-                    out.setdefault(d, {"scenic_id": d, "scenic_name": "", "last_date": None, "has_csv": False})
-                    out[d]["has_csv"] = True
-        return {"items": sorted(out.values(), key=lambda x: x["scenic_id"]), "db_error": db_error}
+        return {"items": out, "db_error": db_error}
 
     def metric_cell(self, scenic: str, date: str = "", granularity: str = "td") -> dict:
         from ..loader import TABLE_MACRO

@@ -1,5 +1,5 @@
 import { ref, reactive, onMounted, computed } from 'vue'
-import { api, TABLES, TABLE_LABEL, PUSH_RESULT, fmtNum, notify, refreshSched } from '../api.js'
+import { api, TABLES, TABLE_LABEL, PUSH_RESULT, fmtNum, notify, refreshSched, todayYmd } from '../api.js'
 import { Ring } from '../charts.js'
 
 const RING_C = { ok: ['#a194ec', '#5446b8'], dry_run: ['#8be3ef', '#22b8cf'], business_fail: ['#f6a4b8', '#ee5a7c'],
@@ -11,7 +11,7 @@ export default {
   setup() {
     const view = ref(null), form = reactive({}), saving = ref(false)
     const logs = ref(null), q = reactive({ date: '', result: '', kw: '' }), loadingLogs = ref(true)
-    const re = reactive({ scenics: '', tables: 'drill,macro', start: '', end: '' })
+    const re = reactive({ scenics: '', tables: 'drill,macro', start: todayYmd(), end: todayYmd() })
     const detail = ref(null)
     const loadView = async () => {
       try { view.value = await api('/api/push/settings'); Object.assign(form, view.value.settings)
@@ -55,7 +55,7 @@ export default {
       { key: 'resp', title: '响应', width: 260 }, { key: 'op', title: '', width: 56, align: 'r' }]
     const ymd = s => s ? `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6)}` : ''
     return { view, form, saving, save, setMaster, logs, q, loadLogs, loadingLogs, reset, re, toggleRe, doRepush,
-             parts, total, okRate, cols, detail, ymd, TABLES, TABLE_LABEL, PUSH_RESULT, fmtNum }
+             parts, total, okRate, cols, detail, ymd, TABLES, TABLE_LABEL, PUSH_RESULT, fmtNum, todayYmd }
   },
   template: `
   <div v-if="view">
@@ -77,7 +77,6 @@ export default {
           <div class="opts compact">
             <div class="opt"><div><b>试推</b><Tip text="只组报文不真发，验证配置用（推送记录里结果是「试推」）"/></div><Switch v-model="form.push_dry_run"/></div>
             <div class="opt"><div><b>推送失败算执行失败</b><Tip text="默认推失败不影响跑批成败（数据已落库，可以补推）"/></div><Switch v-model="form.push_strict"/></div>
-            <div class="opt"><div><b>推成功后删本地 CSV</b><Tip text="推失败的 CSV 会留着，补推用"/></div><Switch v-model="form.push_cleanup_local"/></div>
           </div>
           <div class="frow ro"><label>请求头</label><div class="chips">
             <span v-for="(v,k) in view.headers" :key="k" class="chip grey">{{ k }}: {{ v }}</span>
@@ -103,13 +102,13 @@ export default {
           </div>
         </div>
         <div class="card sect">
-          <div class="sect-head"><h3>补推<Tip text="不重算，把之前算好、推失败的 CSV 再推一遍"/></h3></div>
+          <div class="sect-head"><h3>补推<Tip text="不重算，从库里读出这几天算好的结果再推一遍"/></h3></div>
           <div class="sect-body">
             <div class="frow"><label>景区</label><ScenicPicker v-model="re.scenics" placeholder="全部景区" /></div>
             <div class="frow"><label>表</label><div class="chips">
               <button v-for="t in TABLES" :key="t.key" class="chip-btn" :class="{on: re.tables.split(',').includes(t.key)}"
                 @click="toggleRe(t.key)">{{ t.label }}</button></div></div>
-            <div class="frow"><label>日期</label><DateRange v-model:start="re.start" v-model:end="re.end" :placeholder="['不选 = 全部', '结束日期']" />
+            <div class="frow"><label>日期</label><DateRange v-model:start="re.start" v-model:end="re.end" :clearable="false" :max="todayYmd()" />
               <button class="btn primary" @click="doRepush"><Icon name="send" :size="14"/>开始补推</button></div>
           </div>
         </div>

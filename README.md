@@ -16,7 +16,7 @@
    core · platform · dimension_score · content · macro ← 列名 = 目标表 DDL
                     │
                     ▼  validate → load（按 景区 + publish_time 先删后插）
-   MySQL ADS 表（+ CSV 备份）
+   MySQL ADS 表（只写库，不出本地 CSV；补推 / report 都读库）
 ```
 
 ---
@@ -30,10 +30,10 @@ cp settings_local.example.py settings_local.py    # 填库连接，该文件已 
 # 跑昨天
 python -m engin_cli.cli run
 
-# 跑指定区间，只出 CSV 不写库（第一次建议先这样看一眼）
+# 跑指定区间，只计算 + 数据质量检测、不写库（第一次建议先这样看一眼）
 python -m engin_cli.cli run --start-date 20260801 --end-date 20260901 --skip-db
 
-# 按规则文档打印看板取数结果，肉眼验收
+# 按规则文档打印看板取数结果，肉眼验收（读库）
 python -m engin_cli.cli report --scenic PFTSCA01002434 --date 20260901 --period week
 
 # 完全离线跑（不连库，直接喂两张源表的 CSV）
@@ -446,7 +446,6 @@ Content-Type: application/json
 | `push_retries` / `push_retry_backoff` | 2 / 1.0 | 重试次数与退避基数 |
 | `push_dry_run` | `False` | 只组报文不真发，验证配置用 |
 | `push_strict` | `False` | `True` 时推送失败也让跑批退出码非 0 |
-| `push_cleanup_local` | `True` | 推送成功后删掉本地 CSV（推失败的表留着补推；`push` 补推只删推过的行）。命令行 `--keep-local` 临时保留 |
 | `push_log_dir` | `"logs"` | 推送记录目录：每次请求的真实响应写进 `<目录>/push_<日期>.log`；`""` 不记。环境变量 `OPINION_PUSH_LOG_DIR` 优先 |
 | `push_log_max_chars` | `0` | 响应体最多记多少字，`0` = 原文全记 |
 
@@ -461,7 +460,7 @@ python -m engin_cli.cli run --date 20260911 --push all             # 同上，�
 python -m engin_cli.cli run --date 20260911 --push core,platform   # 只推这两张
 python -m engin_cli.cli run --date 20260911 --push-dry-run         # 只组报文，验证配置
 python -m engin_cli.cli run --date 20260911 --push --push-strict   # 推失败就算跑批失败
-python -m engin_cli.cli push --tables core                         # 从 CSV 补推
+python -m engin_cli.cli push --tables core --date 20260911         # 从库里读出来补推（日期必填）
 ```
 
 表名可以用简写，也可以写完整表名，`all` 或不填 = 全部：

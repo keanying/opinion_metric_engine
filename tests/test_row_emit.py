@@ -63,7 +63,7 @@ def sparse():
 @pytest.fixture(scope="module")
 def result(sparse):
     st = EtlSettings()
-    st.write_db = st.write_csv = False
+    st.write_db = False
     st.lookback_days = 60
     st.backfill_mode = "off"            # 关掉明细补齐，好判断值到底来自哪
     return run(st, ["20260830", "20260831"], comments_df=sparse)
@@ -124,7 +124,7 @@ def test_platform_sum_still_equals_core(result):
 def test_unconfigured_channel_in_data_is_not_dropped(sparse):
     """数据里有、配置里没写的渠道要保留 —— 采集侧新接平台不该因为配置忘改而丢数。"""
     st = EtlSettings()
-    st.write_db = st.write_csv = False
+    st.write_db = False
     st.lookback_days = 60
     st.platform_codes = ["weibo"]           # 配置里只留微博
     r = run(st, ["20260830"], comments_df=sparse)
@@ -148,7 +148,7 @@ def test_core_emits_row_on_zero_comment_day(result):
 def test_core_does_not_emit_before_first_data(sparse):
     """景区接入之前的日期不该凭空多出空行。"""
     st = EtlSettings()
-    st.write_db = st.write_csv = False
+    st.write_db = False
     st.lookback_days = 60
     r = run(st, ["20260810", "20260830"], comments_df=sparse)   # 8/10 早于首条数据
     dates = set(r.tables[CORE]["travel_date"])
@@ -192,7 +192,7 @@ def test_word_emotion_type_carried_forward(result):
 def test_content_row_window_bounds_the_table(sparse):
     """content_row_window 控制铺行范围：调小到 1 天，就只剩当天真的出现过的词。"""
     st = EtlSettings()
-    st.write_db = st.write_csv = False
+    st.write_db = False
     st.lookback_days = 60
     st.content_row_window = 1
     st.backfill_mode = "off"
@@ -234,7 +234,7 @@ def _bdc_comments():
 @pytest.fixture(scope="module")
 def bdc():
     st = EtlSettings()
-    st.write_db = st.write_csv = False
+    st.write_db = False
     st.lookback_days = 90
     return run(st, ["20260909", "20260910"], comments_df=_bdc_comments())
 

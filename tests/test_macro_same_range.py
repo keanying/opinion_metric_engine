@@ -49,7 +49,7 @@ def _rows():
 
 def _macro(top_n=2):
     st = EtlSettings()
-    st.write_db = st.write_csv = False
+    st.write_db = False
     st.lookback_days = 60
     st.macro_wordcloud_top_n = top_n
     return run(st, ["20261101", "20261102"], comments_df=_rows()).tables[TABLE_MACRO]

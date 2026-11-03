@@ -232,7 +232,7 @@ export function loadScenics(force = false) {
 export const ScenicPicker = {
   components: { Icon },
   props: { modelValue: String, single: Boolean, placeholder: { type: String, default: '全部景区' },
-           csvOnly: Boolean, width: { type: String, default: '100%' } },
+           width: { type: String, default: '100%' } },
   emits: ['update:modelValue', 'change'],
   setup(p, { emit }) {
     const el = ref(null), inp = ref(null), pos = ref(null), kw = ref(''), opts = ref([])
@@ -241,7 +241,7 @@ export const ScenicPicker = {
     const nameOf = id => (opts.value.find(o => o.scenic_id === id) || {}).scenic_name || ''
     const shown = computed(() => {
       const k = kw.value.trim().toLowerCase()
-      return opts.value.filter(o => (!p.csvOnly || o.has_csv) &&
+      return opts.value.filter(o =>
         (!k || o.scenic_id.toLowerCase().includes(k) || (o.scenic_name || '').toLowerCase().includes(k))).slice(0, 200)
     })
     const set = ids => { const v = ids.join(','); emit('update:modelValue', v); emit('change', v) }
@@ -285,8 +285,7 @@ export const ScenicPicker = {
       <div class="sp-list">
         <button v-for="o in shown" :key="o.scenic_id" :class="{on: picked.includes(o.scenic_id)}" @click="toggle(o.scenic_id)">
           <i class="sp-check"><Icon v-if="picked.includes(o.scenic_id)" name="tick" :size="12" :sw="3"/></i>
-          <span class="grow"><b>{{ o.scenic_name || o.scenic_id }}</b><small>{{ o.scenic_id }}</small></span>
-          <em v-if="o.has_csv" title="本地有算好的 CSV，可以补推">有 CSV</em></button>
+          <span class="grow"><b>{{ o.scenic_name || o.scenic_id }}</b><small>{{ o.scenic_id }}</small></span></button>
         <div v-if="!shown.length" class="sp-empty">{{ kw ? '没有匹配的景区，回车直接按编号添加' : '没有景区' }}</div>
       </div>
       <div v-if="!single" class="sp-foot"><span>已选 {{ picked.length }} 个</span><a @click="set([])">清空 = {{ placeholder }}</a><a @click="close">完成</a></div>

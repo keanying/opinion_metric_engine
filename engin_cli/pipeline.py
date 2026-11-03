@@ -12,7 +12,7 @@ extract → normalize → build ×4 → validate → load。
                      ↓ builders
         core / platform / dimension_score / content       （= 目标表结构）
                      ↓ validate → load
-                  MySQL ADS 表（+ CSV 备份）
+                  MySQL ADS 表（只写库，不出本地 CSV）
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ from .metric_calc_domain import (CORE_WINDOWS, daily_channel_presence,
 from .metric_calc_domain import PLATFORM_WINDOWS as D_PLATFORM_WINDOWS
 from .normalize import (build_comment_facts, build_dimension_facts, build_keyword_facts)
 from .notify import send_feishu
-from .pusher import PushReport, cleanup_pushed_csv, push_all
+from .pusher import PushReport, push_all
 from .settings import EtlSettings
 from .source import fetch_comments, fetch_scenic_keywords, fetch_works
 from .validate import validate_all
@@ -217,7 +217,7 @@ def _compute(settings: EtlSettings,
         res.tables[TABLE_DRILL_ANALYSIS] = drill
         res.notes.append(f"下钻明细（词→评论→作品）{len(drill):,} 行")
     if TABLE_MACRO in res.tables:
-        # 表的顺序（写库 / CSV / 推送的先后）保持原来的：下钻表在前、大盘表在后
+        # 表的顺序（写库 / 推送的先后）保持原来的：下钻表在前、大盘表在后
         res.tables[TABLE_MACRO] = res.tables.pop(TABLE_MACRO)
 
     # ---- 5. 校验 ----
@@ -348,7 +348,7 @@ def run(settings: EtlSettings,
         return res
 
     # ---- 6. 落库 ----
-    if settings.write_csv or settings.write_db:
+    if settings.write_db:
         # 写库前按「本次景区 × 本次日期」先删再插（见 loader 模块说明）。
         # 景区取命令行指定的；没指定就取这次数据里出现的全部景区。
         res.load_results = load_all(db, res.tables, settings=settings,
@@ -360,12 +360,6 @@ def run(settings: EtlSettings,
     if getattr(settings, "push_enabled", False):
         res.push = push_all(res.tables, settings=settings, progress_factory=push_progress)
         res.notes.extend(res.push.notes())
-        # 推送成功的表不在本地留 CSV（数据会越积越大）；推失败的留着补推
-        if (settings.write_csv and getattr(settings, "push_cleanup_local", True)
-                and not getattr(settings, "push_dry_run", False)):
-            removed = cleanup_pushed_csv(settings.output_dir, res.push.results)
-            if removed:
-                res.notes.append(f"推送成功，已删除本地 CSV {len(removed)} 个（{settings.output_dir}）")
         if not res.push.ok:
             if getattr(settings, "push_strict", False):
                 res.errors.extend(res.push.errors)

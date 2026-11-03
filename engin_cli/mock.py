@@ -80,15 +80,18 @@ def _table_columns(db, table: str) -> List[str]:
     return [str(c) for c in df.iloc[:, 0].tolist()] if not df.empty else []
 
 
-def fetch_scenic_tables(db, from_scenic: str, start: str, end: str,
-                        tables: Sequence[str]) -> tuple:
-    """从本地 ADS 库读一个景区一段日期的各表数据。
+def fetch_ads_tables(db, tables: Sequence[str], scenics: Optional[Sequence[str]] = None,
+                     start: Optional[str] = None, end: Optional[str] = None) -> tuple:
+    """从本地 ADS 库读各表数据（补推 / 造演示数据 / report 都从库里取，不再读本地 CSV）。
 
+    scenics：只读这些景区，None = 全部景区；start / end：travel_date 区间（yyyyMMdd），None = 不限。
+    只取引擎自己产出的列（各表 COLUMNS 与库表列的交集），跟跑批直推的报文一致。
     出参：({表: DataFrame}, [说明])；库里没有的表、没数据的表不在结果里。
     """
     out: Dict[str, pd.DataFrame] = {}
     notes: List[str] = []
     ads = db.cfg.ads_db()
+    scenics = [str(x) for x in scenics] if scenics else None
     for table in tables:
         have = _table_columns(db, table)
         if not have:
@@ -100,15 +103,29 @@ def fetch_scenic_tables(db, from_scenic: str, start: str, end: str,
         if missing:
             notes.append(f"{table}：库表缺 {len(missing)} 列，不推这几列：{', '.join(missing)}")
         full = f"`{ads}`.`{table}`" if ads else f"`{table}`"
-        sql = (f"select {', '.join(f'`{c}`' for c in cols)} from {full} "
-               f"where `{scenic_key(table)}` = %s and `travel_date` between %s and %s")
-        df = db.query_df(sql, (from_scenic, int(start), int(end)))
+        where, params = [], []
+        if scenics:
+            where.append(f"`{scenic_key(table)}` in ({','.join(['%s'] * len(scenics))})")
+            params += scenics
+        if start:
+            where.append("`travel_date` between %s and %s")
+            params += [int(start), int(end or start)]
+        sql = (f"select {', '.join(f'`{c}`' for c in cols)} from {full}"
+               + (" where " + " and ".join(where) if where else ""))
+        df = db.query_df(sql, params or None)
         if df.empty:
-            notes.append(f"{table}：{from_scenic} 在 {start}~{end} 没有数据")
+            rng = f"{start}~{end or start}" if start else "全部日期"
+            notes.append(f"{table}：{'、'.join(scenics) if scenics else '全部景区'} 在 {rng} 没有数据")
             continue
         df["travel_date"] = pd.to_numeric(df["travel_date"]).astype("int64")
         out[table] = df.sort_values("travel_date", kind="stable").reset_index(drop=True)
     return out, notes
+
+
+def fetch_scenic_tables(db, from_scenic: str, start: str, end: str,
+                        tables: Sequence[str]) -> tuple:
+    """从本地 ADS 库读一个景区一段日期的各表数据。出参同 fetch_ads_tables。"""
+    return fetch_ads_tables(db, tables, [from_scenic], start, end)
 
 
 def build_mock(db, from_scenic: str, to_scenic: str, to_name: str,

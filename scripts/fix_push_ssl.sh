@@ -11,6 +11,7 @@
 #   --host HOST     推送域名，默认从 settings 的 push_url 里取            （HOST）
 #   --port PORT     默认 443                                            （PORT）
 #   --tables T      --repush 补推哪些表，默认 drill,macro                （TABLES）
+#   --start D --end D  --repush 补推哪几天（yyyyMMdd，从库里读），默认今天  （START_DATE / END_DATE）
 #
 # 做了什么（按顺序，哪一步好了就停）：
 #   1. 看本机时间，能开 NTP 就开（时间不对，证书一定校验失败）
@@ -30,6 +31,8 @@ RUN_USER=${RUN_USER:-opinion}
 HOST=${HOST:-}
 PORT=${PORT:-443}
 TABLES=${TABLES:-drill,macro}
+START_DATE=${START_DATE:-$(date +%Y%m%d)}
+END_DATE=${END_DATE:-}
 REPUSH=0
 
 while [ $# -gt 0 ]; do
@@ -39,8 +42,10 @@ while [ $# -gt 0 ]; do
         --host)    HOST=$2; shift 2 ;;
         --port)    PORT=$2; shift 2 ;;
         --tables)  TABLES=$2; shift 2 ;;
+        --start)   START_DATE=$2; shift 2 ;;
+        --end)     END_DATE=$2; shift 2 ;;
         --repush)  REPUSH=1; shift ;;
-        -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
         *) echo "不认识的参数：$1（--help 看用法）"; exit 2 ;;
     esac
 done
@@ -154,12 +159,13 @@ fi
 
 # ---------------------------------------------------------------- 5. 补推
 if [ "$REPUSH" -eq 1 ]; then
-    step "5. 补推没推出去的数据（$TABLES）"
-    as_user "cd '$APP_DIR' && source .venv/bin/activate && python -m engin_cli.cli push --tables '$TABLES'"
+    END_DATE=${END_DATE:-$START_DATE}
+    step "5. 补推没推出去的数据（$TABLES，$START_DATE~$END_DATE，从库里读）"
+    as_user "cd '$APP_DIR' && source .venv/bin/activate && python -m engin_cli.cli push --tables '$TABLES' --start-date '$START_DATE' --end-date '$END_DATE'"
     exit $?
 fi
 
 echo
 echo "修复完成（$([ "$FIXED" = system ] && echo 系统根证书 || echo certifi 根证书)）。补推没推出去的数据："
-echo "  bash $0 --repush"
-echo "或：su - $RUN_USER，cd $APP_DIR，source .venv/bin/activate，python -m engin_cli.cli push --tables $TABLES"
+echo "  bash $0 --repush --start yyyyMMdd --end yyyyMMdd"
+echo "或：su - $RUN_USER，cd $APP_DIR，source .venv/bin/activate，python -m engin_cli.cli push --tables $TABLES --start-date yyyyMMdd --end-date yyyyMMdd"
