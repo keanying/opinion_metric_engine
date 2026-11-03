@@ -44,9 +44,9 @@ input, select, textarea, button { font: inherit; color: inherit; }
 /* 顶栏和侧栏固定不动，只有右边内容区滚动 */
 html, body { height: 100%; overflow: hidden; }
 .frame {
-  /* 白色面板上 / 右 / 下贴满窗口；左边留出半个侧栏宽，侧栏贴着窗口左边、压在面板圆角上，上下露出流动渐变 */
+  /* 白色面板上 / 右 / 下贴满窗口、四个角圆角（角上露出渐变）；左边留出半个侧栏宽，侧栏贴着窗口左边、压在面板圆角上，上下露出流动渐变 */
   position: relative; display: flex; flex-direction: column; margin: 0 0 0 34px; height: 100vh;
-  background: linear-gradient(100deg, #ffffff 0%, #ffffff 62%, #f6f4fe 100%); border-radius: 34px 0 0 34px; padding: 26px 0 0 26px;
+  background: linear-gradient(100deg, #ffffff 0%, #ffffff 62%, #f6f4fe 100%); border-radius: 34px; padding: 26px 0 0 26px;
 }
 /* 顶栏：logo + 问候 + 搜索 / 状态 / 圆形图标按钮 */
 .topbar { flex: none; display: flex; align-items: center; gap: 16px; margin: 4px 0 20px; padding-right: 28px; }
