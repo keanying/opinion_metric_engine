@@ -567,6 +567,37 @@ def test_online_quality_check_on_db_data(server):
     assert _call(base, "/api/quality/check", "POST", {"scenic": "S1"})[0] == 400
 
 
+def test_quality_repair_follows_the_task_tables(server):
+    """检测关联任务：修复按任务里计算 / 推送的表重算、推送；点名景区的任务优先于全部景区的任务。"""
+    base, app, holder = server
+    app.settings.push_url = "https://push.example/sync"
+    body = {"scenic": "S1", "start": "20261031", "end": "20261102"}
+    code, r = _call(base, "/api/quality/check", "POST", body)
+    assert r["task"] is None                                           # 还没有任务
+    code, fx = _call(base, "/api/quality/repair", "POST", body)
+    cmd = app.store.get_run(fx["run_id"])["command"]
+    assert "--tables" not in cmd and cmd[cmd.index("--push") + 1] == "drill,macro"     # 没任务：全部表，推下钻 + 大盘
+    app.store.create_task("全部景区", {"scenics": "", "tables": "", "push": "macro"}, {"times": ["08:10"]})
+    tid = app.store.create_task("S1 每日", {"scenics": "S1,S2", "tables": "drill,macro", "push": "drill,macro"},
+                                {"times": ["08:10"]})
+    code, r = _call(base, "/api/quality/check", "POST", body)
+    assert r["task"]["id"] == tid and r["task"]["push"] == "drill,macro"
+    assert _call(base, "/api/quality/task?scenic=S1")[1]["task"]["id"] == tid          # 选景区时就显示关联任务
+    assert _call(base, "/api/quality/task?scenic=S9")[1]["task"]["name"] == "全部景区"
+    assert app.store.get_check(r["check_id"])["task_id"] == tid
+    code, fx = _call(base, "/api/quality/repair", "POST", body)
+    run = app.store.get_run(fx["run_id"])
+    cmd = run["command"]
+    assert cmd[cmd.index("--tables") + 1] == "drill,macro" and cmd[cmd.index("--push") + 1] == "drill,macro"
+    assert cmd[cmd.index("--scenic") + 1] == "S1"                     # 只修这个景区
+    assert run["task_id"] == tid and run["title"].startswith("数据修复 · S1 每日")
+    # 任务只算下钻表：修复也要把大盘表算上（检测的就是它）；任务不推送：修复也不推
+    app.store.update_task(tid, "S1 每日", {"scenics": "S1", "tables": "drill", "push": ""}, {"times": ["08:10"]}, True)
+    code, fx = _call(base, "/api/quality/repair", "POST", body)
+    cmd = app.store.get_run(fx["run_id"])["command"]
+    assert cmd[cmd.index("--tables") + 1] == "drill,macro" and "--no-push" in cmd and fx["push"] is False
+
+
 def test_config_view_masks_secrets(server):
     base, _, _ = server
     code, cfg = _call(base, "/api/config")
