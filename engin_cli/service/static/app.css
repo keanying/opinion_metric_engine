@@ -389,6 +389,10 @@ input::placeholder { color: #a5a2bb; }
 .result-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px 14px; border-radius: 12px; margin-bottom: 12px; }
 .result-bar.ok { background: #ddf6f2; color: #138a7d; } .result-bar.bad { background: #fde8ee; color: #c73a5c; }
 .result-bar b { color: inherit; }
+/* 修复执行的状态：排队 / 执行中（转圈 + 读秒），失败 / 回退 / 取消（红） */
+.rep-run { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border-radius: 9px;
+  font-size: 12px; font-weight: 600; white-space: nowrap; background: #ece9fd; color: var(--primary); }
+.rep-run.failed, .rep-run.blocked, .rep-run.cancelled { background: #fff; color: #c73a5c; box-shadow: inset 0 0 0 1px #f3b6c6; }
 .check.sm { font-size: 13px; gap: 8px; color: var(--ink-2); }
 .samples { margin: 0; padding-left: 16px; font-size: 12px; color: var(--s-text-2); }
 .samples li { white-space: normal; word-break: break-all; line-height: 1.6; }

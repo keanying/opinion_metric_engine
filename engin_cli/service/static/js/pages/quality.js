@@ -1,5 +1,5 @@
-import { ref, reactive, onMounted, computed } from 'vue'
-import { api, todayYmd, notify, CHANNELS, confirmBox } from '../api.js'
+import { ref, reactive, onMounted, onUnmounted, computed } from 'vue'
+import { api, todayYmd, notify, CHANNELS, confirmBox, STATUS } from '../api.js'
 import { Ring } from '../charts.js'
 
 export default {
@@ -8,7 +8,7 @@ export default {
     const days = ref(14), data = ref({ items: [] }), err = ref(''), loading = ref(true), kw = ref('')
     const scenics = ref([]), today = todayYmd()
     const chk = reactive({ scenic: '', start: todayYmd(-30), end: todayYmd(), running: false, result: null,
-                           push: true, repairRun: null })
+                           push: true, repair: null })   // repair：{ id, status, start(ms) } 提交的修复执行
     const load = async () => {
       loading.value = true
       try { data.value = await api('/api/quality?days=' + days.value); err.value = '' } catch (e) { err.value = e.message }
@@ -19,12 +19,50 @@ export default {
       try { scenics.value = await api('/api/metrics/scenics')
         if (scenics.value.length && !chk.scenic) chk.scenic = scenics.value[0].scenic_id } catch (e) { /* 库没配 */ }
     })
-    const check = async () => {
-      chk.running = true; chk.result = null; chk.repairRun = null
-      try { chk.result = await api('/api/quality/check', { method: 'POST', body: { scenic: chk.scenic, start: chk.start, end: chk.end } })
+    // q：不传就按表单上的景区 / 日期；修复跑完自动复检时传修复的那段
+    const check = async (q) => {
+      q = q && q.scenic ? q : { scenic: chk.scenic, start: chk.start, end: chk.end }
+      chk.running = true; chk.result = null; chk.repair = null; stopWatch()
+      try { chk.result = await api('/api/quality/check', { method: 'POST', body: q })
         chk.push = chk.result.push_ready }
       catch (e) { notify(e.message, 'err') } finally { chk.running = false }
+      return chk.result
     }
+    // 提交修复后自己盯着执行状态：每 3 秒查一次，跑完（成功）自动重新检测
+    let watchTimer = null, tickTimer = null
+    const now = ref(Date.now())
+    const stopWatch = () => { clearTimeout(watchTimer); clearInterval(tickTimer); watchTimer = tickTimer = null }
+    onUnmounted(stopWatch)
+    const watchRepair = (id, q) => {
+      chk.repair = { id, status: 'queued', start: Date.now() }
+      tickTimer = setInterval(() => { now.value = Date.now() }, 1000)
+      const poll = async () => {
+        let run = null
+        try { run = await api('/api/runs/' + id) } catch (e) { /* 服务暂时连不上：下一轮再查 */ }
+        if (!chk.repair || chk.repair.id !== id) return            // 期间点了重新检测 / 换了别的
+        if (run) chk.repair.status = run.status
+        if (!run || ['queued', 'running'].includes(run.status)) { watchTimer = setTimeout(poll, 3000); return }
+        stopWatch()
+        if (run.status !== 'success') {
+          notify(`修复 #${id} ${(STATUS[run.status] || {}).text || run.status}，没有自动重新检测，点进去看日志`, 'err')
+          return
+        }
+        notify(`修复 #${id} 已完成，正在自动重新检测…`)
+        const r = await check(q)
+        if (r) notify(r.days && r.days.length ? `重新检测：还有 ${r.days.length} 天有问题` : '重新检测：全部通过 ✓',
+                      r.days && r.days.length ? 'err' : 'ok')
+      }
+      watchTimer = setTimeout(poll, 1500)
+    }
+    const repairText = computed(() => {
+      const r = chk.repair
+      if (!r) return ''
+      const sec = Math.max(0, Math.round((now.value - r.start) / 1000))
+      const t = sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m${String(sec % 60).padStart(2, '0')}s`
+      return r.status === 'queued' ? `修复 #${r.id} 排队中 · ${t}`
+        : r.status === 'running' ? `修复 #${r.id} 执行中 · ${t}`
+        : `修复 #${r.id} ${(STATUS[r.status] || {}).text || r.status}`
+    })
     // 修复 = 把检测的整段一次重算：只重算有问题的那几天，跟相邻没重算的日子用的是不同时刻的源数据
     // （评论会晚到），边上又会冒出新的不一致，要修好几次
     const repair = async () => {
@@ -38,8 +76,8 @@ export default {
       try {
         const x = await api('/api/quality/repair', { method: 'POST',
           body: { scenic: r.scenic, start: r.start, end: r.end, bad_days: r.days.length, push: chk.push } })
-        chk.repairRun = x.run_id
-        notify(`已提交修复 #${x.run_id}，跑完后点「重新检测」确认`)
+        watchRepair(x.run_id, { scenic: r.scenic, start: r.start, end: r.end })
+        notify(`已提交修复 #${x.run_id}，跑完会自动重新检测`)
       } catch (e) { notify(e.message, 'err') }
     }
     const spanDays = computed(() => {
@@ -68,7 +106,7 @@ export default {
     const dayCols = [
       { key: 'date', title: '日期', width: 170 }, { key: 'count', title: '问题', width: 190 },
       { key: 'channels', title: '渠道', width: 110 }, { key: 'samples', title: '明细' }]
-    return { days, data, err, loading, kw, shown, load, scenics, chk, check, repair, spanDays, wk, fmtD, today,
+    return { days, data, err, loading, kw, shown, load, scenics, chk, check, repair, repairText, spanDays, wk, fmtD, today,
              stats, parts, cols, dayCols, CHANNELS }
   },
   template: `
@@ -90,8 +128,11 @@ export default {
             <template v-if="chk.result.days.length">
               <label class="check sm"><Switch v-model="chk.push" size="sm" :disabled="!chk.result.push_ready"/>修复后推送
                 <Tip v-if="!chk.result.push_ready" text="推送总开关关着或没配推送地址，修复只重算写库、不推送（推送页可以配置）"/></label>
-              <a v-if="chk.repairRun" class="btn light sm" :href="'#/runs/' + chk.repairRun">修复中 #{{ chk.repairRun }}</a>
-              <button v-else class="btn primary sm" @click="repair" :title="'把检测的整段 ' + spanDays + ' 天一次重算'"><Icon name="tool" :size="14"/>修复（整段重算 {{ spanDays }} 天）</button>
+              <a v-if="chk.repair" class="rep-run" :class="chk.repair.status" :href="'#/runs/' + chk.repair.id"
+                title="点开看执行日志；跑完会自动重新检测">
+                <Icon v-if="['queued', 'running'].includes(chk.repair.status)" name="refresh" :size="14" :sw="2.2" class="spin"/>
+                <Icon v-else name="clear" :size="14" :sw="2.2"/>{{ repairText }}</a>
+              <button v-if="!chk.repair || !['queued', 'running'].includes(chk.repair.status)" class="btn primary sm" @click="repair" :title="'把检测的整段 ' + spanDays + ' 天一次重算'"><Icon name="tool" :size="14"/>修复（整段重算 {{ spanDays }} 天）</button>
             </template>
             <button class="btn light sm" @click="check"><Icon name="refresh" :size="14"/>重新检测</button>
           </div>
