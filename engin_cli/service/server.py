@@ -536,17 +536,44 @@ class App:
             errs += run_check(trace, "period_sum", len(df), validate_period_sums, df, specs, issues=issues)
         days = _issues_by_day(issues)
         message = "全部通过" if not errs else f"{len(days)} 天有问题，共 {len(issues)} 处"
+        m = self.task_for_scenic(scenic)               # 关联的任务：修复时按它的表计算、推送
         check_id = self.store.add_check(
             check_type="manual", trigger="page", scenic=scenic, start=start, end=end,
             status="fail" if errs else "pass", attempts=1, items=len(trace), issues=len(issues),
-            summary=message, operator=current_user_name(),
+            summary=message, operator=current_user_name(), task=m["task"] if m else None,
             detail={"attempts": [{"attempt": 1, "at": now_str(), "ok": not errs, "errors": errs[:30], "steps": trace}],
                     "dates": [start, end], "rows": len(df),
                     "source": f"库里已有的大盘表 {self._ads(TABLE_MACRO)}，景区 {scenic}，{start}~{end}，共 {len(df)} 行",
-                    "days": days})
+                    "days": days, "task": self._task_brief(m)})
         return {"scenic": scenic, "start": start, "end": end, "rows": len(df), "errors": errs,
                 "checks": checks, "days": days, "push_ready": self.push_ready(), "message": message,
-                "check_id": check_id}
+                "check_id": check_id, "task": self._task_brief(m)}
+
+    def task_for_scenic(self, scenic: str) -> Optional[dict]:
+        """数据检测 / 修复关联的任务：任务里点名了这个景区的优先（启用的优先），没有就用「全部景区」的任务。
+        返回 {id, name, enabled, tables, push, task}（tables / push 为空 = 全部表 / 不推送），都没有返回 None。"""
+        named, every = [], []
+        for t in self.store.list_tasks():
+            try:
+                cfg = normalize_config(t["config"])
+            except ValueError:
+                continue
+            lst = [x for x in cfg["scenics"].split(",") if x]
+            if scenic in lst:
+                named.append((t, cfg))
+            elif not lst:
+                every.append((t, cfg))
+        for group in (named, every):
+            group.sort(key=lambda x: (not x[0]["enabled"], x[0]["id"]))
+            if group:
+                t, cfg = group[0]
+                return {"id": t["id"], "name": t["name"], "enabled": bool(t["enabled"]),
+                        "tables": cfg["tables"], "push": cfg["push"], "all_scenics": group is every, "task": t}
+        return None
+
+    @staticmethod
+    def _task_brief(m: Optional[dict]) -> Optional[dict]:
+        return {k: v for k, v in m.items() if k != "task"} if m else None
 
     def get_check(self, check_id: int) -> dict:
         c = self.store.get_check(check_id)
@@ -576,22 +603,33 @@ class App:
         end = end or start
         if not scenic or not all(re.fullmatch(r"\d{8}", d) for d in (start, end)) or start > end:
             raise ApiError(400, "要选景区和要重算的日期区间（yyyyMMdd）")
+        # 关联任务：按任务里「计算哪些表」重算（大盘表一定算，检测的就是它），按任务里「推送哪些表」推送；
+        # 没有关联任务：全部表重算，推下钻表 + 大盘表
+        m = self.task_for_scenic(scenic)
+        tables, push = "", "drill,macro"
+        if m:
+            tables = m["tables"]
+            if tables and "macro" not in tables.split(","):
+                tables = ",".join([x for x in TABLE_KEYS if x in tables.split(",") + ["macro"]])
+            push = m["push"]
         # 推送没开 / 没配地址：只重算写库，不推（否则 run 会因为没地址直接退出，什么都没修）
-        push = ",".join(t for t in str(body.get("push_tables") or "drill,macro").split(",") if t) \
-            if body.get("push", True) and self.push_ready() else ""
+        if not (body.get("push", True) and self.push_ready()):
+            push = ""
         try:
             argv, title = build_run_argv({"scenics": scenic, "date_mode": "range", "start_date": start,
-                                          "end_date": end, "rerun_days": 0, "push": push,
+                                          "end_date": end, "rerun_days": 0, "tables": tables, "push": push,
                                           "verbose": True})
         except ValueError as e:
             raise ApiError(400, str(e))
-        run_id = self.runner.submit("run", argv, "数据修复 · " + title)
+        run_id = self.runner.submit("run", argv, "数据修复 · " + (f"{m['name']} · " if m else "") + title,
+                                    task=m["task"] if m else None)
         span = start if start == end else f"{start}~{end}"
         bad = int(body.get("bad_days") or len(dates) or 0)
         self.store.add_event(f"数据质量修复：{scenic} 整段重算 {span}"
                              + (f"（{bad} 天有问题）" if bad else "") + f"，已提交执行 #{run_id}"
                              + ("，修复后推送" if push else "，不推送"))
-        return {"run_id": run_id, "start": start, "end": end, "push": bool(push)}
+        return {"run_id": run_id, "start": start, "end": end, "push": bool(push), "push_tables": push,
+                "tables": tables, "task": self._task_brief(m)}
 
     # ------------------------------------------------------------ 指标查看
     def metric_scenics(self) -> List[dict]:
@@ -795,6 +833,7 @@ def _route_table(app: App):
         ("POST", r"/api/runs/(\d+)/cancel", lambda m, q, b: {"ok": app.runner.cancel(I(m[1]))}),
         ("GET", r"/api/quality", lambda m, q, b: app.quality(I(q1(q, "days", "14")))),
         ("POST", r"/api/quality/check", lambda m, q, b: app.quality_check(b)),
+        ("GET", r"/api/quality/task", lambda m, q, b: {"task": app._task_brief(app.task_for_scenic(q1(q, "scenic")))}),
         ("GET", r"/api/quality/checks", lambda m, q, b: app.store.list_checks(
             status=q1(q, "status"), check_type=q1(q, "type"), scenic=q1(q, "scenic"), kw=q1(q, "q"),
             since=(dt.datetime.now() - dt.timedelta(days=max(I(q1(q, "days", "30") or 30), 1) - 1)).strftime("%Y-%m-%d"),

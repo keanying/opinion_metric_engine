@@ -1,6 +1,11 @@
-import { ref, reactive, onMounted, onUnmounted, computed } from 'vue'
-import { api, todayYmd, notify, CHANNELS, confirmBox, STATUS } from '../api.js'
+import { ref, reactive, onMounted, onUnmounted, computed, watch } from 'vue'
+import { api, todayYmd, notify, CHANNELS, confirmBox, STATUS, TABLES, TABLE_LABEL } from '../api.js'
 import { Ring } from '../charts.js'
+
+// 表的简写 → 中文：'' = 全部表
+const ALL_TABLES = TABLES.map(t => t.key)
+export const tablesText = v => { const k = String(v || '').split(',').filter(Boolean)
+  return !k.length || k.length === ALL_TABLES.length ? '全部表' : k.map(x => TABLE_LABEL[x] || x).join('、') }
 
 // 检测结果 / 方式的文字，列表和详情共用
 export const CHECK_STATUS = {
@@ -20,6 +25,8 @@ export default {
     const days = ref(14), data = ref({ total: 0, counts: {}, items: [] }), err = ref(''), loading = ref(true), kw = ref('')
     const fstatus = ref(''), ftype = ref(''), more = ref(false)
     const scenics = ref([]), today = todayYmd()
+    // 选了景区就显示它关联的任务（写哪些表、推哪些表）：修复时按这个任务的表重算、推送
+    const linked = ref(undefined)
     const chk = reactive({ scenic: '', start: todayYmd(-30), end: todayYmd(), running: false, result: null,
                            push: true, repair: null })   // repair：{ id, status, start(ms) } 提交的修复执行
     // 检测记录：每一次检测（跑批自动检测、页面检测）一条；先拿 30 条，滚到底 / 点「加载更多」再拿
@@ -95,7 +102,9 @@ export default {
         message: '按当前源数据把检测的这一整段重新计算一遍，覆盖库里的旧数据。近 7 日、本周等周期指标依赖前面每一天，只重算有问题的那几天会在边上产生新的不一致，所以整段一次重算。',
         items: [['景区', r.scenic], ['重算区间', `${fd(r.start)} ~ ${fd(r.end)}（${spanDays.value} 天）`],
                 ['有问题', `${r.days.length} 天，共 ${r.days.reduce((a, d) => a + d.count, 0)} 处`],
-                ['写库', '是'], ['推送', chk.push ? '是（下钻表、大盘表）' : '否']] })) return
+                ['关联任务', r.task ? r.task.name + (r.task.enabled ? '' : '（已停用）') : '没有包含这个景区的任务'],
+                ['重算', (r.task ? tablesText(repairTables.value) : '全部表') + ' · 写库'],
+                ['推送', repairPush.value ? tablesText(repairPush.value) : '否' + (chk.push ? '（任务里没勾推送）' : '')]] })) return
       try {
         const x = await api('/api/quality/repair', { method: 'POST',
           body: { scenic: r.scenic, start: r.start, end: r.end, bad_days: r.days.length, push: chk.push } })
@@ -103,6 +112,24 @@ export default {
         notify(`已提交修复 #${x.run_id}，跑完会自动重新检测`)
       } catch (e) { notify(e.message, 'err') }
     }
+    // 修复按关联任务的表：计算任务里勾的表（大盘表一定算），推送任务里勾的表；没有关联任务 = 全部表、推下钻 + 大盘
+    const repairTables = computed(() => {
+      const t = chk.result && chk.result.task
+      if (!t || !t.tables) return ''
+      const k = t.tables.split(',')
+      return ALL_TABLES.filter(x => k.includes(x) || x === 'macro').join(',')
+    })
+    const repairPush = computed(() => {
+      const r = chk.result
+      if (!r || !chk.push || !r.push_ready) return ''
+      return r.task ? r.task.push : 'drill,macro'
+    })
+    watch(() => chk.scenic, async sc => {
+      linked.value = undefined
+      if (!sc) return
+      try { const r = await api('/api/quality/task?scenic=' + encodeURIComponent(sc)); if (chk.scenic === sc) linked.value = r.task }
+      catch (e) { linked.value = undefined }
+    }, { immediate: true })
     const spanDays = computed(() => {
       const r = chk.result
       if (!r) return 0
@@ -127,7 +154,7 @@ export default {
     const dayCols = [
       { key: 'date', title: '日期', width: 170 }, { key: 'count', title: '问题', width: 190 },
       { key: 'channels', title: '渠道', width: 110 }, { key: 'samples', title: '明细' }]
-    return { days, data, err, loading, kw, load, loadMore, more, fstatus, ftype, scenics, chk, check, repair, repairText,
+    return { days, data, err, loading, kw, load, loadMore, more, fstatus, ftype, scenics, chk, check, repair, repairText, repairPush, tablesText, linked,
              spanDays, wk, fmtD, today, stats, parts, cols, dayCols, CHANNELS, CHECK_STATUS, howText, rangeText }
   },
   template: `
@@ -140,15 +167,25 @@ export default {
             <DateRange v-model:start="chk.start" v-model:end="chk.end" :clearable="false" :max="today" />
             <button class="btn primary" :disabled="chk.running || !chk.scenic" @click="check"><Icon name="shield" :size="14"/>{{ chk.running ? '检测中…' : '开始检测' }}</button>
           </div>
+          <div v-if="chk.scenic && linked !== undefined" class="linked-task" :class="{ none: !linked }">
+            <template v-if="linked"><Icon name="list" :size="14" :sw="2.2"/><span>关联任务</span><b>{{ linked.name }}</b>
+              <Tag v-if="!linked.enabled" color="grey">已停用</Tag><Tag v-if="linked.all_scenics" color="grey">全部景区的任务</Tag>
+              <em>写库 {{ tablesText(linked.tables) }}</em><em>推送 {{ linked.push ? tablesText(linked.push) : '不推送' }}</em>
+              <a class="link small" :href="'#/tasks/' + linked.id">查看任务</a></template>
+            <template v-else><Icon name="list" :size="14" :sw="2.2"/><span>没有任务包含这个景区：修复时全部表重算，推下钻表 + 大盘表</span></template>
+          </div>
         </div>
         <div v-if="chk.result" class="check-result">
           <div class="result-bar" :class="chk.result.days.length ? 'bad' : 'ok'">
             <Icon :name="chk.result.days.length ? 'alert' : 'tickCircle'" :size="18" :sw="2.2"/>
             <b>{{ chk.result.message }}</b>
             <a v-if="chk.result.check_id" class="link small" :href="'#/quality/' + chk.result.check_id">查看检测过程 #{{ chk.result.check_id }}</a><span class="muted small">{{ chk.result.scenic }} · {{ fmtD(chk.result.start) }} ~ {{ fmtD(chk.result.end) }} · {{ chk.result.rows }} 行</span>
+            <span v-if="chk.result.task" class="rb-task" :title="'修复时按这个任务的表重算、推送'"><Icon name="list" :size="13" :sw="2.2"/>
+              {{ chk.result.task.name }} · 推送 {{ chk.result.task.push ? tablesText(chk.result.task.push) : '不推送' }}</span>
+            <span v-else class="rb-task none" title="没有任务包含这个景区：修复时全部表重算，推下钻表 + 大盘表">未关联任务</span>
             <span class="grow"></span>
             <template v-if="chk.result.days.length">
-              <label class="check sm"><Switch v-model="chk.push" size="sm" :disabled="!chk.result.push_ready"/>修复后推送
+              <label class="check sm"><Switch v-model="chk.push" size="sm" :disabled="!chk.result.push_ready || (chk.result.task && !chk.result.task.push)"/>修复后推送{{ repairPush ? '（' + tablesText(repairPush) + '）' : '' }}
                 <Tip v-if="!chk.result.push_ready" text="推送总开关关着或没配推送地址，修复只重算写库、不推送（推送页可以配置）"/></label>
               <a v-if="chk.repair" class="rep-run" :class="chk.repair.status" :href="'#/runs/' + chk.repair.id"
                 title="点开看执行日志；跑完会自动重新检测">
@@ -227,7 +264,7 @@ export const QualityDetail = {
     const toggle = k => { open[k] = !open[k] }
     const fmtNum = n => (n ?? 0).toLocaleString('zh-CN')
     const KEY_TEXT = { same_range: '区间不一致', period_sum: '周期合计不对' }
-    return { c, err, open, toggle, fmtNum, CHECK_STATUS, howText, rangeText, KEY_TEXT, CHANNELS }
+    return { c, err, open, toggle, fmtNum, CHECK_STATUS, howText, rangeText, KEY_TEXT, CHANNELS, tablesText }
   },
   template: `
   <div>
@@ -254,7 +291,8 @@ export const QualityDetail = {
         <div class="qd-source">
           <template v-if="c.type === 'run'">检测的是这次跑批<b>刚算出来、还没写库</b>的结果；不通过会重新取数重算，还不通过就回退（不写库、不推送）。
             <span v-if="c.detail.run_title" class="muted">（{{ c.detail.run_title }}）</span></template>
-          <template v-else>检测的是 {{ c.detail.source }}。</template>
+          <template v-else>检测的是 {{ c.detail.source }}。
+            <template v-if="c.detail.task">关联任务 <b>{{ c.detail.task.name }}</b>：修复时重算 {{ tablesText(c.detail.task.tables) }}，推送 {{ c.detail.task.push ? tablesText(c.detail.task.push) : '不推送' }}。</template></template>
           <span v-if="c.detail.exception" class="t-red">异常：{{ c.detail.exception }}</span>
         </div>
       </div>
