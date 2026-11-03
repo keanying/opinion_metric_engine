@@ -48,9 +48,9 @@ export default {
                failed: it.filter(x => !x.ok && !x.quality_blocked).length }
     })
     const parts = computed(() => [
-      { value: stats.value.blocked, label: '回退', colors: ['#e7c98e', '#c9974f'], icon: 'alert' },
-      { value: stats.value.fixed, label: '重算后通过', colors: ['#86a490', '#4a6a56'], icon: 'refresh' },
-      { value: stats.value.failed, label: '其他失败', colors: ['#e2a197', '#c9655b'], icon: 'clear' }])
+      { value: stats.value.blocked, label: '回退', colors: ['#ffd88a', '#f5a524'], icon: 'alert' },
+      { value: stats.value.fixed, label: '重算后通过', colors: ['#a194ec', '#5446b8'], icon: 'refresh' },
+      { value: stats.value.failed, label: '其他失败', colors: ['#f6a4b8', '#ee5a7c'], icon: 'clear' }])
     const shown = computed(() => data.value.items.filter(x => !kw.value ||
       JSON.stringify(x).toLowerCase().includes(kw.value.toLowerCase())))
     const cols = [
@@ -109,9 +109,9 @@ export default {
         <Ring :parts="parts" :size="200" :thickness="20" :value="String(stats.blocked + stats.fixed + stats.failed)"
           label="问题" sub="景区·次" :hole="0.5" />
         <div class="stat4 three">
-          <div><span class="cap">回退</span><b>{{ stats.blocked }}</b><i class="ubar"><em style="width:60%;background:#c9974f"></em></i></div>
-          <div><span class="cap">重算后通过</span><b>{{ stats.fixed }}</b><i class="ubar"><em style="width:60%;background:#5d7c68"></em></i></div>
-          <div><span class="cap">其他失败</span><b>{{ stats.failed }}</b><i class="ubar"><em style="width:60%;background:#c9655b"></em></i></div>
+          <div><span class="cap">回退</span><b>{{ stats.blocked }}</b><i class="ubar"><em style="width:60%;background:#f5a524"></em></i></div>
+          <div><span class="cap">重算后通过</span><b>{{ stats.fixed }}</b><i class="ubar"><em style="width:60%;background:#6b5bd0"></em></i></div>
+          <div><span class="cap">其他失败</span><b>{{ stats.failed }}</b><i class="ubar"><em style="width:60%;background:#ee5a7c"></em></i></div>
         </div>
       </div>
       <div class="card">

@@ -27,10 +27,9 @@ log = logging.getLogger(__name__)
 APP_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 TASK_DEFAULTS: Dict[str, Any] = {
-    "task_type": "run",         # run = 跑批；mock = 复制景区数据（engin_cli mock：复制源景区的 ADS 结果给新景区并推送）
-    "from_scenic": "",          # mock：从哪个景区复制
-    "to_scenic": "",            # mock：新景区编号
-    "to_name": "",              # mock：新景区名称
+    # 跑完后复制给其他景区（engin_cli mock：把源景区刚算好的 ADS 结果复制给新景区编号并推送，不写本地库）
+    # [{"from_scenic": 源景区, "to_scenic": 新景区编号, "to_name": 新景区名称}]；日期、表和本次跑批一样
+    "copies": [],
     "scenics": "",              # 逗号分隔；空 = 取数区间内有评论的全部景区
     "tables": "",               # 计算 / 输出哪些表（逗号分隔简写）；空 = 全部
     "date_mode": "today",       # today / yesterday / recent（近 N 天）/ range（固定区间）
@@ -133,20 +132,20 @@ def _valid_ymd(s: str) -> bool:
 
 def normalize_config(cfg: Optional[dict]) -> Dict[str, Any]:
     """补齐默认值并校验。配错直接抛 ValueError（页面上显示）。"""
+    cfg = dict(cfg or {})
+    if cfg.get("task_type") == "mock":
+        # 早先单独存的「复制任务」：转成「跑源景区 + 跑完复制」，别变成跑全部景区
+        cfg.setdefault("scenics", "")
+        if not cfg["scenics"]:
+            cfg["scenics"] = cfg.get("from_scenic", "")
+        cfg["copies"] = [{k: cfg.get(k, "") for k in ("from_scenic", "to_scenic", "to_name")}]
     out = dict(TASK_DEFAULTS)
-    for k, v in (cfg or {}).items():
+    for k, v in cfg.items():
         if k in out:
             out[k] = v
-    out["task_type"] = "mock" if out["task_type"] == "mock" else "run"
-    for k in ("from_scenic", "to_scenic", "to_name"):
-        out[k] = str(out[k] or "").strip()
-    if out["task_type"] == "mock":
-        if not (out["from_scenic"] and out["to_scenic"] and out["to_name"]):
-            raise ValueError("复制景区数据要填：源景区、新景区编号、新景区名称")
-        if out["from_scenic"] == out["to_scenic"]:
-            raise ValueError("新景区编号不能和源景区一样")
     out["scenics"] = ",".join(s.strip() for s in str(out["scenics"] or "").replace("，", ",")
                               .split(",") if s.strip())
+    out["copies"] = _copies(out["copies"], out["scenics"])
     if out["date_mode"] not in DATE_MODES:
         raise ValueError(f"日期方式只能是 {DATE_MODES}")
     out["recent_days"] = max(int(out["recent_days"] or 1), 1)
@@ -158,6 +157,8 @@ def normalize_config(cfg: Optional[dict]) -> Dict[str, Any]:
     for k in ("rerun_days", "quality_retries"):
         out[k] = None if out[k] in (None, "") else max(int(out[k]), 0)
     out["tables"] = _tables(out["tables"], "计算的表")
+    if out["copies"] and cfg.get("skip_db"):
+        raise ValueError("「只算不写库」时不能跑完复制：复制要读库里刚算好的结果")
     out["push"] = _tables(out["push"], "推送的表")
     if out["tables"]:
         # 没算的表推不了
@@ -211,26 +212,49 @@ def build_run_argv(cfg: Dict[str, Any], today: Optional[dt.date] = None) -> Tupl
     return argv, title
 
 
-def build_mock_argv(cfg: Dict[str, Any], today: Optional[dt.date] = None) -> Tuple[List[str], str]:
-    """复制景区数据：`engin_cli.cli mock`（复制源景区 ADS 结果给新景区编号并推送，不写本地库）。"""
+def _copies(items, scenics: str) -> List[Dict[str, str]]:
+    """校验「跑完后复制」：源景区默认 = 任务里唯一的景区；源景区要在本次跑批的景区里。"""
+    run_sc = [s for s in scenics.split(",") if s]
+    out, seen = [], set()
+    for c in items or []:
+        c = {k: str((c or {}).get(k) or "").strip() for k in ("from_scenic", "to_scenic", "to_name")}
+        if not any(c.values()):
+            continue                                   # 页面上加了一行没填，忽略
+        if not c["from_scenic"] and len(run_sc) == 1:
+            c["from_scenic"] = run_sc[0]
+        if not (c["from_scenic"] and c["to_scenic"] and c["to_name"]):
+            raise ValueError("跑完后复制：每一行都要填源景区、新景区编号、新景区名称")
+        if c["from_scenic"] == c["to_scenic"]:
+            raise ValueError(f"跑完后复制：新景区编号不能和源景区一样（{c['to_scenic']}）")
+        if run_sc and c["from_scenic"] not in run_sc:
+            raise ValueError(f"跑完后复制：源景区 {c['from_scenic']} 不在这个任务要跑的景区里")
+        if c["to_scenic"] in seen:
+            raise ValueError(f"跑完后复制：新景区 {c['to_scenic']} 重复了")
+        seen.add(c["to_scenic"])
+        out.append(c)
+    return out
+
+
+def build_copy_steps(cfg: Dict[str, Any], start: str, end: str) -> List[Dict[str, Any]]:
+    """跑批之后要接着执行的复制：`engin_cli.cli mock`，日期、表和本次跑批一样。"""
+    steps = []
+    for c in cfg["copies"]:
+        argv = ["mock", "--from-scenic", c["from_scenic"], "--to-scenic", c["to_scenic"],
+                "--to-name", c["to_name"], "--start-date", start, "--end-date", end, "--no-progress"]
+        if cfg["tables"]:
+            argv += ["--tables", cfg["tables"]]
+        steps.append({"from_scenic": c["from_scenic"], "kind": "mock", "argv": argv,
+                      "title": f"复制 {c['from_scenic']} → {c['to_scenic']}（{c['to_name']}） · "
+                               f"{start if start == end else f'{start}~{end}'}"})
+    return steps
+
+
+def build_task_argv(cfg: Dict[str, Any], today: Optional[dt.date] = None):
+    """任务配置 → (执行类型, 命令参数, 一句话说明, 跑完后接着执行的复制)。定时、手动执行都走这里。"""
     cfg = normalize_config(cfg)
-    start, end = task_dates(cfg, today)
-    argv = ["mock", "--from-scenic", cfg["from_scenic"], "--to-scenic", cfg["to_scenic"],
-            "--to-name", cfg["to_name"], "--start-date", start, "--end-date", end, "--no-progress"]
-    if cfg["tables"]:
-        argv += ["--tables", cfg["tables"]]
-    title = (f"复制 {cfg['from_scenic']} → {cfg['to_scenic']}（{cfg['to_name']}） · "
-             f"{start if start == end else f'{start}~{end}'}")
-    return argv, title
-
-
-def build_task_argv(cfg: Dict[str, Any], today: Optional[dt.date] = None) -> Tuple[str, List[str], str]:
-    """任务配置 → (执行类型, 命令参数, 一句话说明)。定时、手动执行都走这里。"""
-    if (cfg or {}).get("task_type") == "mock":
-        argv, title = build_mock_argv(cfg, today)
-        return "mock", argv, title
     argv, title = build_run_argv(cfg, today)
-    return "run", argv, title
+    start, end = task_dates(cfg, today)
+    return "run", argv, title, build_copy_steps(cfg, start, end)
 
 
 def build_push_argv(scenics: str = "", tables: str = "", start: str = "",
@@ -272,6 +296,7 @@ class Runner:
         self._proc: Optional[subprocess.Popen] = None
         self._current: Optional[int] = None
         self._cancelled: set = set()
+        self._then: Dict[int, tuple] = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, name="runner", daemon=True)
@@ -303,11 +328,45 @@ class Runner:
         return self._current
 
     def submit(self, kind: str, argv: List[str], title: str, trigger: str = "manual",
-               task: Optional[dict] = None) -> int:
+               task: Optional[dict] = None, then: Optional[List[Dict[str, Any]]] = None) -> int:
+        """then：跑完后接着执行的复制（build_copy_steps），源景区这次通过了才执行。"""
         run_id = self.store.create_run(kind, argv, title, trigger, task)
         self.store.update_run(run_id, log_path=os.path.join(self.run_dir, f"{run_id}.log"))
+        if then:
+            self._then[run_id] = (then, trigger, task)
         self._q.put(run_id)
         return run_id
+
+    def _follow_up(self, run_id: int, status: str, summary: dict, log_path: str) -> None:
+        """跑批结束：源景区这次通过了，就接着提交复制；没通过就跳过并说明原因。"""
+        item = self._then.pop(run_id, None)
+        if not item:
+            return
+        steps, trigger, task = item
+        ok = {str(s.get("scenic")): bool(s.get("ok")) for s in (summary or {}).get("scenics") or []}
+        lines = []
+        for st in steps:
+            src = st["from_scenic"]
+            if status == "cancelled":
+                why = "跑批被取消"
+            elif src not in ok:
+                why = f"这次跑批没有 {src} 的结果"
+            elif not ok[src]:
+                why = f"{src} 这次没通过（失败或质量检测回退）"
+            else:
+                why = ""
+            if why:
+                lines.append(f"跳过 {st['title']}：{why}")
+                self.store.add_event(f"#{run_id} 跑完后复制跳过：{st['title']}（{why}）", task, "warn")
+                continue
+            nid = self.submit(st["kind"], st["argv"], st["title"], trigger, task)
+            lines.append(f"已提交 #{nid} {st['title']}")
+            self.store.add_event(f"#{run_id} 跑完后复制：已提交执行 #{nid}（{st['title']}）", task)
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write("\n跑完后复制：\n" + "\n".join("  · " + l for l in lines) + "\n")
+        except OSError:
+            pass
 
     def cancel(self, run_id: int) -> bool:
         run = self.store.get_run(run_id)
@@ -386,4 +445,5 @@ class Runner:
                    "failed": f"退出码 {code}"}[status]
         self.store.update_run(run_id, status=status, exit_code=code, finished_at=now_str(),
                               summary=summary, message=msg)
+        self._follow_up(run_id, status, summary, run["log_path"])
         log.info("执行 #%s 结束：%s（退出码 %s）", run_id, status, code)

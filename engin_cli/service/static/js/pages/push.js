@@ -2,9 +2,9 @@ import { ref, reactive, onMounted, computed } from 'vue'
 import { api, TABLES, TABLE_LABEL, PUSH_RESULT, fmtNum, notify, refreshSched } from '../api.js'
 import { Ring } from '../charts.js'
 
-const RING_C = { ok: ['#86a490', '#4a6a56'], dry_run: ['#a9c9c4', '#6f9a95'], business_fail: ['#e2a197', '#c9655b'],
-  http_error: ['#dc8d84', '#b4524a'], network_error: ['#e7c98e', '#c9974f'], timeout: ['#ead6a8', '#d1a75d'],
-  ssl_error: ['#5a625c', '#2f3632'] }
+const RING_C = { ok: ['#a194ec', '#5446b8'], dry_run: ['#8be3ef', '#22b8cf'], business_fail: ['#f6a4b8', '#ee5a7c'],
+  http_error: ['#f28aa3', '#e04a6e'], network_error: ['#ffd88a', '#f5a524'], timeout: ['#ffe3a8', '#f7b43c'],
+  ssl_error: ['#54506c', '#282441'] }
 
 export default {
   components: { Ring },
@@ -45,7 +45,7 @@ export default {
     }
     const reset = () => { q.result = ''; q.kw = ''; loadLogs() }
     const parts = computed(() => Object.entries(logs.value?.counts || {}).map(([k, v]) => ({
-      value: v, label: (PUSH_RESULT[k] || {}).text || k, colors: RING_C[k] || ['#8f948e', '#6b7075'] })))
+      value: v, label: (PUSH_RESULT[k] || {}).text || k, colors: RING_C[k] || ['#8682a0', '#6b7075'] })))
     const total = computed(() => Object.values(logs.value?.counts || {}).reduce((a, v) => a + v, 0))
     const okRate = computed(() => total.value ? Math.round(((logs.value.counts.ok || 0) + (logs.value.counts.dry_run || 0)) / total.value * 1000) / 10 : null)
     const cols = [

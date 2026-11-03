@@ -44,10 +44,10 @@ export default {
       return mb ? Math.round((ma - mb) / mb * 1000) / 10 : null
     })
     const series = [
-      { key: 'other', label: '其他', color: '#c9c7c0' },
-      { key: 'failed', label: '失败', color: '#c9655b' },
-      { key: 'blocked', label: '回退', color: '#d8b26e' },
-      { key: 'success', label: '成功', color: '#4f6f5b' },
+      { key: 'other', label: '其他', color: '#bdbbce' },
+      { key: 'failed', label: '失败', color: '#ee5a7c' },
+      { key: 'blocked', label: '回退', color: '#ffc04d' },
+      { key: 'success', label: '成功', color: '#5a4bc4' },
     ]
     const barRows = computed(() => (d.value?.daily || []).map(x => ({ label: x.date.slice(5).replace('-', '/'), values: x })))
     const fmtDur = v => !v ? '0s' : v < 60 ? `${v}s` : `${Math.floor(v / 60)}m${Math.round(v % 60)}s`
@@ -89,7 +89,7 @@ export default {
           <div class="bubble"><span>平均耗时</span><b>{{ fmtDur(avgDur) }}</b>
             <em v-if="durDelta !== null" :class="durDelta <= 0 ? 'up' : 'down'">{{ durDelta > 0 ? '+' : '' }}{{ durDelta }}%</em></div>
         </div>
-        <Wave :points="durPts" :height="150" :labels="false" :ticks="7" :avg="false" :colors="['#8fa898', '#5a7a65']" :fmt="fmtDur" />
+        <Wave :points="durPts" :height="150" :labels="false" :ticks="7" :avg="false" :colors="['#9b8fe6', '#5446b8']" :fmt="fmtDur" />
       </div>
 
       <div class="card gcard">

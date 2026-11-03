@@ -92,14 +92,14 @@ export const Empty = {
   template: `
   <div class="s-empty" :class="{small}">
     <svg viewBox="0 0 200 150" class="s-empty-img" aria-hidden="true">
-      <ellipse cx="100" cy="132" rx="70" ry="8" fill="#efeee9"/>
-      <rect x="46" y="28" width="92" height="86" rx="10" fill="#f4f3ef" stroke="#dddbd4" stroke-width="2"/>
-      <rect x="58" y="44" width="50" height="7" rx="3.5" fill="#dddbd4"/>
-      <rect x="58" y="59" width="68" height="7" rx="3.5" fill="#e6e4de"/>
-      <rect x="58" y="74" width="40" height="7" rx="3.5" fill="#e6e4de"/>
-      <circle cx="128" cy="88" r="22" fill="#fff" stroke="#6e8c78" stroke-width="5"/>
-      <path d="M144 104l16 16" stroke="#6e8c78" stroke-width="7" stroke-linecap="round"/>
-      <path d="M121 81l14 14M135 81l-14 14" stroke="#b8ccbd" stroke-width="4" stroke-linecap="round"/>
+      <ellipse cx="100" cy="132" rx="70" ry="8" fill="#e7e5f3"/>
+      <rect x="46" y="28" width="92" height="86" rx="10" fill="#eeedf6" stroke="#cfcbe6" stroke-width="2"/>
+      <rect x="58" y="44" width="50" height="7" rx="3.5" fill="#cfcbe6"/>
+      <rect x="58" y="59" width="68" height="7" rx="3.5" fill="#dbd8ec"/>
+      <rect x="58" y="74" width="40" height="7" rx="3.5" fill="#dbd8ec"/>
+      <circle cx="128" cy="88" r="22" fill="#fff" stroke="#8475de" stroke-width="5"/>
+      <path d="M144 104l16 16" stroke="#8475de" stroke-width="7" stroke-linecap="round"/>
+      <path d="M121 81l14 14M135 81l-14 14" stroke="#cfc8f7" stroke-width="4" stroke-linecap="round"/>
     </svg>
     <div class="s-empty-desc">{{ text }}</div>
   </div>`,

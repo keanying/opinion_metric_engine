@@ -5,7 +5,7 @@ const DATE_MODES = [['today', '当天'], ['yesterday', '昨天'], ['recent', '�
 const KEYS = TABLES.map(t => t.key)
 
 export function blankConfig() {
-  return { task_type: 'run', from_scenic: '', to_scenic: '', to_name: '', scenics: '', tables: '', date_mode: 'today', recent_days: 3, start_date: '', end_date: '',
+  return { copies: [], scenics: '', tables: '', date_mode: 'today', recent_days: 3, start_date: '', end_date: '',
            rerun_days: '', push: 'drill,macro', skip_db: false, drill_keyword_filter: false,
            quality_gate: true, quality_retries: '', backfill_lookback: '', verbose: true }
 }
@@ -31,7 +31,7 @@ export const EventLog = {
 
 // ── 任务参数（日期 / 计算哪些表 / 推送 / 选项），任务编辑和维护页「临时执行」共用 ──
 export const TaskBody = {
-  props: { cfg: Object, pushOff: Boolean },
+  props: { cfg: Object, pushOff: Boolean, withCopies: Boolean },
   setup(p) {
     const calc = computed(() => new Set(p.cfg.tables ? split(p.cfg.tables) : KEYS))
     const push = computed(() => new Set(split(p.cfg.push)))
@@ -64,21 +64,13 @@ export const TaskBody = {
           <input type="number" min="1" v-model.number="cfg.recent_days" class="w100" /><span class="hint">天，含当天</span></div>
         <div class="frow" v-if="cfg.date_mode==='range'"><label>区间</label>
           <DateRange v-model:start="cfg.start_date" v-model:end="cfg.end_date" :clearable="false" /></div>
-        <div v-if="cfg.task_type !== 'mock'" class="frow"><label>景区</label>
+        <div class="frow"><label>景区</label>
           <ScenicPicker v-model="cfg.scenics" placeholder="全部景区（有评论的都跑）" /></div>
-        <template v-else>
-          <div class="frow"><label>源景区<Tip text="从这个景区复制本地 ADS 库里的结果（要先算好）"/></label>
-            <ScenicPicker v-model="cfg.from_scenic" single placeholder="选择源景区" width="360px" /></div>
-          <div class="frow"><label>新景区</label>
-            <input v-model="cfg.to_scenic" class="w240" placeholder="新景区编号，如 PFTSCA01018088" />
-            <input v-model="cfg.to_name" class="grow" placeholder="新景区名称，如 泰宁九龙潭生态旅游区" /></div>
-        </template>
       </div>
     </div>
 
     <div class="card sect">
-      <div class="sect-head"><h3 v-if="cfg.task_type === 'mock'">复制哪些表<Tip text="选中的表复制给新景区并推送给下游（不写本地库）；都选 = 全部表"/></h3>
-        <h3 v-else>计算哪些表<Tip text="没选的下钻表 / 大盘表不计算；基础四表照算（质量检测要用），但不写库、不推送"/></h3>
+      <div class="sect-head"><h3>计算哪些表<Tip text="没选的下钻表 / 大盘表不计算；基础四表照算（质量检测要用），但不写库、不推送"/></h3>
         <div class="btn-group"><button class="btn xs" @click="preset(KEYS)">全选</button>
           <button class="btn xs" @click="preset(['drill','macro'])">只要下钻 + 大盘</button></div></div>
       <div class="tiles">
@@ -90,7 +82,7 @@ export const TaskBody = {
       </div>
     </div>
 
-    <div v-if="cfg.task_type !== 'mock'" class="card sect">
+    <div class="card sect">
       <div class="sect-head"><h3>推送<Tip text="算完推给下游；推送地址、批大小、试推在「推送」页设置；都不选 = 不推送"/></h3>
         <a href="#/push" class="btn xs light">推送设置 →</a></div>
       <div v-if="pushOff" class="alert orange">推送总开关已关闭：这个任务现在只算不推（推送页可以打开）</div>
@@ -101,8 +93,23 @@ export const TaskBody = {
       </div>
     </div>
 
-    <div v-if="cfg.task_type === 'mock' && pushOff" class="alert orange">推送总开关已关闭：复制任务只预览报文、不发送（推送页可以打开）</div>
-    <div v-if="cfg.task_type !== 'mock'" class="card sect">
+    <div v-if="withCopies" class="card sect">
+      <div class="sect-head"><h3>跑完后复制给其他景区<Tip wide text="跑批成功后，把源景区刚算好的结果复制给新景区编号并推送给下游（engin_cli mock，不写本地库）；日期、表和这次跑批一样。源景区这次没通过（失败 / 质量回退）就不复制"/></h3>
+        <button class="btn xs light" @click="cfg.copies.push({ from_scenic: '', to_scenic: '', to_name: '' })"><Icon name="plus" :size="12" :sw="2.4"/>添加复制</button></div>
+      <div class="sect-body">
+        <div v-for="(c, i) in cfg.copies" :key="i" class="frow copy-row">
+          <ScenicPicker v-model="c.from_scenic" single :placeholder="cfg.scenics && !cfg.scenics.includes(',') ? '源景区（默认就是上面的景区）' : '源景区'" width="300px" />
+          <Icon name="arrowR" :size="16" />
+          <input v-model="c.to_scenic" class="w240" placeholder="新景区编号，如 PFTSCA01018088" />
+          <input v-model="c.to_name" class="grow" placeholder="新景区名称，如 泰宁九龙潭生态旅游区" />
+          <button class="s-btn-icon danger" title="删除这一行" @click="cfg.copies.splice(i, 1)"><Icon name="del" :size="16"/></button>
+        </div>
+        <span v-if="!cfg.copies.length" class="hint">不复制</span>
+        <div v-if="pushOff && cfg.copies.length" class="alert orange small">推送总开关已关闭：复制只预览报文、不发送</div>
+      </div>
+    </div>
+
+    <div class="card sect">
       <div class="sect-head"><h3>数据质量与选项</h3></div>
       <div class="opts">
         <div class="opt"><div><b>质量检测不通过就回退</b><Tip text="先重算（次数不填 = 用 settings），还不通过：不写库、不推送，发飞书通知"/></div>
@@ -187,15 +194,15 @@ export const TaskList = {
         :empty="tasks.length ? '搜索无结果' : '还没有任务，点「新建任务」'">
         <template #name="{ row }"><span class="s-name"><Avatar square :text="row.name" :size="24"/>
           <span class="s-ell"><a :href="'#/tasks/'+row.id" :title="row.name"><b>{{ row.name }}</b></a>
-            <small :title="row.config.scenics">{{ row.config.task_type === 'mock' ? row.config.from_scenic + ' → ' + row.config.to_scenic : (row.config.scenics || '全部景区') }} · {{ modeText(row.config) }}</small></span></span></template>
+            <small :title="row.config.scenics">{{ row.config.scenics || '全部景区' }} · {{ modeText(row.config) }}</small></span></span></template>
         <template #times="{ row }"><div class="chips">
           <span v-for="x in (row.schedule.times||[])" :key="x" class="chip">{{ x }}</span>
           <span v-if="!(row.schedule.times||[]).length" class="muted">仅手动</span></div></template>
         <template #tables="{ row }"><div class="chips">
-          <Tag v-if="row.config.task_type === 'mock'" color="violet" icon="file">复制 → {{ row.config.to_name || row.config.to_scenic }}</Tag>
+          <Tag v-for="c in (row.config.copies || [])" :key="c.to_scenic" color="violet" icon="file">跑完复制 → {{ c.to_name || c.to_scenic }}</Tag>
           <Tag v-if="!row.config.tables" color="indigo">全部表</Tag>
           <Tag v-for="k in split(row.config.tables)" :key="k" color="indigo">{{ TABLE_LABEL[k] }}</Tag>
-          <template v-if="row.config.task_type !== 'mock'"><Tag v-if="row.config.push" color="cyan" icon="send">{{ split(row.config.push).map(k => TABLE_LABEL[k]).join('、') }}</Tag>
+          <template v-if="true"><Tag v-if="row.config.push" color="cyan" icon="send">{{ split(row.config.push).map(k => TABLE_LABEL[k]).join('、') }}</Tag>
           <Tag v-else color="grey">不推送</Tag></template></div></template>
         <template #last="{ row }"><template v-if="row.last_run"><StatusTag :status="row.last_run.status"/>
           <a class="link small" :href="'#/runs/'+row.last_run.id"> {{ row.last_run.created_at.slice(5,16) }}</a></template>
@@ -229,6 +236,7 @@ export const TaskEdit = {
         if (!t) { notify('任务不存在', 'err'); location.hash = '/tasks'; return }
         f.name = t.name; f.enabled = t.enabled; f.times = [...((t.schedule || {}).times || [])]
         Object.assign(f.config, t.config)
+        if (!Array.isArray(f.config.copies)) f.config.copies = []
         for (const k of ['rerun_days', 'quality_retries']) if (f.config[k] === null) f.config[k] = ''
         events.value = await api(`/api/tasks/${p.id}/events?limit=40`)
       } catch (e) { notify(e.message, 'err') } finally { loaded.value = true }
@@ -265,15 +273,13 @@ export const TaskEdit = {
       <Switch v-model="f.enabled"/><Tip text="启用后按下面的定时自动执行；停用也能在列表里手动执行"/>
       <div class="grow"><input v-model="f.name" class="name-input" placeholder="任务名称，如：九嶷山每日跑批" />
         </div>
-      <div class="seg"><button :class="{on: f.config.task_type !== 'mock'}" @click="f.config.task_type = 'run'">跑批</button>
-        <button :class="{on: f.config.task_type === 'mock'}" @click="f.config.task_type = 'mock'">复制景区数据</button></div>
-      <Tip wide text="跑批：计算指标、写库、推送。复制景区数据：把源景区已经算好的结果复制给新景区编号，推给下游（不写本地库）；定时要排在源景区跑批之后"/>
+
       <Tag :color="f.enabled ? 'green' : 'grey'" :icon="f.enabled ? 'tickCircle' : 'minus'">{{ f.enabled ? '已启用' : '已停用' }}</Tag>
     </div>
 
     <div class="te-layout">
       <div class="te-main">
-        <TaskBody :cfg="f.config" :push-off="!!(preview && preview.push_off)">
+        <TaskBody :cfg="f.config" :push-off="!!(preview && preview.push_off)" with-copies>
           <template #schedule>
             <div class="frow"><label>定时<Tip text="每天几点自动执行（服务器时间）。不加时间 = 只手动执行；多个时间各跑一次，例如 08:10 跑完、20:10 再补一遍晚到的评论"/></label>
               <div class="chips">
@@ -296,14 +302,15 @@ export const TaskEdit = {
             <div class="pv-row"><span>下次运行</span><div class="pv-list"><b v-for="x in preview.next_fires" :key="x">{{ x }}</b>
               <b v-if="!preview.next_fires.length">仅手动</b></div></div>
             <div class="pv-row"><span>目标日期</span><b>{{ preview.start === preview.end ? preview.start : preview.start + ' ~ ' + preview.end }}</b></div>
-            <div v-if="preview.task_type === 'mock'" class="pv-row"><span>复制</span><b>{{ f.config.from_scenic }} → {{ f.config.to_scenic }}（{{ f.config.to_name }}）</b></div>
-            <div v-else class="pv-row"><span>景区</span><b>{{ preview.scenics.length ? preview.scenics.join('、') : '有评论的全部景区' }}</b></div>
-            <div class="pv-row"><span>{{ preview.task_type === 'mock' ? '表' : '计算' }}</span><div class="chips">
+            <div class="pv-row"><span>景区</span><b>{{ preview.scenics.length ? preview.scenics.join('、') : '有评论的全部景区' }}</b></div>
+            <div class="pv-row"><span>计算</span><div class="chips">
               <Tag v-if="!preview.tables.length" color="indigo">全部 6 张表</Tag>
               <Tag v-for="k in preview.tables" :key="k" color="indigo">{{ TABLE_LABEL[k] }}</Tag></div></div>
             <div class="pv-row"><span>推送</span><div class="chips">
               <Tag v-for="k in preview.push" :key="k" color="cyan" icon="send">{{ TABLE_LABEL[k] }}</Tag>
               <Tag v-if="!preview.push.length" color="grey">{{ preview.push_off ? '推送总开关关闭' : '不推送' }}</Tag></div></div>
+            <div v-if="preview.copies.length" class="pv-row"><span>跑完复制</span><div class="pv-list">
+              <b v-for="c in preview.copies" :key="c.title" :title="c.command">{{ c.title.split(' · ')[0] }}</b></div></div>
             <code class="cmd block">{{ preview.command }}</code>
           </div>
           <div v-else-if="preview" class="alert red">{{ preview.error }}</div>

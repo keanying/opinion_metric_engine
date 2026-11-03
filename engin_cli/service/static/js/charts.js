@@ -95,7 +95,7 @@ function smoothPath(xs, ys) {
 
 export const Wave = {
   props: { points: Array, height: { type: Number, default: 150 }, selected: { type: Number, default: -1 },
-           colors: { type: Array, default: () => ['#6e8c78', '#4a6a56'] }, avg: { type: Boolean, default: true },
+           colors: { type: Array, default: () => ['#8475de', '#5446b8'] }, avg: { type: Boolean, default: true },
            fmt: { type: Function, default: v => v }, labels: { type: Boolean, default: true },
            ticks: { type: Number, default: 0 } },
   emits: ['select'],
@@ -149,8 +149,8 @@ export const Wave = {
             <stop offset="0" :stop-color="colors[0]"/><stop offset="1" :stop-color="colors[1]"/></linearGradient>
         </defs>
         <path :d="geo.area" :fill="'url(#'+id+'f)'"/>
-        <line v-if="avg" x1="0" :x2="W" :y1="geo.ay" :y2="geo.ay" stroke="#bcbab3" stroke-dasharray="5 6" vector-effect="non-scaling-stroke"/>
-        <line :x1="geo.xs[sel]" :x2="geo.xs[sel]" y1="0" :y2="height" stroke="#dcdad3" vector-effect="non-scaling-stroke"/>
+        <line v-if="avg" x1="0" :x2="W" :y1="geo.ay" :y2="geo.ay" stroke="#afacc3" stroke-dasharray="5 6" vector-effect="non-scaling-stroke"/>
+        <line :x1="geo.xs[sel]" :x2="geo.xs[sel]" y1="0" :y2="height" stroke="#cdcae5" vector-effect="non-scaling-stroke"/>
         <path :d="geo.line" fill="none" :stroke="'url(#'+id+'s)'" stroke-width="3" vector-effect="non-scaling-stroke"/>
       </svg>
       <span class="wave-knob" :style="{left: (geo.xs[sel]/W*100)+'%', top: geo.ys[sel]+'px'}"></span>
@@ -229,7 +229,7 @@ export const MiniRing = {
 // ══════════════════════════════════════════════════════════════════
 export const Gauge = {
   props: { value: { type: Number, default: 0 }, text: String, size: { type: Number, default: 220 },
-           color: { type: String, default: '#5a7a65' }, track: { type: String, default: '#e3ebe5' } },
+           color: { type: String, default: '#5446b8' }, track: { type: String, default: '#e6e2fb' } },
   setup(p) {
     const geo = computed(() => {
       const v = Math.max(0, Math.min(100, Number(p.value) || 0)) / 100
@@ -248,7 +248,7 @@ export const Gauge = {
     <svg viewBox="0 0 220 120" :width="size" :height="size * 120 / 220">
       <path :d="geo.track" fill="none" :stroke="track" stroke-width="30"/>
       <path v-if="geo.arc" :d="geo.arc" fill="none" :stroke="color" stroke-width="30"/>
-      <line :x1="geo.n1[0]" :y1="geo.n1[1]" :x2="geo.n2[0]" :y2="geo.n2[1]" stroke="#2b302d" stroke-width="3" stroke-linecap="round"/>
+      <line :x1="geo.n1[0]" :y1="geo.n1[1]" :x2="geo.n2[0]" :y2="geo.n2[1]" stroke="#24213a" stroke-width="3" stroke-linecap="round"/>
     </svg>
     <b class="gauge-val">{{ text ?? (Math.round(value) + '%') }}</b>
   </div>`,
@@ -265,7 +265,7 @@ export const MiniBars = {
 
 // 迷你折线（参考稿 New clients / Activity 右边那条线）
 export const Spark = {
-  props: { values: Array, color: { type: String, default: '#8fa898' }, width: { type: Number, default: 90 },
+  props: { values: Array, color: { type: String, default: '#9b8fe6' }, width: { type: Number, default: 90 },
            height: { type: Number, default: 34 } },
   setup(p) {
     const d = computed(() => {

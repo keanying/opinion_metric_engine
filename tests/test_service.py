@@ -160,7 +160,7 @@ class _FakeRunner:
     def queued(self):
         return 0
 
-    def submit(self, kind, argv, title, trigger="manual", task=None):
+    def submit(self, kind, argv, title, trigger="manual", task=None, then=None):
         self.submitted.append((kind, argv, title, trigger, task["id"] if task else None))
         return len(self.submitted)
 
@@ -762,47 +762,91 @@ def now_str_():
 
 
 # ══════════════════════════════════════════════════════════════════
-# 复制景区数据（engin_cli mock）任务
+# 跑完后复制给其他景区（engin_cli mock 挂在正式景区的跑批后面）
 # ══════════════════════════════════════════════════════════════════
-MOCK_CFG = {"task_type": "mock", "from_scenic": "PFTSCA01016184", "to_scenic": "PFTSCA01018088",
-            "to_name": "泰宁九龙潭生态旅游区", "date_mode": "today",
-            "tables": "drill,macro,core,platform,dimension,content"}
+COPY_CFG = {"scenics": "PFTSCA01016184", "date_mode": "today", "push": "drill,macro",
+            "copies": [{"from_scenic": "", "to_scenic": "PFTSCA01018088", "to_name": "泰宁九龙潭生态旅游区"}]}
 
 
-def test_mock_task_builds_mock_command():
-    kind, argv, title = R.build_task_argv(MOCK_CFG, dt.date(2026, 11, 3))
-    assert kind == "mock"
-    assert argv == ["mock", "--from-scenic", "PFTSCA01016184", "--to-scenic", "PFTSCA01018088",
-                    "--to-name", "泰宁九龙潭生态旅游区", "--start-date", "20261103", "--end-date", "20261103",
-                    "--no-progress", "--tables", "drill,macro,core,platform,dimension,content"]
-    assert "PFTSCA01016184 → PFTSCA01018088" in title
-    # 推送总开关关着：只预览报文、不发送
-    assert R.apply_push_switch(argv, False)[-1] == "--preview"
-    with pytest.raises(ValueError, match="源景区"):
-        R.normalize_config({"task_type": "mock", "from_scenic": "A"})
+def test_copy_steps_follow_the_run():
+    kind, argv, title, then = R.build_task_argv(COPY_CFG, dt.date(2026, 11, 3))
+    assert kind == "run" and argv[:5] == ["run", "--start-date", "20261103", "--end-date", "20261103"]
+    assert len(then) == 1 and then[0]["from_scenic"] == "PFTSCA01016184"          # 源景区默认 = 任务里唯一的景区
+    assert then[0]["argv"] == ["mock", "--from-scenic", "PFTSCA01016184", "--to-scenic", "PFTSCA01018088",
+                               "--to-name", "泰宁九龙潭生态旅游区", "--start-date", "20261103",
+                               "--end-date", "20261103", "--no-progress"]
+    # 只算了部分表：复制同样的表
+    _, _, _, then2 = R.build_task_argv({**COPY_CFG, "tables": "drill,macro"}, dt.date(2026, 11, 3))
+    assert then2[0]["argv"][-2:] == ["--tables", "drill,macro"]
+    with pytest.raises(ValueError, match="不在这个任务要跑的景区里"):
+        R.normalize_config({**COPY_CFG, "copies": [{"from_scenic": "X", "to_scenic": "Y", "to_name": "n"}]})
     with pytest.raises(ValueError, match="不能和源景区一样"):
-        R.normalize_config({**MOCK_CFG, "to_scenic": "PFTSCA01016184"})
-    # 跑批任务不受影响
-    assert R.build_task_argv({"scenics": "S1"}, dt.date(2026, 11, 3))[0] == "run"
+        R.normalize_config({**COPY_CFG, "copies": [{"to_scenic": "PFTSCA01016184", "to_name": "n"}]})
+    with pytest.raises(ValueError, match="只算不写库"):
+        R.normalize_config({**COPY_CFG, "skip_db": True})
+    # 页面上加了空行：忽略
+    assert R.normalize_config({**COPY_CFG, "copies": [{"to_scenic": "", "to_name": ""}]})["copies"] == []
 
 
-def test_scheduler_fires_mock_task(tmp_path):
+def test_legacy_standalone_copy_task_becomes_run_plus_copy():
+    old = {"task_type": "mock", "from_scenic": "PFTSCA01016184", "to_scenic": "PFTSCA01018088",
+           "to_name": "泰宁九龙潭生态旅游区", "date_mode": "today"}
+    cfg = R.normalize_config(old)
+    assert cfg["scenics"] == "PFTSCA01016184"                                     # 不会变成跑全部景区
+    assert cfg["copies"] == [{"from_scenic": "PFTSCA01016184", "to_scenic": "PFTSCA01018088",
+                              "to_name": "泰宁九龙潭生态旅游区"}]
+
+
+def test_scheduler_passes_copy_steps(tmp_path):
     store = Store(str(tmp_path / "s.db"))
-    tid = store.create_task("复制九龙潭", MOCK_CFG, {"times": ["08:30"]})
-    fr = _FakeRunner()
-    SC.Scheduler(store, fr).tick(dt.datetime(2026, 11, 3, 8, 31))
-    kind, argv, title, trigger, task_id = fr.submitted[0]
-    assert (kind, trigger, task_id) == ("mock", "schedule", tid)
-    assert argv[0] == "mock" and argv[argv.index("--start-date") + 1] == "20261103"
+    store.create_task("九嶷山每日", COPY_CFG, {"times": ["08:10"]})
+    calls = []
+
+    class FR(_FakeRunner):
+        def submit(self, kind, argv, title, trigger="manual", task=None, then=None):
+            calls.append((kind, then))
+            return 1
+    SC.Scheduler(store, FR()).tick(dt.datetime(2026, 11, 3, 8, 11))
+    assert calls[0][0] == "run" and calls[0][1][0]["argv"][0] == "mock"
 
 
-def test_mock_task_api_preview_and_run(server):
+def _fake_engine(tmp_path, ok):
+    """假的 engin_cli：run 时按 --summary-json 写结果，mock 时打印一行。"""
+    f = tmp_path / "fake.sh"
+    f.write_text("#!/bin/sh\n"
+                 "shift 2\n"                                     # 去掉 -m engin_cli.cli
+                 'if [ "$1" = mock ]; then echo "MOCK $*"; exit 0; fi\n'
+                 'while [ $# -gt 0 ]; do if [ "$1" = --summary-json ]; then out="$2"; fi; shift; done\n'
+                 f'echo \'{{"scenics":[{{"scenic":"PFTSCA01016184","ok":{"true" if ok else "false"}}}]}}\' > "$out"\n'
+                 f'exit {0 if ok else 1}\n')
+    f.chmod(f.stat().st_mode | stat.S_IEXEC)
+    return str(f)
+
+
+def test_runner_runs_copy_after_successful_run(runner, tmp_path):
+    runner.python = _fake_engine(tmp_path, ok=True)
+    kind, argv, title, then = R.build_task_argv(COPY_CFG, dt.date(2026, 11, 3))
+    rid = runner.submit(kind, argv, title, "schedule", None, then=then)
+    assert _done(runner, rid)["status"] == "success"
+    mock = _wait(lambda: next((r for r in runner.store.list_runs(kind="mock")["items"]), None))
+    m = _done(runner, mock["id"])
+    assert m["status"] == "success" and m["trigger"] == "schedule" and m["command"][0] == "mock"
+    assert "已提交 #" in open(runner.store.get_run(rid)["log_path"], encoding="utf-8").read()
+
+
+def test_runner_skips_copy_when_source_failed(runner, tmp_path):
+    runner.python = _fake_engine(tmp_path, ok=False)
+    kind, argv, title, then = R.build_task_argv(COPY_CFG, dt.date(2026, 11, 3))
+    rid = runner.submit(kind, argv, title, "manual", None, then=then)
+    assert _done(runner, rid)["status"] == "failed"
+    time.sleep(0.5)
+    assert runner.store.list_runs(kind="mock")["total"] == 0
+    assert "跳过" in open(runner.store.get_run(rid)["log_path"], encoding="utf-8").read()
+    assert "跑完后复制跳过" in runner.store.list_events()[0]["text"]
+
+
+def test_copy_preview_api(server):
     base, app, _ = server
-    code, pv = _call(base, "/api/tasks/preview", "POST", {"config": MOCK_CFG, "schedule": {"times": ["08:30"]}})
-    assert pv["ok"] and pv["task_type"] == "mock" and pv["command"].startswith("python -m engin_cli.cli mock ")
-    assert len(pv["push"]) == 6 and pv["push_no_url"] is True             # 测试里没配推送地址
-    code, t = _call(base, "/api/tasks", "POST", {"name": "复制九龙潭", "config": MOCK_CFG, "schedule": {"times": ["08:30"]}})
-    assert code == 200 and t["config"]["task_type"] == "mock" and "engin_cli.cli mock" in t["command_preview"]
-    code, r = _call(base, f"/api/tasks/{t['id']}/run", "POST", {})
-    run = app.store.get_run(r["run_id"])
-    assert run["kind"] == "mock" and run["command"][0] == "mock"
+    code, pv = _call(base, "/api/tasks/preview", "POST", {"config": COPY_CFG, "schedule": {"times": ["08:10"]}})
+    assert pv["ok"] and len(pv["copies"]) == 1 and pv["copies"][0]["command"].startswith("python -m engin_cli.cli mock ")
+    assert pv["push_no_url"] is True

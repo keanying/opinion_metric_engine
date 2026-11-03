@@ -168,7 +168,7 @@ class App:
     def _task_view(self, t: dict) -> dict:
         times = (t.get("schedule") or {}).get("times") or []
         try:
-            _, argv, title = build_task_argv(t["config"])
+            _, argv, title, _then = build_task_argv(t["config"])
             preview = "python -m engin_cli.cli " + " ".join(argv)
         except ValueError as e:
             preview, title = f"（配置有误：{e}）", ""
@@ -208,10 +208,10 @@ class App:
         if not t:
             raise ApiError(404, "任务不存在")
         try:
-            kind, argv, title = build_task_argv(t["config"])
+            kind, argv, title, then = build_task_argv(t["config"])
         except ValueError as e:
             raise ApiError(400, str(e))
-        return {"run_id": self.runner.submit(kind, argv, title, "manual", t)}
+        return {"run_id": self.runner.submit(kind, argv, title, "manual", t, then=then)}
 
     def preview_task(self, body: dict) -> dict:
         """任务编辑页右边的「预览：这次定时会跑什么」。"""
@@ -220,7 +220,7 @@ class App:
             times = normalize_times((body.get("schedule") or {}).get("times") or [])
         except (ValueError, TypeError) as e:
             return {"ok": False, "error": str(e)}
-        kind, argv, title = build_task_argv(cfg)
+        kind, argv, title, then = build_task_argv(cfg)
         ps = self.runner.push_settings()
         argv = apply_push_switch(argv, ps["enabled"])
         start, end = task_dates(cfg)
@@ -233,13 +233,13 @@ class App:
         return {"ok": True, "command": "python -m engin_cli.cli " + " ".join(argv), "title": title,
                 "start": start, "end": end, "scenics": cfg["scenics"].split(",") if cfg["scenics"] else [],
                 "tables": cfg["tables"].split(",") if cfg["tables"] else [],
-                "task_type": kind,
-                "push": (cfg["tables"].split(",") if cfg["tables"] else list(TABLE_KEYS))
-                        if kind == "mock" and ps["enabled"]
-                        else (cfg["push"].split(",") if cfg["push"] and ps["enabled"] else []),
+                "push": cfg["push"].split(",") if cfg["push"] and ps["enabled"] else [],
+                # 跑完后复制：源景区通过了才执行；复制会推送，所以也要推送地址
+                "copies": [{"title": x["title"], "command": "python -m engin_cli.cli " + " ".join(x["argv"])}
+                           for x in then],
                 "push_off": not ps["enabled"], "next_fires": fires,
                 # 要推送却没配推送地址：engin_cli 会直接拒绝启动（整次执行失败），页面上提前提示
-                "push_no_url": bool((cfg["push"] or kind == "mock") and ps["enabled"] and not self.push_ready()),
+                "push_no_url": bool((cfg["push"] or then) and ps["enabled"] and not self.push_ready()),
                 "scheduler_on": self.scheduler.enabled if self.scheduler else False}
 
     # ------------------------------------------------------------ 定时

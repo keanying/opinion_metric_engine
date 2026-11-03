@@ -131,14 +131,14 @@ class Scheduler:
             if not slots:
                 continue
             try:
-                kind, argv, title = build_task_argv(task["config"], now.date())
+                kind, argv, title, then = build_task_argv(task["config"], now.date())
             except ValueError as e:
                 log.error("任务 %s 配置有误，跳过定时：%s", task["name"], e)
                 self.store.add_event(f"{'、'.join(slots)} 到点，但任务配置有误，没有执行：{e}",
                                      task, "error")
                 continue
             busy = self.runner.current is not None or self.runner.queued() > 0
-            run_id = self.runner.submit(kind, argv, title, trigger="schedule", task=task)
+            run_id = self.runner.submit(kind, argv, title, trigger="schedule", task=task, then=then)
             fired.append(run_id)
             self.store.add_event(f"{'、'.join(slots)} 到点，已触发执行 #{run_id}（{title}）"
                                  + ("，前面还有执行没跑完，先排队" if busy else ""), task)

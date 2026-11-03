@@ -82,7 +82,7 @@ const App = {
   <div class="frame">
     <header class="topbar">
       <a href="#/" class="brand" title="舆情指标计算服务"><svg viewBox="0 0 40 40" width="38" height="38" aria-hidden="true">
-        <g fill="#4f6f5b"><rect v-for="i in 12" :key="i" x="18" y="2" width="4" height="11" rx="2" :transform="'rotate(' + i*30 + ' 20 20)'"/></g></svg></a>
+        <g fill="#5a4bc4"><rect v-for="i in 12" :key="i" x="18" y="2" width="4" height="11" rx="2" :transform="'rotate(' + i*30 + ' 20 20)'"/></g></svg></a>
       <div class="hello"><h1>你好，运维！</h1></div>
       <div class="tb-right">
         <label class="tb-search"><input v-model="kw" placeholder="搜索任务 / 景区…" @keyup.enter="doSearch"/>
