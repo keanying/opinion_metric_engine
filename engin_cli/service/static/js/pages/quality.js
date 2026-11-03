@@ -8,7 +8,7 @@ export default {
     const days = ref(14), data = ref({ items: [] }), err = ref(''), loading = ref(true), kw = ref('')
     const scenics = ref([]), today = todayYmd()
     const chk = reactive({ scenic: '', start: todayYmd(-30), end: todayYmd(), running: false, result: null,
-                           push: true, repaired: {} })
+                           push: true, repairRun: null })
     const load = async () => {
       loading.value = true
       try { data.value = await api('/api/quality?days=' + days.value); err.value = '' } catch (e) { err.value = e.message }
@@ -20,26 +20,34 @@ export default {
         if (scenics.value.length && !chk.scenic) chk.scenic = scenics.value[0].scenic_id } catch (e) { /* 库没配 */ }
     })
     const check = async () => {
-      chk.running = true; chk.result = null; chk.repaired = {}
+      chk.running = true; chk.result = null; chk.repairRun = null
       try { chk.result = await api('/api/quality/check', { method: 'POST', body: { scenic: chk.scenic, start: chk.start, end: chk.end } })
         chk.push = chk.result.push_ready }
       catch (e) { notify(e.message, 'err') } finally { chk.running = false }
     }
-    const repair = async dates => {
+    // 修复 = 把检测的整段一次重算：只重算有问题的那几天，跟相邻没重算的日子用的是不同时刻的源数据
+    // （评论会晚到），边上又会冒出新的不一致，要修好几次
+    const repair = async () => {
       const r = chk.result
-      if (!dates.length) return
-      const span = dates.length === 1 ? dates[0] : `${dates[0]} ~ ${dates[dates.length - 1]}`
       const fd = d => `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6)}`
-      if (!await confirmBox({ title: '修复数据', okText: '开始修复', message: '按当前源数据把这几天重新计算一遍，覆盖库里的旧数据。',
-        items: [['景区', r.scenic], ['日期', dates.length === 1 ? fd(dates[0]) : `${fd(dates[0])} ~ ${fd(dates[dates.length - 1])}`],
-                ['有问题', `${dates.length} 天`], ['写库', '是'], ['推送', chk.push ? '是（下钻表、大盘表）' : '否']] })) return
+      if (!await confirmBox({ title: '修复数据', okText: '开始修复',
+        message: '按当前源数据把检测的这一整段重新计算一遍，覆盖库里的旧数据。近 7 日、本周等周期指标依赖前面每一天，只重算有问题的那几天会在边上产生新的不一致，所以整段一次重算。',
+        items: [['景区', r.scenic], ['重算区间', `${fd(r.start)} ~ ${fd(r.end)}（${spanDays.value} 天）`],
+                ['有问题', `${r.days.length} 天，共 ${r.days.reduce((a, d) => a + d.count, 0)} 处`],
+                ['写库', '是'], ['推送', chk.push ? '是（下钻表、大盘表）' : '否']] })) return
       try {
-        const x = await api('/api/quality/repair', { method: 'POST', body: { scenic: r.scenic, dates, push: chk.push } })
-        for (const d of dates) chk.repaired[d] = x.run_id
+        const x = await api('/api/quality/repair', { method: 'POST',
+          body: { scenic: r.scenic, start: r.start, end: r.end, bad_days: r.days.length, push: chk.push } })
+        chk.repairRun = x.run_id
         notify(`已提交修复 #${x.run_id}，跑完后点「重新检测」确认`)
       } catch (e) { notify(e.message, 'err') }
     }
-    const allDates = computed(() => (chk.result?.days || []).map(d => d.date))
+    const spanDays = computed(() => {
+      const r = chk.result
+      if (!r) return 0
+      const t = d => new Date(+d.slice(0, 4), +d.slice(4, 6) - 1, +d.slice(6)).getTime()
+      return Math.round((t(r.end) - t(r.start)) / 864e5) + 1
+    })
     const wk = d => '周' + '日一二三四五六'[new Date(+d.slice(0, 4), +d.slice(4, 6) - 1, +d.slice(6)).getDay()]
     const fmtD = d => `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6)}`
     const stats = computed(() => {
@@ -58,16 +66,15 @@ export default {
       { key: 'result', title: '结果', width: 120 }, { key: 'attempts', title: '次数', width: 60 },
       { key: 'errors', title: '问题' }]
     const dayCols = [
-      { key: 'date', title: '日期', width: 140 }, { key: 'count', title: '问题', width: 170 },
-      { key: 'channels', title: '渠道', width: 110 }, { key: 'samples', title: '明细', width: 380 },
-      { key: 'op', title: '', width: 110, align: 'r' }]
-    return { days, data, err, loading, kw, shown, load, scenics, chk, check, repair, allDates, wk, fmtD, today,
+      { key: 'date', title: '日期', width: 170 }, { key: 'count', title: '问题', width: 190 },
+      { key: 'channels', title: '渠道', width: 110 }, { key: 'samples', title: '明细' }]
+    return { days, data, err, loading, kw, shown, load, scenics, chk, check, repair, spanDays, wk, fmtD, today,
              stats, parts, cols, dayCols, CHANNELS }
   },
   template: `
   <div>
     <div class="card sect open">
-        <div class="sect-head"><h3>数据检测<Tip wide text="只读检测库里大盘表已有的数据：区间相同的行指标一致（td@T-1 = latest_1d@T …）、各周期评论数 = 每天 td 之和。检测出来哪天不对，可以点「修复」按当前源数据把那几天重算一遍"/></h3></div>
+        <div class="sect-head"><h3>数据检测<Tip wide text="只读检测库里大盘表已有的数据：区间相同的行指标一致（td@T-1 = latest_1d@T …）、各周期评论数 = 每天 td 之和。检测出来哪天不对，点「修复」按当前源数据把检测的整段一次重算（周期指标依赖前面每一天，只重算有问题的几天修不干净）"/></h3></div>
         <div class="sect-body stick">
           <div class="frow">
             <ScenicPicker v-model="chk.scenic" single placeholder="选择景区" width="300px" />
@@ -83,7 +90,8 @@ export default {
             <template v-if="chk.result.days.length">
               <label class="check sm"><Switch v-model="chk.push" size="sm" :disabled="!chk.result.push_ready"/>修复后推送
                 <Tip v-if="!chk.result.push_ready" text="推送总开关关着或没配推送地址，修复只重算写库、不推送（推送页可以配置）"/></label>
-              <button class="btn primary sm" @click="repair(allDates)"><Icon name="tool" :size="14"/>全部修复（{{ chk.result.days.length }} 天）</button>
+              <a v-if="chk.repairRun" class="btn light sm" :href="'#/runs/' + chk.repairRun">修复中 #{{ chk.repairRun }}</a>
+              <button v-else class="btn primary sm" @click="repair" :title="'把检测的整段 ' + spanDays + ' 天一次重算'"><Icon name="tool" :size="14"/>修复（整段重算 {{ spanDays }} 天）</button>
             </template>
             <button class="btn light sm" @click="check"><Icon name="refresh" :size="14"/>重新检测</button>
           </div>
@@ -95,9 +103,6 @@ export default {
               <Tag v-if="row.period_sum" color="violet">周期合计 {{ row.period_sum }}</Tag></div></template>
             <template #channels="{ row }"><div class="chips"><Tag v-for="c in row.channels" :key="c" color="grey">{{ CHANNELS[c] || c }}</Tag></div></template>
             <template #samples="{ row }"><ul class="samples"><li v-for="(x,i) in row.samples" :key="i" :title="x">{{ x }}</li></ul></template>
-            <template #op="{ row }">
-              <a v-if="chk.repaired[row.date]" class="btn light sm" :href="'#/runs/' + chk.repaired[row.date]">修复中 #{{ chk.repaired[row.date] }}</a>
-              <button v-else class="btn light sm" @click="repair([row.date])"><Icon name="tool" :size="14"/>修复</button></template>
           </STable>
           <ul v-else class="checklist"><li v-for="c in chk.result.checks" :key="c">{{ c }} ✓</li></ul>
         </div>

@@ -497,7 +497,16 @@ def test_online_quality_check_on_db_data(server):
     assert "数据质量修复" in app.store.list_events()[0]["text"]
     code, fx = _call(base, "/api/quality/repair", "POST", {"scenic": "S1", "dates": ["20261101"], "push": False})
     assert "--no-push" in app.store.get_run(fx["run_id"])["command"]
+    # 页面上的修复：把检测的整段一次重算（不是只重算有问题的那几天）
+    code, fx = _call(base, "/api/quality/repair", "POST", {"scenic": "S1", "start": "20261031",
+                                                           "end": "20261102", "bad_days": 2})
+    assert code == 200 and (fx["start"], fx["end"]) == ("20261031", "20261102")
+    assert app.store.get_run(fx["run_id"])["command"][:5] == ["run", "--start-date", "20261031",
+                                                             "--end-date", "20261102"]
+    assert "整段重算 20261031~20261102（2 天有问题）" in app.store.list_events()[0]["text"]
     assert _call(base, "/api/quality/repair", "POST", {"scenic": "S1", "dates": ["bad"]})[0] == 400
+    assert _call(base, "/api/quality/repair", "POST", {"scenic": "S1", "start": "20261102",
+                                                       "end": "20261031"})[0] == 400
     assert _call(base, "/api/quality/check", "POST", {"scenic": "S1"})[0] == 400
 
 
@@ -885,3 +894,41 @@ def test_health_reports_each_part_and_never_blocks(server):
     assert code == 200 and not h["ok"] and by["db"]["ok"] is False
     assert "Connection refused" in by["db"]["detail"] and by["service"]["ok"] is True
     assert FAKE_DB_PW not in json.dumps(h, ensure_ascii=False)          # 不带密码
+
+
+def test_repair_must_recompute_the_whole_checked_range(server):
+    """评论晚到时：只重算「有问题的那几天」，边上会冒出新的不一致（客户要修好几次）；整段一次重算就干净。"""
+    base, app, holder = server
+    st = EtlSettings()
+    st.write_db, st.lookback_days, st.enable_drill_analysis = False, 40, False
+
+    def src(late):
+        rows = []
+        for d in pd.date_range("2026-10-10", "2026-11-02"):
+            ds = d.strftime("%Y%m%d")
+            rows.append(_comment(f"a{ds}", ds))
+            if late and "20261024" <= ds <= "20261030":
+                rows.append(_comment(f"late{ds}", ds, "排队太久"))     # 当时还没有、后来才进源表
+        return pd.DataFrame(rows)
+
+    def calc(late, a, b):
+        dates = [d.strftime("%Y%m%d") for d in pd.date_range(a, b)]
+        return run_pipeline(st, dates, comments_df=src(late)).tables[TABLE_MACRO]
+
+    def write(db, new):
+        return pd.concat([db[~db.travel_date.isin(set(new.travel_date))], new], ignore_index=True)
+
+    body = {"scenic": "S1", "start": "20261020", "end": "20261102"}
+
+    def check(db):
+        holder["macro"] = db
+        return _call(base, "/api/quality/check", "POST", body)[1]
+
+    db = write(calc(False, "20261020", "20261102"), calc(True, "20261031", "20261102"))   # 日常只重跑最近几天
+    r = check(db)
+    assert r["days"], "晚到的评论应该让检测报出问题"
+    # 旧做法：只重算有问题的第一天 ~ 最后一天 → 还是不对
+    part = write(db, calc(True, r["days"][0]["date"], r["days"][-1]["date"]))
+    assert check(part)["days"]
+    # 现在的做法：整段一次重算 → 通过
+    assert check(write(db, calc(True, body["start"], body["end"])))["days"] == []

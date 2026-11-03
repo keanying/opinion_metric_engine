@@ -526,25 +526,38 @@ class App:
         return bool(ps["enabled"] and (ps.get("push_url") or getattr(self.settings, "push_url", "")))
 
     def quality_repair(self, body: dict) -> dict:
-        """数据修复：把有问题的日期按当前源数据重算一遍（写库，可选推送）。"""
+        """数据修复：把检测的**整段日期**按当前源数据一次重算（写库，可选推送）。
+
+        为什么不只重算有问题的那几天：评论会晚到，库里早些天的 td 是当时算的。周期指标（近 7 日、本周 …）
+        依赖区间里每一天，td@T-1 又要等于 latest_1d@T —— 只重算一部分日期，重算的那段和没重算的相邻几天
+        用的是不同时刻的源数据，边上又会出现新的不一致，要修好几次。整段一次重算，用的是同一份源数据，
+        检测里比对的每一对行都一起刷新，一次就能通过。
+        body：{scenic, start, end}（检测的区间）；老的 {scenic, dates} 也认，按其中最早 ~ 最晚日期重算。
+        """
         scenic = str(body.get("scenic") or "").strip()
+        start, end = str(body.get("start") or ""), str(body.get("end") or "")
         dates = sorted({str(d) for d in (body.get("dates") or [])})
-        if not scenic or not dates or not all(re.fullmatch(r"\d{8}", d) for d in dates):
-            raise ApiError(400, "要选景区和要修复的日期（yyyyMMdd）")
+        if not start and dates:
+            start, end = dates[0], dates[-1]
+        end = end or start
+        if not scenic or not all(re.fullmatch(r"\d{8}", d) for d in (start, end)) or start > end:
+            raise ApiError(400, "要选景区和要重算的日期区间（yyyyMMdd）")
         # 推送没开 / 没配地址：只重算写库，不推（否则 run 会因为没地址直接退出，什么都没修）
         push = ",".join(t for t in str(body.get("push_tables") or "drill,macro").split(",") if t) \
             if body.get("push", True) and self.push_ready() else ""
         try:
-            argv, title = build_run_argv({"scenics": scenic, "date_mode": "range", "start_date": dates[0],
-                                          "end_date": dates[-1], "rerun_days": 0, "push": push,
+            argv, title = build_run_argv({"scenics": scenic, "date_mode": "range", "start_date": start,
+                                          "end_date": end, "rerun_days": 0, "push": push,
                                           "verbose": True})
         except ValueError as e:
             raise ApiError(400, str(e))
         run_id = self.runner.submit("run", argv, "数据修复 · " + title)
-        span = dates[0] if dates[0] == dates[-1] else f"{dates[0]}~{dates[-1]}"
-        self.store.add_event(f"数据质量修复：{scenic} {span}（{len(dates)} 天有问题）已提交执行 #{run_id}"
+        span = start if start == end else f"{start}~{end}"
+        bad = int(body.get("bad_days") or len(dates) or 0)
+        self.store.add_event(f"数据质量修复：{scenic} 整段重算 {span}"
+                             + (f"（{bad} 天有问题）" if bad else "") + f"，已提交执行 #{run_id}"
                              + ("，修复后推送" if push else "，不推送"))
-        return {"run_id": run_id, "start": dates[0], "end": dates[-1], "push": bool(push)}
+        return {"run_id": run_id, "start": start, "end": end, "push": bool(push)}
 
     # ------------------------------------------------------------ 指标查看
     def metric_scenics(self) -> List[dict]:
