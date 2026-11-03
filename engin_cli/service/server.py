@@ -235,6 +235,8 @@ class App:
                 "tables": cfg["tables"].split(",") if cfg["tables"] else [],
                 "push": cfg["push"].split(",") if cfg["push"] and ps["enabled"] else [],
                 "push_off": not ps["enabled"], "next_fires": fires,
+                # 要推送却没配推送地址：engin_cli 会直接拒绝启动（整次执行失败），页面上提前提示
+                "push_no_url": bool(cfg["push"] and ps["enabled"] and not self.push_ready()),
                 "scheduler_on": self.scheduler.enabled if self.scheduler else False}
 
     # ------------------------------------------------------------ 定时
@@ -268,8 +270,9 @@ class App:
                 "table_names": st.push_table_names or {}, "log_dir": self._push_log_dir()}
 
     def save_push_settings(self, body: dict) -> dict:
+        """只改传进来的字段（例如只关总开关），其余保持原样。"""
         try:
-            ps = normalize_push_settings(body)
+            ps = normalize_push_settings({**self.runner.push_settings(), **(body or {})})
         except (ValueError, TypeError) as e:
             raise ApiError(400, str(e))
         old = self.runner.push_settings()
@@ -493,6 +496,30 @@ class App:
                            f"min(travel_date) first_date, max(travel_date) last_date "
                            f"from {self._ads(TABLE_MACRO)} group by scenic_id order by scenic_id")
 
+    def scenic_options(self) -> List[dict]:
+        """景区下拉的选项：库里大盘表有数据的景区 + 本地有待补推 CSV 的景区（库连不上也能列本地的）。"""
+        from ..loader import TABLE_DRILL_ANALYSIS, TABLE_MACRO, TABLE_CORE, TABLE_PLATFORM, \
+            TABLE_DIMENSION, TABLE_CONTENT
+        out: Dict[str, dict] = {}
+        db_error = ""
+        try:
+            for r in self.metric_scenics():
+                out[str(r["scenic_id"])] = {"scenic_id": str(r["scenic_id"]), "scenic_name": r.get("scenic_name") or "",
+                                            "last_date": r.get("last_date"), "has_csv": False}
+        except ApiError as e:
+            db_error = str(e)
+        base = getattr(self.settings, "output_dir", "") or "output"
+        base = base if os.path.isabs(base) else os.path.join(APP_ROOT, base)
+        tables = {f"{t}.csv" for t in (TABLE_CORE, TABLE_PLATFORM, TABLE_DIMENSION, TABLE_CONTENT,
+                                       TABLE_DRILL_ANALYSIS, TABLE_MACRO)}
+        if os.path.isdir(base):
+            for d in sorted(os.listdir(base)):
+                full = os.path.join(base, d)
+                if os.path.isdir(full) and tables & set(os.listdir(full)):
+                    out.setdefault(d, {"scenic_id": d, "scenic_name": "", "last_date": None, "has_csv": False})
+                    out[d]["has_csv"] = True
+        return {"items": sorted(out.values(), key=lambda x: x["scenic_id"]), "db_error": db_error}
+
     def metric_cell(self, scenic: str, date: str = "", granularity: str = "td") -> dict:
         from ..loader import TABLE_MACRO
         if not scenic:
@@ -632,6 +659,7 @@ def _route_table(app: App):
         ("POST", r"/api/quality/check", lambda m, q, b: app.quality_check(b)),
         ("POST", r"/api/quality/repair", lambda m, q, b: app.quality_repair(b)),
         ("GET", r"/api/metrics/scenics", lambda m, q, b: app.metric_scenics()),
+        ("GET", r"/api/scenics", lambda m, q, b: app.scenic_options()),
         ("GET", r"/api/metrics/cell", lambda m, q, b: app.metric_cell(
             q1(q, "scenic"), q1(q, "date"), q1(q, "granularity", "td"))),
         ("GET", r"/api/metrics/trend", lambda m, q, b: app.metric_trend(

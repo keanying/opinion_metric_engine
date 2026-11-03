@@ -1,5 +1,5 @@
 import { ref, reactive, onMounted } from 'vue'
-import { api, todayYmd, notify } from '../api.js'
+import { api, todayYmd, notify, confirmBox } from '../api.js'
 import { TaskBody, blankConfig } from './tasks.js'
 
 export default {
@@ -21,7 +21,8 @@ export default {
       catch (e) { notify(e.message, 'err') }
     }
     const doClean = async () => {
-      if (!confirm(`删除 ${cleanDays.value} 天前的执行记录、日志和调度日志？`)) return
+      if (!await confirmBox({ type: 'danger', title: '清理执行记录', okText: '确认清理',
+        message: `删除 ${cleanDays.value} 天以前的执行记录、日志文件和调度日志，删除后不能恢复。` })) return
       try { const r = await api('/api/maint/cleanup', { method: 'POST', body: { days: cleanDays.value } })
         notify(`已删除 ${r.deleted_runs} 条记录、${r.deleted_files} 个文件`) } catch (e) { notify(e.message, 'err') }
     }

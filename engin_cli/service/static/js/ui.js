@@ -220,6 +220,80 @@ export const DateRange = {
       @update:model-value="v => { $emit('update:end', v); $emit('change') }"/></span>`,
 }
 
+// ── 景区选择：可搜索（编号 / 名称），多选或单选；值是逗号分隔的景区编号 ─────────────────────
+let _scenicCache = null
+export function loadScenics(force = false) {
+  if (!_scenicCache || force) {
+    _scenicCache = fetch('/api/scenics', { headers: { 'X-Requested-With': 'omx' } })
+      .then(r => r.ok ? r.json() : { items: [] }).then(d => d.items || []).catch(() => [])
+  }
+  return _scenicCache
+}
+export const ScenicPicker = {
+  components: { Icon },
+  props: { modelValue: String, single: Boolean, placeholder: { type: String, default: '全部景区' },
+           csvOnly: Boolean, width: { type: String, default: '100%' } },
+  emits: ['update:modelValue', 'change'],
+  setup(p, { emit }) {
+    const el = ref(null), inp = ref(null), pos = ref(null), kw = ref(''), opts = ref([])
+    loadScenics().then(x => { opts.value = x })
+    const picked = computed(() => String(p.modelValue || '').split(',').map(x => x.trim()).filter(Boolean))
+    const nameOf = id => (opts.value.find(o => o.scenic_id === id) || {}).scenic_name || ''
+    const shown = computed(() => {
+      const k = kw.value.trim().toLowerCase()
+      return opts.value.filter(o => (!p.csvOnly || o.has_csv) &&
+        (!k || o.scenic_id.toLowerCase().includes(k) || (o.scenic_name || '').toLowerCase().includes(k))).slice(0, 200)
+    })
+    const set = ids => { const v = ids.join(','); emit('update:modelValue', v); emit('change', v) }
+    const close = () => { pos.value = null; kw.value = ''; window.removeEventListener('mousedown', outside, true); window.removeEventListener('scroll', onScroll, true) }
+    const outside = e => { if (!e.target.closest('.sp-pop') && !el.value.contains(e.target)) close() }
+    const onScroll = e => { if (!e.target.closest || !e.target.closest('.sp-pop')) close() }
+    const open = () => {
+      if (pos.value) return
+      const r = el.value.getBoundingClientRect(), below = window.innerHeight - r.bottom > 300
+      pos.value = { left: r.left, width: Math.max(r.width, 300), top: below ? r.bottom + 6 : null, bottom: below ? null : window.innerHeight - r.top + 6 }
+      window.addEventListener('mousedown', outside, true); window.addEventListener('scroll', onScroll, true)
+      setTimeout(() => inp.value && inp.value.focus())
+    }
+    onUnmounted(close)
+    const toggle = id => {
+      if (p.single) { set([id]); close(); return }
+      set(picked.value.includes(id) ? picked.value.filter(x => x !== id) : [...picked.value, id])
+    }
+    const remove = id => set(picked.value.filter(x => x !== id))
+    const enter = () => {                       // 列表里没有的编号也能直接回车加上
+      const k = kw.value.trim()
+      if (!k) return
+      const hit = shown.value.find(o => o.scenic_id === k) || (shown.value.length === 1 ? shown.value[0] : null)
+      toggle(hit ? hit.scenic_id : k); kw.value = ''
+    }
+    const backspace = () => { if (!kw.value && picked.value.length && !p.single) remove(picked.value[picked.value.length - 1]) }
+    return { el, inp, pos, kw, picked, shown, nameOf, open, close, toggle, remove, enter, backspace, set }
+  },
+  template: `
+  <div ref="el" class="sp" :class="{on: !!pos}" :style="{width}" @click="open">
+    <span v-for="id in picked" :key="id" class="sp-chip" :title="id">{{ nameOf(id) || id }}<small v-if="nameOf(id)">{{ id }}</small>
+      <a v-if="!single" @click.stop="remove(id)">×</a></span>
+    <span v-if="!picked.length" class="sp-ph">{{ placeholder }}</span>
+    <span class="grow"></span>
+    <a v-if="picked.length" class="sp-x" title="清空" @click.stop="set([])">×</a>
+    <Icon v-else name="down" :size="15"/>
+    <Teleport to="body"><div v-if="pos" class="sp-pop" @click.stop
+        :style="{left: pos.left + 'px', width: pos.width + 'px', top: pos.top != null ? pos.top + 'px' : null, bottom: pos.bottom != null ? pos.bottom + 'px' : null}">
+      <div class="sp-search"><Icon name="search" :size="15"/><input ref="inp" v-model="kw" placeholder="搜索景区名称 / 编号，回车添加"
+        @keydown.enter.prevent="enter" @keydown.backspace="backspace" @keydown.esc="close"/></div>
+      <div class="sp-list">
+        <button v-for="o in shown" :key="o.scenic_id" :class="{on: picked.includes(o.scenic_id)}" @click="toggle(o.scenic_id)">
+          <i class="sp-check"><Icon v-if="picked.includes(o.scenic_id)" name="tick" :size="12" :sw="3"/></i>
+          <span class="grow"><b>{{ o.scenic_name || o.scenic_id }}</b><small>{{ o.scenic_id }}</small></span>
+          <em v-if="o.has_csv" title="本地有算好的 CSV，可以补推">有 CSV</em></button>
+        <div v-if="!shown.length" class="sp-empty">{{ kw ? '没有匹配的景区，回车直接按编号添加' : '没有景区' }}</div>
+      </div>
+      <div v-if="!single" class="sp-foot"><span>已选 {{ picked.length }} 个</span><a @click="set([])">清空 = {{ placeholder }}</a><a @click="close">完成</a></div>
+    </div></Teleport>
+  </div>`,
+}
+
 // ── 开关 ──────────────────────────────────────────────────────────────
 export const Switch = {
   props: { modelValue: Boolean, disabled: Boolean, size: String },
@@ -230,5 +304,5 @@ export const Switch = {
 
 // 全局注册（app.js 调用）
 export function installUI(app) {
-  for (const [n, c] of Object.entries({ Icon, Tag, StatusTag, Avatar, Empty, STable, Switch, Tip, DatePicker, DateRange })) app.component(n, c)
+  for (const [n, c] of Object.entries({ Icon, Tag, StatusTag, Avatar, Empty, STable, Switch, Tip, DatePicker, DateRange, ScenicPicker })) app.component(n, c)
 }

@@ -1,5 +1,5 @@
 import { ref, reactive, onMounted, onUnmounted, computed, watch } from 'vue'
-import { api, TABLES, TABLE_LABEL, notify, sched, refreshSched, search } from '../api.js'
+import { api, TABLES, TABLE_LABEL, notify, sched, refreshSched, search, confirmBox } from '../api.js'
 
 const DATE_MODES = [['today', '当天'], ['yesterday', '昨天'], ['recent', '近 N 天'], ['range', '固定区间']]
 const KEYS = TABLES.map(t => t.key)
@@ -65,7 +65,7 @@ export const TaskBody = {
         <div class="frow" v-if="cfg.date_mode==='range'"><label>区间</label>
           <DateRange v-model:start="cfg.start_date" v-model:end="cfg.end_date" :clearable="false" /></div>
         <div class="frow"><label>景区</label>
-          <input v-model="cfg.scenics" class="grow" placeholder="景区编号，逗号分隔；不填 = 有评论的全部景区" /></div>
+          <ScenicPicker v-model="cfg.scenics" placeholder="全部景区（有评论的都跑）" /></div>
       </div>
     </div>
 
@@ -146,7 +146,8 @@ export const TaskList = {
       catch (e) { notify(e.message, 'err') }
     }
     const remove = async t => {
-      if (!confirm(`删除任务「${t.name}」？执行记录会保留。`)) return
+      if (!await confirmBox({ type: 'danger', title: '删除任务', okText: '删除',
+        message: '删除后这个任务不再定时执行；已有的执行记录会保留。', items: [['任务', t.name], ['定时', (t.schedule.times || []).join('、') || '仅手动']] })) return
       try { await api(`/api/tasks/${t.id}`, { method: 'DELETE' }); notify('已删除'); load() }
       catch (e) { notify(e.message, 'err') }
     }
@@ -292,6 +293,8 @@ export const TaskEdit = {
             <code class="cmd block">{{ preview.command }}</code>
           </div>
           <div v-else-if="preview" class="alert red">{{ preview.error }}</div>
+          <div v-if="preview && preview.push_no_url" class="alert red small pv-warn">还没配推送地址：勾了推送的话，执行会直接失败。
+            <a href="#/push">去推送页配置</a>，或者先不勾推送。</div>
         </div>
         <EventLog v-if="id" :events="events" sub="这个任务的触发 / 跳过记录" />
       </aside>

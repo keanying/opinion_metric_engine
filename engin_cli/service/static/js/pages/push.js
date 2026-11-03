@@ -105,7 +105,7 @@ export default {
         <div class="card sect">
           <div class="sect-head"><h3>补推<Tip text="不重算，把之前算好、推失败的 CSV 再推一遍"/></h3></div>
           <div class="sect-body">
-            <div class="frow"><label>景区</label><input v-model="re.scenics" class="grow" placeholder="不填 = 全部" /></div>
+            <div class="frow"><label>景区</label><ScenicPicker v-model="re.scenics" placeholder="全部景区" /></div>
             <div class="frow"><label>表</label><div class="chips">
               <button v-for="t in TABLES" :key="t.key" class="chip-btn" :class="{on: re.tables.split(',').includes(t.key)}"
                 @click="toggleRe(t.key)">{{ t.label }}</button></div></div>

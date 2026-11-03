@@ -89,6 +89,15 @@ export const search = reactive({ q: '', n: 0 })      // 顶栏搜索 → 任务�
 export async function refreshSched() {
   try { sched.data = await api('/api/scheduler') } catch (e) { /* 忽略 */ }
 }
+// 确认弹窗（替代浏览器自带的 confirm）：await confirmBox({ title, message, items, okText, type })
+// type：danger 删除类 / warn 中断类 / primary 普通；items：[[标签, 值], …] 要做的事情摘要
+export const dialog = reactive({ cur: null })
+export function confirmBox(opts) {
+  return new Promise(resolve => {
+    dialog.cur = { type: 'primary', okText: '确定', cancelText: '取消', items: [], ...opts, at: Date.now(),
+                   done: v => { dialog.cur = null; resolve(v) } }
+  })
+}
 export const WEEK = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
 export const toast = reactive({ items: [] })
 export function notify(text, type = 'ok') {

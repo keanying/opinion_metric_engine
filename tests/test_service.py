@@ -601,6 +601,9 @@ def test_push_settings_and_logs_api(server, tmp_path, monkeypatch):
     code, v = _call(base, "/api/push/settings", "PUT", {"enabled": False, "push_batch_size": "100"})
     assert not v["settings"]["enabled"] and v["effective"]["push_batch_size"] == 100
     assert "推送总开关已关闭" in app.store.list_events()[0]["text"]
+    code, v = _call(base, "/api/push/settings", "PUT", {"push_url": "https://p.example/sync"})
+    code, v = _call(base, "/api/push/settings", "PUT", {"enabled": True})          # 只改总开关
+    assert v["settings"]["push_url"] == "https://p.example/sync" and v["settings"]["push_batch_size"] == 100
     d = tmp_path / "pl"
     d.mkdir()
     (d / "push_20261102.log").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in [
@@ -625,6 +628,9 @@ def test_scheduler_api_and_task_preview(server):
                                                          "schedule": {"times": ["08:10", "20:10"]}})
     assert pv["ok"] and pv["tables"] == ["drill"] and pv["push"] == ["drill"] and len(pv["next_fires"]) == 3
     assert "--tables drill" in pv["command"]
+    assert pv["push_no_url"] is True                                    # 测试配置没有推送地址
+    code, pv2 = _call(base, "/api/tasks/preview", "POST", {"config": {"push": ""}})
+    assert pv2["push_no_url"] is False
     code, pv = _call(base, "/api/tasks/preview", "POST", {"config": {"date_mode": "x"}})
     assert not pv["ok"] and "日期方式" in pv["error"]
     code, ov = _call(base, "/api/overview")

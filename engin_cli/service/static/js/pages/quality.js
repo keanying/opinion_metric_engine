@@ -1,5 +1,5 @@
 import { ref, reactive, onMounted, computed } from 'vue'
-import { api, todayYmd, notify, CHANNELS } from '../api.js'
+import { api, todayYmd, notify, CHANNELS, confirmBox } from '../api.js'
 import { Ring } from '../charts.js'
 
 export default {
@@ -29,7 +29,10 @@ export default {
       const r = chk.result
       if (!dates.length) return
       const span = dates.length === 1 ? dates[0] : `${dates[0]} ~ ${dates[dates.length - 1]}`
-      if (!confirm(`按当前源数据重算 ${r.scenic} ${span}（${dates.length} 天有问题）并写库${chk.push ? '、推送' : ''}？`)) return
+      const fd = d => `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6)}`
+      if (!await confirmBox({ title: '修复数据', okText: '开始修复', message: '按当前源数据把这几天重新计算一遍，覆盖库里的旧数据。',
+        items: [['景区', r.scenic], ['日期', dates.length === 1 ? fd(dates[0]) : `${fd(dates[0])} ~ ${fd(dates[dates.length - 1])}`],
+                ['有问题', `${dates.length} 天`], ['写库', '是'], ['推送', chk.push ? '是（下钻表、大盘表）' : '否']] })) return
       try {
         const x = await api('/api/quality/repair', { method: 'POST', body: { scenic: r.scenic, dates, push: chk.push } })
         for (const d of dates) chk.repaired[d] = x.run_id
@@ -67,9 +70,7 @@ export default {
         <div class="sect-head"><h3>数据检测<Tip wide text="只读检测库里大盘表已有的数据：区间相同的行指标一致（td@T-1 = latest_1d@T …）、各周期评论数 = 每天 td 之和。检测出来哪天不对，可以点「修复」按当前源数据把那几天重算一遍"/></h3></div>
         <div class="sect-body stick">
           <div class="frow">
-            <select v-if="scenics.length" v-model="chk.scenic" class="w240">
-              <option v-for="s in scenics" :key="s.scenic_id" :value="s.scenic_id">{{ s.scenic_name || s.scenic_id }}（{{ s.scenic_id }}）</option></select>
-            <input v-else v-model="chk.scenic" class="w240" placeholder="景区编号" />
+            <ScenicPicker v-model="chk.scenic" single placeholder="选择景区" width="300px" />
             <DateRange v-model:start="chk.start" v-model:end="chk.end" :clearable="false" :max="today" />
             <button class="btn primary" :disabled="chk.running || !chk.scenic" @click="check"><Icon name="shield" :size="14"/>{{ chk.running ? '检测中…' : '开始检测' }}</button>
           </div>

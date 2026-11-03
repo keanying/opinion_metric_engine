@@ -52,12 +52,8 @@ export default {
     const barRows = computed(() => (d.value?.daily || []).map(x => ({ label: x.date.slice(5).replace('-', '/'), values: x })))
     const fmtDur = v => !v ? '0s' : v < 60 ? `${v}s` : `${Math.floor(v / 60)}m${Math.round(v % 60)}s`
     const next = computed(() => d.value?.upcoming?.[0] || null)
-    const cols = [
-      { key: 'title', title: '执行', width: 340 }, { key: 'trigger', title: '触发', width: 110 },
-      { key: 'status', title: '状态', width: 110 }, { key: 'created_at', title: '时间', width: 150 },
-      { key: 'dur', title: '耗时', width: 90 }, { key: 'op', title: '', width: 56, align: 'r' }]
     return { d, err, wk, last7, rateSeries, durPts, avgDur, durDelta, series, barRows, fmtDur, next, dayTotal,
-             cols, TRIGGER, KIND, duration }
+             TRIGGER, KIND, duration }
   },
   template: `
   <div>
@@ -121,7 +117,7 @@ export default {
           <h3>近 14 天执行次数</h3>
           <p>成功 <b>{{ wk.s }}</b> 次，失败 / 回退 <b>{{ wk.bad }}</b> 次（近 7 天），
             比上周{{ wk.bad <= wk.pbad ? '少' : '多' }} {{ Math.abs(wk.bad - wk.pbad) }} 次。</p>
-          <div class="legend"><template v-for="s in series.slice().reverse()" :key="s.key"><i :style="{background: s.color}"></i><span>{{ s.label }}</span></template></div>
+          <div class="legend"><span v-for="s in series.slice().reverse()" :key="s.key" class="lg-item"><i :style="{background: s.color}"></i>{{ s.label }}</span></div>
           <router-link to="/runs" class="btn primary sm">执行记录 <Icon name="arrowR" :size="13" :sw="2.4"/></router-link>
         </div>
         <div class="w-chart"><PillBars :rows="barRows" :series="series" :height="150" :bar-width="10" :fmt="v => v + ' 次'" /></div>
@@ -144,19 +140,5 @@ export default {
       </div>
     </div>
 
-    <div v-if="d" class="card">
-      <div class="card-head"><h3>最近执行</h3><router-link to="/runs" class="btn light sm">全部记录</router-link></div>
-      <STable :columns="cols" :data="d.recent" clickable empty="还没有执行记录" @row-click="r => $router.push('/runs/'+r.id)">
-        <template #title="{ row }"><span class="s-name"><Avatar square :icon="row.kind === 'push' ? 'send' : row.kind === 'notify' ? 'bell' : 'layers'"
-          :color="row.kind === 'push' ? 'cyan' : row.kind === 'notify' ? 'amber' : 'indigo'"/>
-          <span class="s-ell" :title="(row.task_name || '临时执行') + ' · ' + row.title"><b>{{ row.task_name || '临时执行' }}</b>
-            <small>#{{ row.id }} · {{ row.title }}</small></span></span></template>
-        <template #trigger="{ row }"><Avatar :text="TRIGGER[row.trigger]" :color="row.trigger==='schedule' ? 'violet' : 'light-blue'"/> {{ TRIGGER[row.trigger] }}</template>
-        <template #status="{ row }"><StatusTag :status="row.status"/></template>
-        <template #created_at="{ row }">{{ row.created_at.slice(0,16) }}</template>
-        <template #dur="{ row }">{{ duration(row.started_at, row.finished_at) || '-' }}</template>
-        <template #op="{ row }"><button class="s-btn-icon" title="查看"><Icon name="more" :size="18" :sw="2.6"/></button></template>
-      </STable>
-    </div>
   </div>`,
 }

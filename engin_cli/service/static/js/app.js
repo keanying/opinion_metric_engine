@@ -1,6 +1,6 @@
 // 入口：外框 + 图标侧栏 + 顶栏 + 极简 hash 路由（#/tasks、#/runs/12 …）。新增页面：在 ROUTES 里加一行即可。
 import { createApp, reactive, computed, h, ref, onMounted, onUnmounted } from 'vue'
-import { toast, sched, refreshSched, search } from './api.js'
+import { toast, sched, refreshSched, search, dialog } from './api.js'
 import { installUI } from './ui.js'
 import Overview from './pages/overview.js'
 import { TaskList, TaskEdit } from './pages/tasks.js'
@@ -67,8 +67,16 @@ const App = {
       return { cls: 'green', text: d.next ? `调度运行中 · 下次 ${d.next.at.slice(5)}${run}` : `调度运行中 · 暂无定时${run}` }
     })
     const kw = ref('')
+    // 弹窗键盘：Esc 取消、Enter 确认
+    const onKey = e => {
+      if (!dialog.cur) return
+      if (e.key === 'Escape') { e.preventDefault(); dialog.cur.done(false) }
+      // 刚弹出来的 300ms 内不认 Enter：按回车点按钮打开弹窗时，同一下回车别顺手把它确认了
+      else if (e.key === 'Enter' && !e.repeat && Date.now() - dialog.cur.at > 300) { e.preventDefault(); dialog.cur.done(true) }
+    }
+    window.addEventListener('keydown', onKey)
     const doSearch = () => { search.q = kw.value.trim(); search.n++; kw.value = ''; location.hash = '/tasks' }
-    return { current, route, NAV, toast, pill, kw, doSearch }
+    return { current, route, NAV, toast, pill, kw, doSearch, dialog }
   },
   template: `
   <div class="frame">
@@ -97,7 +105,21 @@ const App = {
       </aside>
       <main class="main"><component :is="current.r.comp" v-bind="current.props" :key="route.path" /></main>
     </div>
-    <div class="toasts"><div v-for="t in toast.items" :key="t.id" class="toast" :class="t.type">{{ t.text }}</div></div>
+    <div class="toasts"><TransitionGroup name="toast">
+      <div v-for="t in toast.items" :key="t.id" class="toast" :class="t.type">
+        <span class="toast-ico"><Icon :name="t.type === 'err' ? 'clear' : 'tickCircle'" :size="18" :sw="2.2"/></span>
+        <span class="toast-text">{{ t.text }}</span></div></TransitionGroup></div>
+    <Transition name="dlg"><div v-if="dialog.cur" class="dlg-mask" @mousedown.self="dialog.cur.done(false)">
+      <div class="dlg" :class="dialog.cur.type" role="alertdialog" aria-modal="true">
+        <span class="dlg-ico"><Icon :name="{danger: 'del', warn: 'alert'}[dialog.cur.type] || 'tool'" :size="22" :sw="2"/></span>
+        <h3>{{ dialog.cur.title }}</h3>
+        <p v-if="dialog.cur.message">{{ dialog.cur.message }}</p>
+        <dl v-if="dialog.cur.items.length" class="dlg-items"><template v-for="it in dialog.cur.items" :key="it[0]"><dt>{{ it[0] }}</dt><dd>{{ it[1] }}</dd></template></dl>
+        <div class="dlg-btns">
+          <button class="btn light" @click="dialog.cur.done(false)">{{ dialog.cur.cancelText }}</button>
+          <button ref="okBtn" class="btn" :class="dialog.cur.type === 'danger' ? 'danger-solid' : dialog.cur.type === 'warn' ? 'warn-solid' : 'primary'"
+            @click="dialog.cur.done(true)">{{ dialog.cur.okText }}</button></div>
+      </div></div></Transition>
   </div>`,
 }
 
