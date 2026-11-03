@@ -20,7 +20,7 @@ import pytest
 import engin_cli.cli as cli
 import engin_cli.pipeline as P
 from engin_cli import metric_calc_domain as D
-from engin_cli.loader import TABLE_CORE, TABLE_MACRO
+from engin_cli.loader import TABLE_CONTENT, TABLE_CORE, TABLE_MACRO
 from engin_cli.notify import build_text, send_feishu
 from engin_cli.pipeline import run
 from engin_cli.settings import EtlSettings
@@ -204,6 +204,25 @@ def test_no_data_never_reaches_the_loader(tmp_path, monkeypatch):
     res = run(_settings(tmp_path, quality_gate=False), ["20261102"],
               comments_df=_rows().iloc[0:0])
     assert not res.ok and not loaded
+
+
+def test_no_comment_on_target_dates_is_not_a_quality_failure(tmp_path, monkeypatch, feishu):
+    """景区按取数区间挑出来，目标日期里一条评论都没有：内容表 / 下钻表为空是正常的，不能判不通过、回退。"""
+    url, fs = feishu
+    loaded = _spy_load(monkeypatch)
+    old = _rows()
+    old = old[old["publish_time"] < "2026-10-03"]               # 最后一条评论 10-02，离 11-02 超过 30 天
+    res = run(_settings(tmp_path, url, write_db=True), ["20261102"], comments_df=old)
+    assert res.ok and not res.quality_blocked and res.quality_attempts == 1, res.errors
+    assert res.tables[TABLE_CORE]["comment_count"].sum() == 0  # 当天确实没评论
+    assert res.tables[TABLE_CONTENT].empty                     # 近 30 天没词，内容表为空
+    assert loaded and not fs.bodies                            # 照常写库，不发通知
+
+
+def test_empty_content_with_recent_words_still_fails():
+    from engin_cli.validate import validate_content
+    empty = pd.DataFrame()
+    assert validate_content(empty, empty, expected=True) and not validate_content(empty, empty, expected=False)
 
 
 def test_no_webhook_means_no_notification(tmp_path, monkeypatch):
