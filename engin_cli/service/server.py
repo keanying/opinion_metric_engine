@@ -189,15 +189,16 @@ class App:
         out: Dict[str, dict] = {}
         try:
             self.store.get_kv("scheduler", {})
-            out["store"] = {"key": "store", "label": "系统表库", "ok": True, "detail": self.store.describe()}
+            main, sub = self.store.describe_parts()
+            out["store"] = {"key": "store", "label": "系统表库", "ok": True, "detail": main, "sub": sub}
         except Exception as e:                        # noqa: BLE001
             out["store"] = {"key": "store", "label": "系统表库", "ok": False,
                             "detail": f"读写系统表失败：{str(e)[:200]}（任务、执行记录存不进去）"}
         c = self.settings.db
-        where = f"MySQL {c.host}:{c.port} 库 {c.ads_db() or c.database}"
+        where = f"MySQL {c.host}:{c.port} · 库 {c.ads_db() or c.database}"
         try:
             self._query("select 1 as ok")
-            out["db"] = {"key": "db", "label": "指标库", "ok": True, "detail": where}
+            out["db"] = {"key": "db", "label": "指标库", "ok": True, "detail": where, "sub": "跑批、指标查看、数据检测都用这个库"}
         except ApiError as e:
             out["db"] = {"key": "db", "label": "指标库", "ok": False,
                          "detail": f"{where} 连不上：{str(e)[:200]}（跑批、指标查看、数据检测都用不了）"}

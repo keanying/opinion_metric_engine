@@ -31,6 +31,7 @@ TABLE_SETTING = "dim_trf_social_opinion_service_setting_f"
 TABLE_RUN = "dwd_trf_social_opinion_task_run_di"
 TABLE_SCHEDULE_LOG = "dwd_trf_social_opinion_schedule_log_di"
 TABLE_QUALITY = "dwd_trf_social_opinion_quality_check_di"
+SYSTEM_TABLES = (TABLE_TASK, TABLE_SETTING, TABLE_RUN, TABLE_SCHEDULE_LOG, TABLE_QUALITY)
 
 DDL_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
                         "sql", "sys_trf_social_opinion_service_ddl.sql")
@@ -163,7 +164,15 @@ class Store:
         if self.kind == "sqlite":
             return f"SQLite {self.path}"
         c = self._cfg
-        return f"MySQL {c.host}:{c.port} 库 {self.database}（{TABLE_TASK} 等 4 张系统表）"
+        return f"MySQL {c.host}:{c.port} 库 {self.database}（{TABLE_TASK} 等 {len(SYSTEM_TABLES)} 张系统表）"
+
+    def describe_parts(self) -> tuple:
+        """系统状态面板用：(主行：在哪, 副行：几张什么表)。"""
+        names = "任务、设置、执行记录、调度日志、质量检测记录"
+        if self.kind == "sqlite":
+            return f"SQLite {os.path.basename(self.path)}", f"{len(SYSTEM_TABLES)} 张系统表：{names}"
+        c = self._cfg
+        return f"MySQL {c.host}:{c.port} · 库 {self.database}", f"{len(SYSTEM_TABLES)} 张系统表：{names}"
 
     # ------------------------------------------------------------ 连接
     def _connect(self):
@@ -182,9 +191,7 @@ class Store:
         rows = self._all("select table_name as t from information_schema.tables where table_schema=?",
                          (self.database,))
         have = {r["t"] for r in rows}
-        missing = [f"{self.database}.{t}" for t in (TABLE_TASK, TABLE_SETTING, TABLE_RUN, TABLE_SCHEDULE_LOG,
-                                                    TABLE_QUALITY)
-                   if t not in have]
+        missing = [f"{self.database}.{t}" for t in SYSTEM_TABLES if t not in have]
         if not missing:
             return
         log.warning("系统表不存在，自动建表：%s", "、".join(missing))
