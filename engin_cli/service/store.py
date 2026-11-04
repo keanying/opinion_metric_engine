@@ -36,6 +36,11 @@ TABLE_QUALITY = "dwd_trf_social_opinion_quality_check_di"
 TABLE_RUN_LOG = "dwd_trf_social_opinion_task_run_log_di"
 SYSTEM_TABLES = (TABLE_TASK, TABLE_SETTING, TABLE_RUN, TABLE_SCHEDULE_LOG, TABLE_QUALITY, TABLE_RUN_LOG)
 RUN_LOG_MAX = 4 * 1024 * 1024                 # 库里最多存日志的最后 4MB
+# 列表 / 概览只要这些列：summary_json（各景区结果、提示、错误，常常几十 KB 一条）和命令不取，
+# 景区成败数另外按 run_id 取一次 summary 算出来、缓存（跑完的执行不会再变）
+RUN_LIGHT = ("run_id, travel_date, task_id, task_name, run_type, trigger_type, run_status, run_title, "
+             "create_time, start_time, finish_time, exit_code, log_path, run_message")
+RUN_DONE = ("success", "failed", "blocked", "cancelled")
 
 DDL_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
                         "sql", "sys_trf_social_opinion_service_ddl.sql")
@@ -93,6 +98,14 @@ def now_str() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _scenic_stats(summary: dict) -> Dict[str, int]:
+    """执行摘要 → 景区数、失败数、质量回退数、通过数（列表 / 概览只要这几个数）。"""
+    sc = (summary or {}).get("scenics") or []
+    blocked = sum(1 for x in sc if x.get("quality_blocked"))
+    return {"scenic_total": len(sc), "scenic_failed": sum(1 for x in sc if not x.get("ok")),
+            "quality_blocked": blocked, "scenic_ok": sum(1 for x in sc if x.get("ok") and not x.get("quality_blocked"))}
+
+
 def _ymd(ts: str) -> int:
     return int(ts[:10].replace("-", ""))
 
@@ -133,6 +146,8 @@ class Store:
     def __init__(self, path: Optional[str] = None, *, mysql_cfg=None, database: str = "",
                  auto_create: bool = True):
         self._lock = threading.RLock()
+        self._stats: Dict[int, Dict[str, int]] = {}     # 跑完的执行：run_id → 景区成败数（不会再变，缓存）
+        self._live: Dict[int, Dict[str, int]] = {}
         if mysql_cfg is None:
             self.kind = "sqlite"
             self.path = path or ":memory:"
@@ -392,16 +407,34 @@ class Store:
              "title": r["run_title"], "created_at": _ts(r["create_time"]),
              "started_at": _ts(r["start_time"]), "finished_at": _ts(r["finish_time"]),
              "exit_code": r["exit_code"], "message": r["run_message"]}
-        summary = _loads(r["summary_json"], {})
-        scenics = summary.get("scenics") or []
-        d["scenic_total"] = len(scenics)
-        d["scenic_failed"] = sum(1 for s in scenics if not s.get("ok"))
-        d["quality_blocked"] = sum(1 for s in scenics if s.get("quality_blocked"))
+        summary = _loads(r["summary_json"], {}) if "summary_json" in r else None
+        d.update(_scenic_stats(summary) if summary is not None else r.get("_stats") or _scenic_stats({}))
         if full:
             d["command"] = _loads(r["command_text"], [])
             d["summary"] = summary
             d["log_path"] = r["log_path"]
         return d
+
+    def _light(self, sql_where: str, params, tail: str = "") -> List[Dict[str, Any]]:
+        """执行记录列表：不取 summary / 命令；景区成败数从缓存拿，没缓存的一次查出来（跑完的才缓存）。"""
+        rows = self._all(f"select {RUN_LIGHT} from {self.t_run} where {sql_where} {tail}", params)
+        need = [int(r["run_id"]) for r in rows if int(r["run_id"]) not in self._stats]
+        for i in range(0, len(need), 500):
+            part = need[i:i + 500]
+            got = self._all(f"select run_id, run_status, summary_json from {self.t_run} where run_id in "
+                            f"({','.join('?' * len(part))})", part)
+            for g in got:
+                st = _scenic_stats(_loads(g["summary_json"], {}))
+                if g["run_status"] in RUN_DONE:
+                    self._stats[int(g["run_id"])] = st
+                else:
+                    self._live[int(g["run_id"])] = st
+        out = []
+        for r in rows:
+            rid = int(r["run_id"])
+            r = dict(r, _stats=self._stats.get(rid) or self._live.pop(rid, None))
+            out.append(self._run(r))
+        return out
 
     def create_run(self, kind: str, command: List[str], title: str, trigger: str,
                    task: Optional[dict] = None) -> int:
@@ -426,6 +459,7 @@ class Store:
             raise KeyError(f"执行记录没有这些字段：{bad}")
         cols = ", ".join(f"{RUN_COLS[k]}=?" for k in fields)
         self._exec(f"update {self.t_run} set {cols} where run_id=?", tuple(fields.values()) + (int(run_id),))
+        self._stats.pop(int(run_id), None)
 
     def get_run(self, run_id: int) -> Optional[Dict[str, Any]]:
         rows = self._all(f"select * from {self.t_run} where run_id=?", (int(run_id),))
@@ -433,7 +467,8 @@ class Store:
 
     def list_runs(self, status: str = "", task_id: Optional[int] = None, kind: str = "",
                   since: str = "", limit: int = 50, offset: int = 0,
-                  full: bool = False) -> Dict[str, Any]:
+                  full: bool = False, count: bool = True) -> Dict[str, Any]:
+        """count=False 不查总数（表大了 count(*) 慢，只要最近几条时不用）。"""
         where, params = ["1=1"], []
         if status:
             where.append("run_status=?")
@@ -448,23 +483,33 @@ class Store:
             where.append("travel_date>=?")
             params.append(_ymd(since))
         w = " and ".join(where)
-        total = self._all(f"select count(*) as n from {self.t_run} where {w}", params)[0]["n"]
-        rows = self._all(f"select * from {self.t_run} where {w} order by run_id desc limit ? offset ?",
-                         params + [int(limit), int(offset)])
-        return {"total": int(total), "items": [self._run(r, full=full) for r in rows]}
+        total = self._all(f"select count(*) as n from {self.t_run} where {w}", params)[0]["n"] if count else -1
+        if full:
+            rows = self._all(f"select * from {self.t_run} where {w} order by run_id desc limit ? offset ?",
+                             params + [int(limit), int(offset)])
+            return {"total": int(total), "items": [self._run(r, full=True) for r in rows]}
+        return {"total": int(total),
+                "items": self._light(w, params + [int(limit), int(offset)], "order by run_id desc limit ? offset ?")}
 
-    def runs_between(self, since: str) -> List[Dict[str, Any]]:
-        """since（'YYYY-MM-DD…'）当天及之后的执行记录，按分区字段 travel_date 过滤。"""
-        return [self._run(r, full=True) for r in
-                self._all(f"select * from {self.t_run} where travel_date>=? order by run_id", (_ymd(since),))]
+    def runs_between(self, since: str, full: bool = False) -> List[Dict[str, Any]]:
+        """since（'YYYY-MM-DD…'）当天及之后的执行记录，按分区字段 travel_date 过滤。
+        full=False 不取 summary / 命令（概览只要景区成败数）。"""
+        if full:
+            return [self._run(r, full=True) for r in
+                    self._all(f"select * from {self.t_run} where travel_date>=? order by run_id", (_ymd(since),))]
+        return self._light("travel_date>=?", (_ymd(since),), "order by run_id")
 
     def last_run_of(self, task_id: int) -> Optional[Dict[str, Any]]:
-        rows = self._all(f"select * from {self.t_run} where task_id=? order by run_id desc limit 1",
-                         (int(task_id),))
-        return self._run(rows[0]) if rows else None
+        return self.last_runs().get(int(task_id))
+
+    def last_runs(self) -> Dict[int, Dict[str, Any]]:
+        """每个任务最近一次执行（一条 SQL，不再每个任务查一次）。"""
+        rows = self._light(f"run_id in (select max(run_id) from {self.t_run} where task_id is not null group by task_id)", ())
+        return {int(r["task_id"]): r for r in rows}
 
     def mark_interrupted(self) -> int:
         """服务重启：上次没跑完的记录标成失败。"""
+        self._stats.clear()
         return self._exec(f"update {self.t_run} set run_status='failed', finish_time=?, "
                           f"run_message='服务重启，执行被中断' where run_status in ('queued','running')",
                           (now_str(),)).rowcount
