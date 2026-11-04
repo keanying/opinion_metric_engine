@@ -203,7 +203,9 @@ def build_run_argv(cfg: Dict[str, Any], today: Optional[dt.date] = None) -> Tupl
     """任务配置 → `engin_cli.cli run` 的参数（不含 --summary-json），以及一句话说明。"""
     cfg = normalize_config(cfg)
     start, end = task_dates(cfg, today)
-    argv = ["run", "--start-date", start, "--end-date", end, "--no-progress"]
+    # 不加 --no-progress：输出写进执行日志（不是终端），推送进度按行记录
+    # （开推、每 10% 一行、重试及原因、等待响应读秒、失败批次、结果），方便事后查
+    argv = ["run", "--start-date", start, "--end-date", end]
     if cfg["scenics"]:
         argv += ["--scenic", cfg["scenics"]]
     if cfg["rerun_days"] is not None:
@@ -256,7 +258,7 @@ def build_copy_steps(cfg: Dict[str, Any], start: str, end: str) -> List[Dict[str
     steps = []
     for c in cfg["copies"]:
         argv = ["mock", "--from-scenic", c["from_scenic"], "--to-scenic", c["to_scenic"],
-                "--to-name", c["to_name"], "--start-date", start, "--end-date", end, "--no-progress"]
+                "--to-name", c["to_name"], "--start-date", start, "--end-date", end]
         if cfg["tables"]:
             argv += ["--tables", cfg["tables"]]
         steps.append({"from_scenic": c["from_scenic"], "kind": "mock", "argv": argv,
@@ -278,7 +280,7 @@ def build_push_argv(scenics: str = "", tables: str = "", start: str = "",
     """补推：`engin_cli.cli push`，从库里读算好的结果再推（日期必填）。"""
     if not start:
         raise ValueError("补推要选日期")
-    argv = ["push", "--no-progress"]
+    argv = ["push"]
     if tables:
         argv += ["--tables", tables]
     if scenics:
