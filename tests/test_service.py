@@ -568,6 +568,66 @@ def test_task_crud_and_manual_run(server):
     assert _call(base, "/api/runs/9999")[0] == 404
 
 
+def _sse_events(resp):
+    """读 SSE 响应，逐个产出 (事件名, 数据)；心跳注释行跳过。"""
+    ev, data = "message", []
+    for raw in resp:
+        line = raw.decode("utf-8").rstrip("\n")
+        if line.startswith(":"):
+            continue
+        if not line:
+            if data:
+                yield ev, json.loads("\n".join(data))
+            ev, data = "message", []
+        elif line.startswith("event: "):
+            ev = line[7:]
+        elif line.startswith("data: "):
+            data.append(line[6:])
+
+
+def test_run_log_streams_in_real_time(server, tmp_path):
+    """执行日志实时流：新写进日志文件的内容马上推给页面；写了一半的中文字符不会被拆坏；执行结束推 done 后断开。"""
+    base, app, _ = server
+    log_file = tmp_path / "live.log"
+    log_file.write_bytes("开始跑批\n".encode("utf-8"))
+    rid = app.store.create_run("run", ["run"], "实时日志", "manual")
+    app.store.update_run(rid, status="running", log_path=str(log_file))
+    resp = _OPENER.open(urllib.request.Request(f"{base}/api/runs/{rid}/log/stream?offset=0"), timeout=30)
+    assert resp.headers["Content-Type"].startswith("text/event-stream")
+    events = _sse_events(resp)
+    ev, meta = next(events)
+    assert ev == "log" and meta["source"] == "file" and meta["text"] == ""
+    ev, first = next(events)
+    assert ev == "log" and first["text"] == "开始跑批\n"
+    line = "推送 macro：第 1 批\n".encode("utf-8")
+    t0 = time.time()
+    with open(log_file, "ab") as f:                       # 「推」字写了一半先刷盘，再写剩下的
+        f.write(line[:1]); f.flush()
+        time.sleep(0.6)
+        f.write(line[1:]); f.flush()
+    got = ""
+    while got != line.decode("utf-8"):
+        ev, d = next(events)
+        assert ev == "log" and "�" not in d["text"]
+        got += d["text"]
+    assert time.time() - t0 < 2.5 and d["offset"] == log_file.stat().st_size
+    app.store.update_run(rid, status="success")
+    with open(log_file, "ab") as f:
+        f.write("跑完了\n".encode("utf-8"))
+    ev, d = next(events)
+    assert ev == "log" and d["text"] == "跑完了\n"           # 结束前最后写的也推出来
+    assert next(events) == ("done", {"status": "success"})
+    assert list(events) == []                             # 推完断开
+    # 接着上次的位置订阅：已经跑完的直接给剩下的内容 + done
+    code = _OPENER.open(f"{base}/api/runs/{rid}/log/stream?offset={d['offset']}", timeout=30)
+    assert [e for e, _ in _sse_events(code)] == ["log", "done"]
+    try:
+        _OPENER.open(f"{base}/api/runs/99999/log/stream", timeout=30)
+        raise AssertionError("应当 404")
+    except urllib.error.HTTPError as e:
+        assert e.code == 404
+
+
 def test_csrf_header_required(server):
     base, _, _ = server
     code, e = _call(base, "/api/tasks", "POST", {"name": "x"}, headers={"X-Requested-With": ""})

@@ -88,7 +88,7 @@ export const RunDetail = {
     const run = ref(null), err = ref(''), log = ref(''), logEl = ref(null), follow = ref(true), wrap = ref(true)
     const logSrc = ref(null)              // 日志从哪来：{ source: file / db / none, missing: 没有日志的原因, saved_at, host }
     const open = reactive({}), lq = ref(''), onlyBad = ref(false)
-    let offset = 0, timer, stopped = false
+    let offset = 0, timer, stopped = false, es = null, fails = 0
     const load = async () => {
       try { run.value = await api('/api/runs/' + p.id); err.value = ''
         // 只有一个景区、或者有失败的景区：默认展开
@@ -96,22 +96,39 @@ export const RunDetail = {
         for (const s of sc) if (sc.length === 1 || !s.ok) open[s.scenic] = true
       } catch (e) { err.value = e.message }
     }
+    const append = async r => {
+      if (r.source) logSrc.value = { source: r.source, missing: r.missing, saved_at: r.saved_at, host: r.host }
+      if (r.text) {
+        log.value += r.text; offset = r.offset
+        if (follow.value) { await nextTick(); if (logEl.value) logEl.value.scrollTop = logEl.value.scrollHeight }
+      }
+    }
+    // 实时流：服务端有新日志就推过来（SSE）。断线 2 秒后从已拿到的位置接着订阅；连续 3 次连不上退回定时拉取
+    const stream = () => {
+      if (stopped) return
+      if (!window.EventSource) return pull()
+      es = new EventSource(`/api/runs/${p.id}/log/stream?offset=${offset}`)
+      es.addEventListener('log', e => { fails = 0; append(JSON.parse(e.data)) })
+      es.addEventListener('status', () => { fails = 0; load() })
+      es.addEventListener('done', () => { es.close(); es = null; load() })
+      es.onerror = () => {                          // 浏览器自己重连会从头再拿，所以关掉，按当前位置重新订阅
+        if (!es) return
+        es.close(); es = null
+        if (++fails >= 3) pull(); else timer = setTimeout(stream, 2000)
+      }
+    }
     const pull = async () => {
       if (stopped) return
       try {
         const r = await api(`/api/runs/${p.id}/log?offset=${offset}`)
-        logSrc.value = { source: r.source, missing: r.missing, saved_at: r.saved_at, host: r.host }
-        if (r.text) {
-          log.value += r.text; offset = r.offset
-          if (follow.value) { await nextTick(); if (logEl.value) logEl.value.scrollTop = logEl.value.scrollHeight }
-        }
+        await append(r)
         if (r.done && run.value && ['queued', 'running'].includes(run.value.status)) await load()
         if (r.done && r.text && r.offset < r.size) timer = setTimeout(pull, 50)          // 日志大，一次 512KB，接着拿完
         else if (!r.done || !run.value || ['queued', 'running'].includes(run.value.status)) timer = setTimeout(pull, 1500)
       } catch (e) { timer = setTimeout(pull, 4000) }
     }
-    onMounted(async () => { await load(); pull() })
-    onUnmounted(() => { stopped = true; clearTimeout(timer) })
+    onMounted(async () => { await load(); stream() })
+    onUnmounted(() => { stopped = true; clearTimeout(timer); if (es) es.close() })
     const cancel = async () => {
       if (!await confirmBox({ type: 'warn', title: `取消执行 #${p.id}`, okText: '取消执行', cancelText: '继续执行',
         message: '正在跑的会马上停止，已经写入的数据不会回滚。' })) return
