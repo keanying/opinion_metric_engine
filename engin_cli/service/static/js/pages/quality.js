@@ -158,7 +158,7 @@ export default {
              spanDays, wk, fmtD, today, stats, parts, cols, dayCols, CHANNELS, CHECK_STATUS, howText, rangeText }
   },
   template: `
-  <div>
+  <div class="page-fill">
     <div class="card sect open">
         <div class="sect-head"><h3>数据检测<Tip wide text="只读检测库里大盘表已有的数据：区间相同的行指标一致（td@T-1 = latest_1d@T …）、各周期评论数 = 每天 td 之和。检测出来哪天不对，点「修复」按当前源数据把检测的整段一次重算（周期指标依赖前面每一天，只重算有问题的几天修不干净）"/></h3></div>
         <div class="sect-body stick">
@@ -208,7 +208,8 @@ export default {
         </div>
       </div>
 
-    <div class="grid one-two">
+    <!-- 下面两张卡片固定大小、撑满剩下的高度；检测记录在卡片里面滚动，滚到底自动加载下一页 -->
+    <div class="grid one-two fill-grid">
       <div class="card center">
         <div class="card-head"><h3>近 {{ days }} 天检测<Tip text="每一次检测都算：跑批时每个景区自动检测一次，页面上手动检测一次"/></h3></div>
         <Ring :parts="parts" :size="200" :thickness="20" :value="String(data.total)" label="检测" sub="次" :hole="0.5" />
@@ -217,8 +218,8 @@ export default {
             <i class="ubar"><em :style="{width: (data.total ? Math.max(6, p.value / data.total * 100) : 0) + '%', background: p.colors[1]}"></em></i></div>
         </div>
       </div>
-      <div class="card">
-        <div class="card-head stick"><h3>检测记录<Tip wide text="每一次数据质量检测都在这里：什么时候、怎么触发的（定时跑批 / 手动执行 / 数据修复 / 页面检测）、检测了哪个景区哪几天、结果。点一行看检测过程：查了哪些项、每项的规则、核对了多少、哪里不对、对比的数值"/></h3>
+      <div class="card fill">
+        <div class="card-head"><h3>检测记录<Tip wide text="每一次数据质量检测都在这里：什么时候、怎么触发的（定时跑批 / 手动执行 / 数据修复 / 页面检测）、检测了哪个景区哪几天、结果。点一行看检测过程：查了哪些项、每项的规则、核对了多少、哪里不对、对比的数值"/></h3>
           <div class="toolbar">
             <div class="seg"><button v-for="d in [7,14,30]" :key="d" :class="{on: days===d}" @click="days=d; load()">近 {{ d }} 天</button></div>
             <select v-model="ftype" @change="load"><option value="">全部方式</option><option value="run">跑批自动检测</option><option value="manual">页面检测</option></select>
@@ -227,7 +228,7 @@ export default {
             <span class="search"><Icon name="search" :size="15"/><input v-model="kw" placeholder="景区 / 任务 / 结果" @keyup.enter="load"/></span>
             <button class="btn light" @click="kw=''; fstatus=''; ftype=''; load()">重置</button></div></div>
         <div v-if="err" class="alert red">{{ err }}</div>
-        <STable :columns="cols" :data="data.items" :loading="loading" :min-height="260" clickable
+        <STable :columns="cols" :data="data.items" :loading="loading" clickable scroll @reach-end="loadMore"
           :empty="'近 ' + days + ' 天没有检测记录'" @row-click="r => $router.push('/quality/' + r.id)">
           <template #at="{ row }"><span class="s-ell"><b>{{ row.created_at.slice(5, 16) }}</b><small>#{{ row.id }}</small></span></template>
           <template #how="{ row }"><span class="s-name"><Avatar square :icon="row.type === 'run' ? 'layers' : 'shield'" :color="row.type === 'run' ? 'indigo' : 'cyan'"/>
@@ -237,8 +238,11 @@ export default {
           <template #result="{ row }"><Tag :color="CHECK_STATUS[row.status].color" :icon="CHECK_STATUS[row.status].icon">{{ CHECK_STATUS[row.status].text }}</Tag></template>
           <template #summary="{ row }"><span class="s-ell"><b :class="{'t-red': row.status === 'fail' || row.status === 'blocked'}" :title="row.summary">{{ row.summary }}</b>
             <small>检查 {{ row.items }} 项<template v-if="row.attempts > 1"> · 检测 {{ row.attempts }} 次</template><template v-if="row.issues"> · {{ row.issues }} 处问题</template></small></span></template>
-          <template #foot><div v-if="data.items.length < data.total" class="s-table-foot">
-            已显示 {{ data.items.length }} / 共 {{ data.total }} 条 <a class="link" @click.stop="loadMore">{{ more ? '加载中…' : '加载更多' }}</a></div></template>
+          <template #foot><div v-if="data.items.length" class="s-table-foot">
+            <template v-if="more">加载中…</template>
+            <template v-else-if="data.items.length < data.total">已显示 {{ data.items.length }} / 共 {{ data.total }} 条，往下滚动加载更多
+              <a class="link" @click.stop="loadMore">加载更多</a></template>
+            <template v-else>已全部显示（共 {{ data.total }} 条）</template></div></template>
         </STable>
       </div>
     </div>

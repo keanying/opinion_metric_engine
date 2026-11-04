@@ -935,6 +935,10 @@ details summary { cursor: pointer; color: var(--primary); font-size: 13px; margi
 .page-fill > .card { flex: none; }
 .page-fill > .card.fill { flex: 1 1 0; min-height: 320px; display: flex; flex-direction: column; overflow: hidden; }
 .card.fill > .s-table-wrap.scroll { flex: 1; min-height: 0; overflow: auto; }
+/* 一行两张卡片一起撑满剩下的高度（数据质量页：近 N 天检测 + 检测记录） */
+.page-fill > .grid.fill-grid { flex: 1 1 0; min-height: 380px; margin-bottom: 0; }
+.fill-grid > .card { min-height: 0; }
+.fill-grid > .card.fill { display: flex; flex-direction: column; overflow: hidden; }
 .s-table-wrap.scroll thead th { position: sticky; top: 0; z-index: 2; }
 .page-fill > .fixed-log { margin-bottom: 0; }
 .page-fill > .fixed-log .evlog { height: 190px; max-height: none; }
@@ -943,6 +947,7 @@ details summary { cursor: pointer; color: var(--primary); font-size: 13px; margi
 .s-table-foot .link { margin-left: 8px; cursor: pointer; }
 @media (max-width: 860px) {                 /* 手机：整页正常滚动，不固定高度 */
   .page-fill { height: auto; display: block; }
+  .page-fill > .grid.fill-grid { min-height: 0; } .fill-grid > .card.fill { max-height: 80vh; }
   .card.fill > .s-table-wrap.scroll { max-height: 70vh; }
   .card.fill.push-logs { height: auto; }
 }
