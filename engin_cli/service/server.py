@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import decimal
+import gzip
 import hmac
 import json
 import logging
@@ -82,6 +83,96 @@ def _clean(v: Any) -> Any:
     return str(v)
 
 
+_STATIC: Dict[str, tuple] = {}
+_STATIC_LOCK = threading.Lock()
+
+
+def _compressible(ctype: str) -> bool:
+    return ctype.startswith(("text/", "application/json", "application/javascript", "image/svg"))
+
+
+def _static_file(full: str, compress: bool) -> tuple:
+    """静态文件（内容, gzip 后的内容 / None, ETag），按修改时间缓存在内存里：不用每次读盘、每次压缩。"""
+    st = os.stat(full)
+    key = (st.st_size, st.st_mtime_ns)
+    hit = _STATIC.get(full)
+    if hit and hit[0] == key:
+        return hit[1]
+    with open(full, "rb") as f:
+        raw = f.read()
+    gz = gzip.compress(raw, 6) if compress and len(raw) > 1024 else None
+    val = (raw, gz, f'"{st.st_size:x}-{st.st_mtime_ns:x}"')
+    with _STATIC_LOCK:
+        _STATIC[full] = (key, val)
+    return val
+
+
+class DbPool:
+    """数据库连接池：页面每个请求都要查库（登录校验、指标、景区列表 …），每次新建连接要几十毫秒（远程库更久），
+    改成用完放回池里复用。
+
+    · 还回来时先 rollback：连接是 autocommit=False，select 也会开事务，不结束的话下次读到的还是旧快照
+    · 借出去前 ping 一下，库那边断开了（wait_timeout、网络闪断）就自动重连
+    · 空闲太久（IDLE 秒）的直接丢掉重建；池里最多留 SIZE 个，多出来的用完就断开
+    """
+    SIZE, IDLE = 6, 600
+
+    def __init__(self, make: Callable):
+        self._make, self._idle, self._lock = make, [], threading.Lock()
+
+    def get(self) -> "_Lease":
+        while True:
+            with self._lock:
+                item = self._idle.pop() if self._idle else None
+            if item is None:
+                return _Lease(self, self._make())
+            db, at = item
+            if time.time() - at > self.IDLE:
+                _close_quiet(db)
+                continue
+            try:
+                if db._conn is not None:
+                    db._conn.ping(reconnect=True)
+                return _Lease(self, db)
+            except Exception:                          # noqa: BLE001 —— 坏了就换一个
+                _close_quiet(db)
+
+    def put(self, db) -> None:
+        try:
+            if db._conn is not None:
+                db._conn.rollback()                    # 结束 select 开的事务，下次读到最新数据
+        except Exception:                              # noqa: BLE001 —— 连接坏了：不放回
+            _close_quiet(db)
+            return
+        with self._lock:
+            if len(self._idle) < self.SIZE:
+                self._idle.append((db, time.time()))
+                return
+        _close_quiet(db)
+
+
+class _Lease:
+    """从池里借出的连接：用法和 MySQL 一样，close() 是还回池里。"""
+
+    def __init__(self, pool: DbPool, db):
+        self._pool, self._db, self._done = pool, db, False
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+    def close(self):
+        if not self._done:
+            self._done = True
+            self._pool.put(self._db)
+
+
+def _close_quiet(db) -> None:
+    try:
+        db.close()
+    except Exception:                                  # noqa: BLE001
+        pass
+
+
 def _mask(v: str, keep: int = 6) -> str:
     v = str(v or "")
     if not v:
@@ -136,6 +227,8 @@ class App:
         self.runner = runner or Runner(self.store, self.data_dir)
         self.scheduler = Scheduler(self.store, self.runner) if scheduler_enabled else None
         self._db_factory = db_factory
+        self._pool = None                         # 指标库 / 用户表连接池（第一次用时建）
+        self._push_cache: Dict[str, tuple] = {}    # 推送记录文件 → ((大小, 修改时间), 解析好的记录)
         # 登录：用 SMC 系统的用户 / 会话表，在源表库（src_database，没配就是 database），见 auth.py
         self.auth = auth or Auth(UserRepository(self._db, settings.db.src_db()))
         self.started_at = now_str()
@@ -208,10 +301,13 @@ class App:
 
     # ------------------------------------------------------------ 数据库
     def _db(self):
+        """查指标库 / 用户表的连接。测试传了 db_factory 就用它；否则从连接池借（用完 close() 是还回池里，不是断开）。"""
         if self._db_factory:
             return self._db_factory()
-        from ..db import MySQL
-        return MySQL(self.settings.db)
+        if self._pool is None:
+            from ..db import MySQL
+            self._pool = DbPool(lambda: MySQL(self.settings.db))
+        return self._pool.get()
 
     def _query(self, sql: str, params=()) -> List[dict]:
         db = self._db()
@@ -231,7 +327,8 @@ class App:
         return f"`{ads}`.`{table}`" if ads else f"`{table}`"
 
     # ------------------------------------------------------------ 任务
-    def _task_view(self, t: dict) -> dict:
+    def _task_view(self, t: dict, last: Optional[dict] = None) -> dict:
+        """last：各任务最近一次执行（列表一次查好传进来；单个任务不传就现查）。"""
         times = (t.get("schedule") or {}).get("times") or []
         try:
             _, argv, title, _then = build_task_argv(t["config"])
@@ -242,10 +339,11 @@ class App:
         return {**t, "config": normalize_config(t["config"]) if preview[:1] != "（" else t["config"],
                 "next_fire": nf.strftime("%Y-%m-%d %H:%M") if nf else None,
                 "command_preview": preview, "title": title,
-                "last_run": self.store.last_run_of(t["id"])}
+                "last_run": (last if last is not None else self.store.last_runs()).get(int(t["id"]))}
 
     def list_tasks(self) -> List[dict]:
-        return [self._task_view(t) for t in self.store.list_tasks()]
+        last = self.store.last_runs()
+        return [self._task_view(t, last) for t in self.store.list_tasks()]
 
     def _task_input(self, body: dict) -> Tuple[str, dict, dict, bool]:
         name = str(body.get("name") or "").strip()
@@ -350,6 +448,31 @@ class App:
                                  level="info" if ps["enabled"] else "warn")
         return self.push_settings_view()
 
+    def _push_records(self, path: str) -> List[dict]:
+        """解析好的推送记录（新的在前）。按文件大小 + 修改时间缓存：翻页、筛选不用每次把整天的文件重读重解析一遍。"""
+        if not path or not os.path.exists(path):
+            return []
+        st = os.stat(path)
+        key = (st.st_size, st.st_mtime_ns)
+        hit = self._push_cache.get(path)
+        if hit and hit[0] == key:
+            return hit[1]
+        recs = []
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(r, dict):
+                    r["_text"] = json.dumps(r, ensure_ascii=False)     # 关键字搜索用（解析时算一次）
+                    recs.append(r)
+        recs.reverse()
+        if len(self._push_cache) > 8:
+            self._push_cache.clear()
+        self._push_cache[path] = (key, recs)
+        return recs
+
     def _push_log_dir(self) -> str:
         env = os.environ.get("OPINION_PUSH_LOG_DIR")
         d = str(env if env is not None else (getattr(self.settings, "push_log_dir", "") or "")).strip()
@@ -370,21 +493,15 @@ class App:
             raise ApiError(400, "日期格式是 yyyyMMdd")
         items, counts, rows, total = [], {}, 0, 0
         path = os.path.join(d, f"push_{date}.log") if d and date else ""
-        if path and os.path.exists(path):
-            with open(path, encoding="utf-8", errors="replace") as f:
-                lines = f.readlines()
-            for line in reversed(lines):
-                try:
-                    r = json.loads(line)
-                except ValueError:
-                    continue
+        for r in self._push_records(path):
+                r = dict(r)
                 k = r.get("result") or "unknown"
                 counts[k] = counts.get(k, 0) + 1
                 if k in ("ok", "dry_run"):
                     rows += int(r.get("rows") or 0)
                 if result and k != result:
                     continue
-                if keyword and keyword not in json.dumps(r, ensure_ascii=False):
+                if keyword and keyword not in r["_text"]:
                     continue
                 total += 1
                 if offset < total <= offset + limit:
@@ -392,6 +509,7 @@ class App:
                     if isinstance(resp, str) and len(resp) > 2000:
                         r["response"] = resp[:2000] + "…"
                     r.pop("url", None)
+                    r.pop("_text", None)
                     items.append(r)
         return {"dir": d, "dates": dates[:60], "date": date, "counts": counts,
                 "rows_ok": rows, "total": total, "items": items}
@@ -441,6 +559,7 @@ class App:
         now = dt.datetime.now()
         since14 = (now - dt.timedelta(days=13)).strftime("%Y-%m-%d 00:00:00")
         runs = [r for r in self.store.runs_between(since14) if r["kind"] == "run"]
+        latest = self.store.list_runs(limit=40, count=False)["items"]      # 最近执行 + 需要关注，一次查
         days = [(now - dt.timedelta(days=13 - i)).strftime("%Y-%m-%d") for i in range(14)]
         daily = {d: {"date": d, "success": 0, "failed": 0, "blocked": 0, "other": 0} for d in days}
         for r in runs:
@@ -453,8 +572,9 @@ class App:
         done7 = [r for r in last7 if r["status"] in ("success", "failed", "blocked")]
         scen = {"ok": 0, "failed": 0, "blocked": 0}
         for r in last7:
-            for s in (r.get("summary") or {}).get("scenics") or []:
-                scen["blocked" if s.get("quality_blocked") else "ok" if s.get("ok") else "failed"] += 1
+            scen["blocked"] += r["quality_blocked"]
+            scen["ok"] += r["scenic_ok"]
+            scen["failed"] += r["scenic_total"] - r["quality_blocked"] - r["scenic_ok"]
         tasks = self.list_tasks()
         upcoming = sorted([{"task_id": t["id"], "task_name": t["name"], "at": t["next_fire"]}
                            for t in tasks if t["next_fire"]], key=lambda x: x["at"])[:6]
@@ -472,9 +592,9 @@ class App:
             "scenic_results": scen,
             "daily": list(daily.values()),
             "upcoming": upcoming,
-            "recent": self.store.list_runs(limit=8)["items"],
+            "recent": latest[:8],
             "durations": self._durations(runs, days),
-            "attention": [r for r in self.store.list_runs(limit=40)["items"]
+            "attention": [r for r in latest
                           if r["status"] in ("failed", "blocked")][:4],
             "scheduler": {"available": self.scheduler is not None,
                           "enabled": bool(self.scheduler and self.scheduler.enabled)},
@@ -505,7 +625,7 @@ class App:
     def quality(self, days: int = 14) -> dict:
         since = (dt.datetime.now() - dt.timedelta(days=max(int(days), 1) - 1)).strftime("%Y-%m-%d")
         items = []
-        for r in reversed(self.store.runs_between(since)):
+        for r in reversed(self.store.runs_between(since, full=True)):
             for s in (r.get("summary") or {}).get("scenics") or []:
                 if s.get("errors") or s.get("quality_attempts", 0) > 1:
                     items.append({"run_id": r["id"], "created_at": r["created_at"],
@@ -901,17 +1021,30 @@ def make_handler(app: App):
         def _cookie(self, token: str, max_age: int) -> dict:
             return {"Set-Cookie": f"{COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}"}
 
-        def _send(self, status: int, body: bytes, ctype: str, extra: Optional[dict] = None):
+        def _gzip_ok(self) -> bool:
+            return "gzip" in (self.headers.get("Accept-Encoding") or "")
+
+        def _send(self, status: int, body: bytes, ctype: str, extra: Optional[dict] = None,
+                  cache: str = "no-store", gz: Optional[bytes] = None):
+            """gz：已经压好的内容（静态文件缓存的）；没给且内容大、浏览器支持，就现压（接口返回的 JSON）。"""
+            if gz is None and len(body) > 2048 and _compressible(ctype) and self._gzip_ok():
+                gz = gzip.compress(body, 5)
+            use_gz = gz is not None and self._gzip_ok()
+            data = gz if use_gz else body
             self.send_response(status)
             self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Length", str(len(data)))
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Cache-Control", "no-store")
+            self.send_header("Cache-Control", cache)
+            if use_gz or gz is not None:
+                self.send_header("Vary", "Accept-Encoding")
+            if use_gz:
+                self.send_header("Content-Encoding", "gzip")
             for k, v in (extra or {}).items():
                 self.send_header(k, v)
             self.end_headers()
             if self.command != "HEAD":
-                self.wfile.write(body)
+                self.wfile.write(data)
 
         def _json(self, status: int, data: Any, extra: Optional[dict] = None):
             self._send(status, json.dumps(_clean(data), ensure_ascii=False).encode("utf-8"),
@@ -920,16 +1053,18 @@ def make_handler(app: App):
         def _dispatch(self):
             u = urllib.parse.urlsplit(self.path)
             path = u.path
+            # 长连接（HTTP/1.1）：请求体一定先读完，提前拒绝时没读的请求体会被当成下一个请求
+            n = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(n) if n else b""
             if not path.startswith("/api/"):
                 return self._static(path)                 # 页面文件不用登录（登录页本身要加载）
             writing = self.command in ("POST", "PUT", "DELETE")
             if writing and not self.headers.get("X-Requested-With"):
                 return self._json(403, {"error": "缺少 X-Requested-With 请求头"})
             body = {}
-            n = int(self.headers.get("Content-Length") or 0)
-            if n:
+            if raw:
                 try:
-                    body = json.loads(self.rfile.read(n).decode("utf-8") or "{}")
+                    body = json.loads(raw.decode("utf-8") or "{}")
                 except ValueError:
                     return self._json(400, {"error": "请求体不是合法 JSON"})
             body = body if isinstance(body, dict) else {}
@@ -979,10 +1114,25 @@ def make_handler(app: App):
                 ctype += "; charset=utf-8"
             if full.endswith(".js"):
                 ctype = "text/javascript; charset=utf-8"
-            with open(full, "rb") as f:
-                self._send(200, f.read(), ctype)
+            raw, gz, etag = _static_file(full, _compressible(ctype))
+            # 页面代码（html / js / css）每次都向服务确认有没有改（没改回 304，不重新下载），升级后不用强制刷新；
+            # 字体、图片、vue 库一天内直接用浏览器缓存
+            cache = ("public, max-age=86400" if "/vendor/" in full.replace(os.sep, "/") or ctype.startswith(("image/", "font/"))
+                     else "no-cache")
+            inm = self.headers.get("If-None-Match") or ""
+            if etag in [x.strip() for x in inm.split(",")]:
+                self.send_response(304)
+                self.send_header("ETag", etag)
+                self.send_header("Cache-Control", cache)
+                self.end_headers()
+                return
+            self._send(200, raw, ctype, {"ETag": etag}, cache=cache, gz=gz)
 
         do_GET = do_POST = do_PUT = do_DELETE = do_HEAD = _dispatch
+
+    # 长连接：一个页面十几个文件 + 接口共用几个连接，不用每个请求都重新建连接；空闲 60 秒断开
+    Handler.protocol_version = "HTTP/1.1"
+    Handler.timeout = 60
 
     return Handler
 

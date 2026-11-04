@@ -466,6 +466,67 @@ def test_static_page_and_vendor(server):
     assert code == 200 and b'id="app"' in body
 
 
+def test_static_cache_gzip_and_keep_alive(server):
+    """静态文件：ETag + no-cache（没改回 304）、gzip；长连接下没读的请求体不会串到下一个请求。"""
+    import gzip as _gz
+    import http.client
+    base, _, _ = server
+    host, port = base.replace("http://", "").split(":")
+    c = http.client.HTTPConnection(host, int(port), timeout=10)
+    c.request("GET", "/js/app.js", headers={"Accept-Encoding": "gzip"})
+    r = c.getresponse(); body = r.read()
+    assert r.status == 200 and r.getheader("Content-Encoding") == "gzip" and r.getheader("Cache-Control") == "no-cache"
+    assert b"createApp" in _gz.decompress(body)
+    etag = r.getheader("ETag")
+    c.request("GET", "/js/app.js", headers={"If-None-Match": etag})            # 同一个连接（长连接）
+    r = c.getresponse(); assert r.status == 304 and r.read() == b""
+    c.request("GET", "/vendor/vue.esm-browser.prod.js")
+    r = c.getresponse(); r.read()
+    assert "max-age" in r.getheader("Cache-Control") and r.getheader("Content-Encoding") is None   # 没说支持 gzip 不压
+    # 缺 X-Requested-With 被拒的写请求：请求体也读掉了，下一个请求照常
+    c.request("POST", "/api/tasks", body=b'{"name": "x"}', headers={"Content-Type": "application/json"})
+    r = c.getresponse(); assert r.status == 403; r.read()
+    c.request("GET", "/api/task-defaults", headers={"Accept-Encoding": "gzip"})
+    r = c.getresponse(); assert r.status in (200, 401); r.read()
+    c.close()
+
+
+def test_db_pool_reuses_and_rolls_back():
+    from engin_cli.service.server import DbPool
+
+    class Conn:
+        def __init__(self): self.rollbacks = 0; self.pings = 0
+        def rollback(self): self.rollbacks += 1
+        def ping(self, reconnect=True): self.pings += 1
+
+    class DB:
+        made = 0
+        def __init__(self): DB.made += 1; self._conn = Conn(); self.closed = False
+        def close(self): self.closed = True
+        def query_df(self, *a): return "rows"
+
+    pool = DbPool(DB)
+    a = pool.get(); assert a.query_df("select 1") == "rows"; a.close(); a.close()          # 重复 close 只还一次
+    b = pool.get(); assert DB.made == 1 and b._conn.rollbacks == 1 and b._conn.pings == 1   # 复用 + 还回时 rollback
+    c = pool.get(); assert DB.made == 2                                                    # 池里没了就新建
+    b.close(); c.close()
+
+
+def test_run_list_counts_follow_status_changes(server):
+    """执行列表不取 summary，景区成败数走缓存：执行结束更新后要跟着变。"""
+    base, app, _ = server
+    rid = app.store.create_run("run", ["run"], "t", "manual")
+    app.store.update_run(rid, status="running", summary={"scenics": [{"ok": True}]})
+    item = app.store.list_runs(limit=1)["items"][0]
+    assert (item["scenic_total"], item["scenic_failed"]) == (1, 0) and "summary" not in item
+    app.store.update_run(rid, status="blocked", summary={"scenics": [{"ok": False, "quality_blocked": True}, {"ok": True}]})
+    item = app.store.list_runs(limit=1)["items"][0]
+    assert (item["scenic_total"], item["scenic_failed"], item["quality_blocked"], item["scenic_ok"]) == (2, 1, 1, 1)
+    assert app.store.list_runs(limit=1)["items"][0]["scenic_total"] == 2                    # 缓存命中
+    full = app.store.list_runs(limit=1, full=True)["items"][0]
+    assert full["summary"]["scenics"] and full["scenic_total"] == 2
+
+
 def test_task_crud_and_manual_run(server):
     base, app, _ = server
     code, t = _call(base, "/api/tasks", "POST", {"name": "每日", "schedule": {"times": ["8:10"]},
