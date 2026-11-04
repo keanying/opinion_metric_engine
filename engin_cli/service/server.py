@@ -21,6 +21,7 @@ import datetime as dt
 import decimal
 import gzip
 import hmac
+import itertools
 import json
 import logging
 import math
@@ -89,6 +90,20 @@ _STATIC_LOCK = threading.Lock()
 
 def _compressible(ctype: str) -> bool:
     return ctype.startswith(("text/", "application/json", "application/javascript", "image/svg"))
+
+
+# 执行日志实时流（SSE）：/api/runs/<id>/log/stream?offset=已经拿到的字节数
+_LOG_STREAM = re.compile(r"^/api/runs/(\d+)/log/stream$")
+
+
+def _utf8_complete(data: bytes) -> int:
+    """data 里完整 UTF-8 字符的长度：末尾一个多字节字符只写了一半时，把那半个去掉（下次再读）。"""
+    for k in range(1, min(4, len(data)) + 1):
+        b = data[-k]
+        if b & 0xC0 != 0x80:                      # 找到最后一个字符的首字节
+            need = 4 if b >= 0xF0 else 3 if b >= 0xE0 else 2 if b >= 0xC0 else 1
+            return len(data) - k if need > k else len(data)
+    return len(data)
 
 
 def _static_file(full: str, compress: bool) -> tuple:
@@ -553,6 +568,68 @@ class App:
         else:
             why = f"日志文件是空的（{path}），子进程没有输出"
         return dict(out, source="none", missing=why, text="", offset=0, size=0)
+
+    def run_log_events(self, run_id: int, offset: int = 0, *, poll: float = 0.25,
+                       status_every: float = 2.0, heartbeat: float = 15.0, max_seconds: float = 6 * 3600):
+        """执行日志实时流（页面用 EventSource 订阅）：日志文件一有新内容就推，不用页面定时来拉。
+
+        逐个产出 (事件, 数据)：
+          log    {text, offset, size, source, missing, ...} 新内容；第一条带日志来源 / 缺失原因
+          status {status}  执行状态变了（排队 → 执行中）
+          ping   None      心跳，连接空闲时每 heartbeat 秒一次，免得被代理 / 浏览器当成断线
+          done   {status}  执行已结束、日志已读完，随后断开
+        执行状态每 status_every 秒查一次库；文件大小每 poll 秒看一次（只是 stat，不读库）。
+        """
+        first = self.run_log(run_id, offset)                 # 不存在在这里抛 404
+        if first["source"] != "file":                        # 库里存的 / 没有：一次给完就结束
+            r = first
+            yield "log", r
+            while r["text"] and r["offset"] < r["size"]:
+                r = self.run_log(run_id, r["offset"])
+                yield "log", r
+            yield "done", {"status": r["status"]}
+            return
+        yield "log", dict(first, text="", offset=int(offset))   # 先告诉页面日志来源，内容下面从文件读
+        run = self.store.get_run(run_id) or {}
+        path, status = run.get("log_path") or "", first["status"]
+        done = first["done"]
+        offset = max(0, int(offset))
+        t0 = last_check = last_send = time.time()
+        while time.time() - t0 < max_seconds:
+            data, size = b"", 0
+            if path and os.path.exists(path):
+                size = os.path.getsize(path)
+                if size > offset:
+                    with open(path, "rb") as f:
+                        f.seek(offset)
+                        data = f.read(512 * 1024)
+            if data and not done:
+                data = data[:_utf8_complete(data)]           # 子进程还在写：多字节字符写了一半的留到下次
+            if data:
+                offset += len(data)
+                last_send = time.time()
+                yield "log", {"text": data.decode("utf-8", "replace"), "offset": offset, "size": size,
+                              "source": "file", "missing": "", "status": status, "done": False}
+                continue
+            if done:
+                yield "done", {"status": status}
+                return
+            now = time.time()
+            if now - last_check >= status_every:
+                last_check = now
+                run = self.store.get_run(run_id) or {}
+                if run.get("status") != status:
+                    status = run.get("status") or status
+                    path = run.get("log_path") or path          # 排队时还没有日志文件
+                    if status in ("queued", "running"):         # 结束了不发 status，读完日志发 done
+                        yield "status", {"status": status}
+                done = status not in ("queued", "running")
+                if done:
+                    continue                                    # 结束了：再读一遍文件，把最后的输出推完
+            if now - last_send >= heartbeat:
+                last_send = now
+                yield "ping", None
+            time.sleep(poll)
 
     # ------------------------------------------------------------ 概览
     def overview(self) -> dict:
@@ -1089,6 +1166,9 @@ def make_handler(app: App):
             if why:
                 return self._json(403, {"error": why})
             q = urllib.parse.parse_qs(u.query)
+            m = _LOG_STREAM.match(path)
+            if m and self.command == "GET":
+                return self._log_stream(int(m[1]), int((q.get("offset") or ["0"])[0] or 0))
             for meth, pat, fn in routes:
                 m = pat.match(path)
                 if m and meth == self.command:
@@ -1102,6 +1182,35 @@ def make_handler(app: App):
                         log.exception("接口 %s %s 出错", self.command, path)
                         return self._json(500, {"error": f"服务内部错误：{e}"})
             return self._json(404, {"error": "接口不存在"})
+
+        def _log_stream(self, run_id: int, offset: int):
+            """执行日志实时流（Server-Sent Events）：服务端有新日志就推给页面，页面用 EventSource 接。
+            单向推送用 SSE 足够，标准库就能做，浏览器断线会自己重连；一条连接一个线程，看完日志页面就断开。"""
+            events = app.run_log_events(run_id, offset)
+            try:
+                first = next(events)                       # 执行记录不存在：在发响应头之前就报 404
+            except ApiError as e:
+                return self._json(e.status, {"error": str(e)})
+            self.close_connection = True                   # 流没有长度，推完就断开连接
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Accel-Buffering", "no")    # 前面有 nginx 反向代理时，别把流缓冲住
+            self.send_header("Connection", "close")
+            self.end_headers()
+            try:
+                for ev, data in itertools.chain([first], events):
+                    if ev == "ping":
+                        chunk = b": ping\n\n"
+                    else:
+                        chunk = (f"event: {ev}\ndata: "
+                                 + json.dumps(_clean(data), ensure_ascii=False) + "\n\n").encode("utf-8")
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+            except (OSError, ValueError):                  # 页面关了 / 断网：结束这个流
+                pass
+            finally:
+                events.close()
 
         def _static(self, path: str):
             rel = "index.html" if path in ("", "/") else path.lstrip("/")
