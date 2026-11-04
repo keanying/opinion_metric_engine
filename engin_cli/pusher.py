@@ -251,6 +251,8 @@ def _reason_text(reason: Any) -> str:
                "certificate is not yet valid": "证书还没生效（本机时间可能不对）",
                }.get(why, why)
         return f"对方 HTTPS 证书校验失败{f'：{why}' if why else ''} [{reason}]"
+    if isinstance(reason, http.client.RemoteDisconnected):
+        return f"对方没返回响应就断开了连接（下游处理超时或网关断开，会自动重试）[{reason}]"
     if isinstance(reason, ConnectionRefusedError):
         return f"连接被拒绝（地址上没有服务在监听）[{reason}]"
     if isinstance(reason, socket.gaierror):
@@ -594,6 +596,13 @@ def _post_with_retry(url: str, body: Dict[str, Any], headers: Dict[str, str],
                 _report(n, t0, result="network_error", error=last)
         except (socket.timeout, TimeoutError):
             timed_out = True
+        except (http.client.HTTPException, ConnectionError) as e:
+            # 发出去了、读响应时对方断开（Remote end closed connection without response / 连接被重置 /
+            # 响应不完整）。urllib 只把「发送时」的错误包成 URLError，读响应时的原样抛出来，
+            # 原来没接住，直接算这批失败、不重试。对方是连得上的，按 push_retries 正常重试
+            unreachable = False
+            last = f"网络错误：{_reason_text(e) or type(e).__name__}"
+            _report(n, t0, result="network_error", error=last)
         if timed_out:
             timeouts += 1
             last = f"超时（{timeout:g}s 没有响应）"

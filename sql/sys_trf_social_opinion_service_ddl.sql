@@ -113,3 +113,20 @@ create table if not exists dwd_trf_social_opinion_quality_check_di
 create index idx_quality_check_date on dwd_trf_social_opinion_quality_check_di (travel_date);
 create index idx_quality_check_scenic on dwd_trf_social_opinion_quality_check_di (scenic_id, check_id);
 create index idx_quality_check_run on dwd_trf_social_opinion_quality_check_di (run_id);
+
+-- ════════════════════════════════════════════════════════════════════
+-- 执行日志（一行 = 一次执行的完整日志）：跑完存一份到库里。日志文件只在跑它的那台服务器上，
+-- 文件被删了 / 换了服务器 / 两台服务器连同一个库时，页面上照样能看日志
+-- ════════════════════════════════════════════════════════════════════
+create table if not exists dwd_trf_social_opinion_task_run_log_di
+(
+    run_id      bigint                    not null comment '执行ID（dwd_trf_social_opinion_task_run_di.run_id）' primary key,
+    travel_date int                       not null comment '分区日期 YYYYMMDD：执行结束当天',
+    log_text    mediumtext                null comment '执行日志全文（太长只留最后 4MB，开头标明截掉了多少）',
+    log_size    bigint       default 0    not null comment '日志文件原始大小（字节）',
+    host_name   varchar(128) default ''   not null comment '跑这次执行的服务器名（日志文件在这台服务器上）',
+    create_time datetime                  not null comment '保存时间'
+)
+    comment '舆情指标计算服务-执行日志' charset = utf8mb4 row_format = DYNAMIC;
+
+create index idx_task_run_log_date on dwd_trf_social_opinion_task_run_log_di (travel_date);

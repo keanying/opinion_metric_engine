@@ -36,6 +36,9 @@ class _Recorder(BaseHTTPRequestHandler):
             "raw": raw,
         })
         status = _Recorder.status_plan.pop(0) if _Recorder.status_plan else 200
+        if status == "drop":                    # 收了请求不回、直接断开（客户端看到 Remote end closed connection）
+            self.close_connection = True
+            return
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -766,6 +769,24 @@ def test_push_log_records_every_retry_and_failure(server, tmp_path, monkeypatch)
         (1, 1, 502, "http_error"), (1, 2, 200, "ok"), (2, 1, 400, "http_error")]
     assert lines[0]["response"] == "bad gateway"
     assert lines[2]["response"] == '{"error":"字段不对"}' and "400" in lines[2]["error"]
+
+
+def test_dropped_connection_is_retried(server, tmp_path, monkeypatch):
+    """对方收了请求不回就断开（Remote end closed connection without response）：按 push_retries 重试，不直接算失败。"""
+    monkeypatch.setenv("OPINION_PUSH_LOG_DIR", str(tmp_path / "logs"))
+    srv, rec = server
+    rec.status_plan = ["drop", "drop", 200]
+    st = _settings(srv, push_retries=3, push_batch_size=10)
+    res = push_table(CORE, _core_df(2), settings=st)
+    assert res.failed_batches == 0 and res.rows == 2 and len(rec.requests) == 3
+    _, lines = _push_log(st)
+    assert [x["result"] for x in lines] == ["network_error", "network_error", "ok"]
+    assert "Remote end closed" in lines[0]["error"]
+    # 一直断开：重试完才算失败，失败原因写清楚
+    rec.requests.clear()
+    rec.status_plan = ["drop"] * 4
+    res = push_table(CORE, _core_df(2), settings=st)
+    assert res.failed_batches == 1 and len(rec.requests) == 4
 
 
 def test_push_log_records_business_failure(server, tmp_path, monkeypatch):

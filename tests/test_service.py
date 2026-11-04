@@ -489,6 +489,19 @@ def test_task_crud_and_manual_run(server):
     assert lg["done"] and "engin_cli.cli run" in lg["text"]
     code, lg2 = _call(base, f"/api/runs/{r['run_id']}/log?offset={lg['offset']}")
     assert lg2["text"] == ""                                     # 增量拉取
+    # 跑完日志存一份到库里：本机日志文件没了（被删 / 在另一台服务器上）照样能看
+    rid = r["run_id"]
+    assert _wait(lambda: app.store.get_run_log(rid))
+    saved = app.store.get_run_log(rid)
+    assert "engin_cli.cli run" in saved["text"] and saved["size"] == lg["size"] and saved["host"]
+    import os as _os
+    _os.remove(app.store.get_run(rid)["log_path"])
+    code, lg3 = _call(base, f"/api/runs/{rid}/log?offset=0")
+    assert lg3["source"] == "db" and lg3["text"] == saved["text"] and lg3["offset"] == lg3["size"]
+    # 文件和库里都没有：说清楚原因，不只是「暂无输出」
+    app.store._exec(f"delete from {app.store.t_run_log} where run_id=?", (rid,))
+    code, lg4 = _call(base, f"/api/runs/{rid}/log?offset=0")
+    assert lg4["source"] == "none" and "另一台" in lg4["missing"] and lg4["text"] == ""
     assert _call(base, f"/api/tasks/{t['id']}", "DELETE")[0] == 200
     assert _call(base, "/api/tasks")[1] == []
     assert _call(base, "/api/runs/9999")[0] == 404
@@ -863,7 +876,8 @@ def mysql_store():
 
 def test_mysql_tables_follow_naming_rules(mysql_store):
     st, conn = mysql_store
-    from engin_cli.service.store import TABLE_QUALITY, TABLE_RUN, TABLE_SCHEDULE_LOG, TABLE_SETTING, TABLE_TASK
+    from engin_cli.service.store import (TABLE_QUALITY, TABLE_RUN, TABLE_RUN_LOG, TABLE_SCHEDULE_LOG, TABLE_SETTING,
+                                         TABLE_TASK)
     with conn.cursor() as c:
         c.execute("select table_schema, table_name, table_comment from information_schema.tables "
                   "where table_schema='omx_t_db' order by table_name")
@@ -871,14 +885,15 @@ def test_mysql_tables_follow_naming_rules(mysql_store):
         c.execute("select table_name, column_name, column_comment from information_schema.columns "
                   "where table_schema='omx_t_db'")
         cols = c.fetchall()
-    assert {t[1] for t in tables} == {TABLE_TASK, TABLE_SETTING, TABLE_RUN, TABLE_SCHEDULE_LOG, TABLE_QUALITY}   # 同一个库
+    assert {t[1] for t in tables} == {TABLE_TASK, TABLE_SETTING, TABLE_RUN, TABLE_SCHEDULE_LOG, TABLE_QUALITY,
+                                     TABLE_RUN_LOG}                       # 同一个库
     assert all(t[2] for t in tables)                                     # 表注释
     assert [c for c in cols if not c[2]] == []                           # 每个字段都有注释
     assert all(re.fullmatch(r"[a-z][a-z0-9_]*", c[1]) for c in cols)     # snake_case
     names = {c[0]: set() for c in cols}
     for t, c, _ in cols:
         names[t].add(c)
-    assert all("travel_date" in names[t] for t in (TABLE_RUN, TABLE_SCHEDULE_LOG, TABLE_QUALITY))
+    assert all("travel_date" in names[t] for t in (TABLE_RUN, TABLE_SCHEDULE_LOG, TABLE_QUALITY, TABLE_RUN_LOG))
     status = [c for c in cols if c[1].endswith("_status")]
     assert status and all("-" in c[2] for c in status)                    # 状态字段注释写清每个取值
 
@@ -929,7 +944,7 @@ def test_mysql_store_reconnects(mysql_store):
 def test_mysql_ddl_renders_database_names():
     from engin_cli.service.store import render_mysql_ddl
     stmts = render_mysql_ddl("opinion")
-    assert len(stmts) == 13                                           # 5 张表 + 8 个索引
+    assert len(stmts) == 15                                           # 6 张表 + 9 个索引
     heads = [s.split("(")[0] for s in stmts]                             # 建表 / 建索引的表名都带库名
     assert all("`opinion`." in h for h in heads)
     assert any("`opinion`.dim_trf_social_opinion_task_f" in h for h in heads)
