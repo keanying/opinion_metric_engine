@@ -121,7 +121,7 @@ const App = {
       const run = d.running ? ` · 正在执行 #${d.running}` : ''
       return { cls: 'green', text: d.next ? `调度运行中 · 下次 ${d.next.at.slice(5)}${run}` : `调度运行中 · 暂无定时${run}` }
     })
-    // 问候语下面一行：星期 + 日期 + 当前页面（每分钟刷新，过了零点日期跟着变）
+    // 问候语下面一行：星期 + 日期（每分钟刷新，过了零点日期跟着变）
     const today = reactive({ week: '', date: '' })
     const tick = () => { const d = new Date()
       today.week = '星期' + '日一二三四五六'[d.getDay()]; today.date = `${d.getFullYear()} 年 ${d.getMonth() + 1} 月 ${d.getDate()} 日` }
@@ -155,7 +155,7 @@ const App = {
     <header class="topbar">
       <div class="tb-left">
       <div class="hello"><h1>你好，{{ auth.user.display_name }}！<span v-if="auth.user.readonly" class="ro-badge" title="只读账号：只能查看，不能执行、修改">只读</span></h1>
-        <p class="hello-sub"><b>{{ today.week }}</b>，{{ today.date }} · {{ current.r.title }}</p></div>
+        <p class="hello-sub"><b>{{ today.week }}</b>，{{ today.date }}</p></div>
       </div>
       <div class="tb-right">
         <label class="tb-search"><input v-model="kw" placeholder="搜索任务 / 景区…" @keyup.enter="doSearch"/>
