@@ -87,7 +87,7 @@ def test_build_run_argv_from_task_config():
         {"scenics": "A， B", "date_mode": "recent", "recent_days": 3, "push": "drill,macro",
          "rerun_days": 0, "drill_keyword_filter": True, "quality_gate": False,
          "quality_retries": 2, "verbose": False}, dt.date(2026, 11, 2))
-    assert argv == ["run", "--start-date", "20261031", "--end-date", "20261102", "--no-progress",
+    assert argv == ["run", "--start-date", "20261031", "--end-date", "20261102",
                     "--scenic", "A,B", "--rerun-days", "0", "--push", "drill,macro",
                     "--drill-keyword-filter", "--no-quality-gate", "--quality-retries", "2"]
     assert title == "A,B · 20261031~20261102"
@@ -116,7 +116,7 @@ def test_bad_config_is_rejected(cfg, msg):
 
 def test_build_push_argv():
     argv, title = R.build_push_argv("S1", "drill,macro", "20261101", "")
-    assert argv == ["push", "--no-progress", "--tables", "drill,macro", "--scenic", "S1",
+    assert argv == ["push", "--tables", "drill,macro", "--scenic", "S1",
                     "--start-date", "20261101", "--end-date", "20261101"]
     with pytest.raises(ValueError):
         R.build_push_argv(start="2026-11-01")
@@ -1046,7 +1046,7 @@ def test_copy_steps_follow_the_run():
     assert len(then) == 1 and then[0]["from_scenic"] == "PFTSCA01016184"          # 源景区默认 = 任务里唯一的景区
     assert then[0]["argv"] == ["mock", "--from-scenic", "PFTSCA01016184", "--to-scenic", "PFTSCA01018088",
                                "--to-name", "泰宁九龙潭生态旅游区", "--start-date", "20261103",
-                               "--end-date", "20261103", "--no-progress"]
+                               "--end-date", "20261103"]
     # 只算了部分表：复制同样的表
     _, _, _, then2 = R.build_task_argv({**COPY_CFG, "tables": "drill,macro"}, dt.date(2026, 11, 3))
     assert then2[0]["argv"][-2:] == ["--tables", "drill,macro"]
