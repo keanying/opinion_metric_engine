@@ -2,7 +2,7 @@ import { ref, reactive, onMounted, computed } from 'vue'
 import { api, TABLES, TABLE_LABEL, PUSH_RESULT, fmtNum, notify, refreshSched, todayYmd } from '../api.js'
 import { Ring } from '../charts.js'
 
-const RING_C = { ok: ['#a194ec', '#5446b8'], dry_run: ['#8be3ef', '#22b8cf'], business_fail: ['#f6a4b8', '#ee5a7c'],
+const RING_C = { ok: ['#a3a6f3', '#5458d8'], dry_run: ['#8be3ef', '#22b8cf'], business_fail: ['#f6a4b8', '#ee5a7c'],
   http_error: ['#f28aa3', '#e04a6e'], network_error: ['#ffd88a', '#f5a524'], timeout: ['#ffe3a8', '#f7b43c'],
   ssl_error: ['#54506c', '#282441'] }
 
@@ -76,7 +76,7 @@ export default {
     </div>
 
     <div class="grid two">
-      <div class="card sect">
+      <div class="card sect push-set">
         <div class="sect-head"><h3>推送设置<Tip text="留空 = 用 settings_local.py 里的配置；保存后下一次执行生效"/></h3></div>
         <div class="sect-body">
           <div class="frow"><label>推送地址</label>
@@ -93,7 +93,9 @@ export default {
             <span v-if="!Object.keys(view.headers).length" class="hint">未配置<Tip text="在 settings_local.py 的 push_headers 或环境变量 OPINION_PUSH_TOKEN 里配，页面不显示明文"/></span></div></div>
           <div class="frow ro" v-if="Object.keys(view.table_names).length"><label>表名映射</label><div class="chips">
             <span v-for="(v,k) in view.table_names" :key="k" class="chip grey" :title="k">{{ TABLE_LABEL[k] || k }} → {{ v }}</span></div></div>
-          <div class="actions"><span class="hint">生效地址<Tip :text="view.effective.push_url || '未配置'"/></span>
+          <div class="frow ro"><label>生效地址<Tip text="这次执行实际推到哪：页面上填了用页面的，没填用 settings_local.py 的"/></label>
+            <span class="mono ell grow" :title="view.effective.push_url">{{ view.effective.push_url || '未配置' }}</span></div>
+          <div class="actions"><span class="hint">保存后下一次执行生效</span>
             <button class="btn primary" :disabled="saving" @click="save()">{{ saving ? '保存中…' : '保存推送设置' }}</button></div>
         </div>
       </div>

@@ -224,8 +224,8 @@ export const TaskList = {
           <template v-if="(row.config.copies || []).length"><dt>复制</dt>
             <dd class="copy" :title="row.config.copies.map(c => (c.to_name || c.to_scenic) + '（' + c.to_scenic + '）').join('、')">
               跑完 → {{ row.config.copies.map(c => c.to_name || c.to_scenic).join('、') }}</dd></template></dl></template>
-        <template #last="{ row }"><template v-if="row.last_run"><StatusTag :status="row.last_run.status"/>
-          <a class="link small" :href="'#/runs/'+row.last_run.id"> {{ row.last_run.created_at.slice(5,16) }}</a></template>
+        <template #last="{ row }"><span v-if="row.last_run" class="tk-last"><StatusTag :status="row.last_run.status"/>
+          <a class="link small" :href="'#/runs/'+row.last_run.id">{{ row.last_run.created_at.slice(5,16) }}</a></span>
           <span v-else class="muted">未执行</span></template>
         <template #next="{ row }"><span :class="row.next_fire ? '' : 'muted'">{{ row.next_fire ? row.next_fire.slice(5) : '-' }}</span></template>
         <template #enabled="{ row }"><Switch :model-value="row.enabled" size="sm" @change="v => toggle(row, v)"/></template>

@@ -121,7 +121,7 @@ export default {
       <div class="card-head"><h3>当前配置<Tip text="只读；修改请编辑 settings_local.py 后重启服务（推送参数可在「推送」页改），密钥已打码"/></h3></div>
       <div class="grid cards3">
         <div v-for="(v,k) in config" :key="k" class="cfg"><h4>{{ k }}</h4>
-          <dl class="kv"><template v-for="(vv,kk) in v" :key="kk"><dt>{{ kk }}</dt><dd :title="show(vv)">{{ show(vv) }}</dd></template></dl></div>
+          <dl class="kv"><template v-for="(vv,kk) in v" :key="kk"><dt :title="kk">{{ kk }}</dt><dd :title="show(vv)">{{ show(vv) }}</dd></template></dl></div>
       </div>
     </div>
   </div>`,

@@ -95,7 +95,7 @@ function smoothPath(xs, ys) {
 
 export const Wave = {
   props: { points: Array, height: { type: Number, default: 150 }, selected: { type: Number, default: -1 },
-           colors: { type: Array, default: () => ['#8475de', '#5446b8'] }, avg: { type: Boolean, default: true },
+           colors: { type: Array, default: () => ['#8488ec', '#5458d8'] }, avg: { type: Boolean, default: true },
            fmt: { type: Function, default: v => v }, labels: { type: Boolean, default: true },
            ticks: { type: Number, default: 0 } },
   emits: ['select'],
@@ -229,7 +229,7 @@ export const MiniRing = {
 // ══════════════════════════════════════════════════════════════════
 export const Gauge = {
   props: { value: { type: Number, default: 0 }, text: String, size: { type: Number, default: 220 },
-           color: { type: String, default: '#5446b8' }, track: { type: String, default: '#e6e2fb' } },
+           color: { type: String, default: '#5458d8' }, track: { type: String, default: '#e6e2fb' } },
   setup(p) {
     const geo = computed(() => {
       const v = Math.max(0, Math.min(100, Number(p.value) || 0)) / 100
