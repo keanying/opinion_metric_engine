@@ -550,8 +550,25 @@ details summary { cursor: pointer; color: var(--primary); font-size: 13px; margi
 /* 键列按最长的键自适应（最多占一半，再长就折行），值列省略号，避免长键名压到值上 */
 .kv { display: grid; grid-template-columns: fit-content(50%) minmax(0, 1fr); gap: 6px 14px; margin: 0; font-size: 13px; }
 .kv dt { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .kv dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cfg { background: #f0f1fa; border-radius: 14px; padding: 14px 16px; }
-.cfg h4 { font-size: 13px; margin-bottom: 10px; color: var(--primary); }
+/* 维护页「当前配置」：按宽度自动排几列；每组一张浅色卡，标签 / 值两列，值完整显示（长地址、路径换行） */
+.cfg-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.cfg.wide { grid-column: span 2; }                      /* 服务：路径长，占两列 */
+@media (max-width: 1200px) { .cfg-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 860px) { .cfg-grid { grid-template-columns: 1fr; } .cfg.wide { grid-column: auto; } }
+.cfg { background: #f4f5fc; border: 1px solid #e8e9f6; border-radius: 16px; padding: 16px 18px 8px; min-width: 0; }
+.cfg h4 { display: flex; align-items: center; gap: 8px; font-size: 14px; margin: 0 0 8px; color: var(--ink); }
+.cfg-ico { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 9px; background: #fff; color: var(--solid);
+  box-shadow: 0 3px 8px rgba(60, 64, 160, .1); }
+.cfg-kv { margin: 0; }
+.cfg-row { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 12px; align-items: baseline; padding: 8px 0;
+  border-top: 1px dashed #e1e3f2; font-size: 13px; }
+.cfg-row:first-child { border-top: 0; }
+.cfg-row dt { color: var(--muted); }
+.cfg-row dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; line-height: 1.6; }
+.cfg-row dd.mono { font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--ink-2); }
+.cfg-row dd.empty { color: #a5a2bb; }
+.cfg-row dd.list { display: flex; flex-direction: column; gap: 2px; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--ink-2); }
+.cfg-row dd .tag { vertical-align: 1px; }
 
 /* ── 图表 ──────────────────────────────────────────────────────── */
 .ring { position: relative; flex: none; }
