@@ -17,13 +17,15 @@
 
 用法（在项目根目录）：
     python scripts/score_explain.py --scenic PFTSCA01002434 --date 20261102
-    python scripts/score_explain.py --scenic PFTSCA01002434 --date 20261102 --gran latest_30d --channel douyin
+    python scripts/score_explain.py --scenic PFTSCA01002434 --date 20261102 --gran latest_7d --channel douyin
 
-    --gran     周期，默认 latest_7d；可选 td / latest_1d / latest_7d / wtd / latest_30d /
-               mtd / latest_60d / latest_90d / qtd（以 settings 里配置的为准）
+    --gran     周期，逗号分隔可写多个，默认 td,latest_7d,latest_30d,mtd（今日 / 近7日 / 近30日 / 本月）；
+               可选 td / latest_1d / latest_7d / wtd / latest_30d / mtd / latest_60d / latest_90d / qtd
+               （以 settings 里配置的为准）
     --channel  渠道，默认 all（整体 = 各渠道相加）；也可写 douyin / weibo …
-    --out      文件写到哪个目录，默认 output/score_explain/<景区>_<日期>_<周期>_<渠道>/
-    --show     屏幕上明细打印几行，默认 20（文件里是全部）
+    --out      文件写到哪个目录，默认 output/score_explain/<景区>_<日期>_<渠道>/，
+               每个周期一个子目录，另有一份各周期的汇总
+    --show     屏幕上每个周期的明细打印几行，默认 10（文件里是全部）
 """
 
 from __future__ import annotations
@@ -127,65 +129,36 @@ def fill_sources(present_days: list, days: list, lookback: int) -> dict:
     return out
 
 
-def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="综合得分 / 维度综合得分 核对（明细 → 统计值 → 公式 → 计算值）")
-    ap.add_argument("--scenic", required=True, help="景区编码")
-    ap.add_argument("--date", required=True, help="跑数日期 yyyyMMdd（= 大盘表 travel_date）")
-    ap.add_argument("--gran", default="latest_7d", help="周期（= 大盘表 time_granularity），默认 latest_7d")
-    ap.add_argument("--channel", default=D.MACRO_CHANNEL_ALL, help="渠道，默认 all（整体）")
-    ap.add_argument("--out", help="输出目录，默认 output/score_explain/<景区>_<日期>_<周期>_<渠道>/")
-    ap.add_argument("--show", type=int, default=20, help="屏幕上明细打印几行，默认 20")
-    args = ap.parse_args(argv)
+DEFAULT_GRANS = "td,latest_7d,latest_30d,mtd"
 
-    scenic, date = args.scenic.strip(), args.date.strip()
-    channel = args.channel.strip().lower()
-    st = load_settings()
-    ctx = RunContext(settings=st, output_dates=[date], load_start=date, load_end=date,
-                     scenic_codes=[scenic])
-    specs = {g["name"]: g for g in ctx.macro_granularities}
-    if args.gran not in specs:
-        print(f"没有周期 {args.gran}，可选：{' / '.join(specs)}")
-        return 2
-    spec = specs[args.gran]
+
+def _pad(text: str, width: int, right: bool = False) -> str:
+    """按屏幕显示宽度补空格（中文占 2 格），汇总表才对得齐。"""
+    import unicodedata
+    n = sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in str(text))
+    fill = " " * max(1, width - n)
+    return fill + str(text) if right else str(text) + fill
+
+
+def _cmp(mine, theirs):
+    if theirs is None or pd.isna(theirs):
+        return "—"
+    return "一致" if abs(mine - theirs) < EPS else f"不一致（差 {mine - theirs:+.6f}）"
+
+
+def explain_period(spec, *, ctx, cf, raw, stored_row, scenic, scenic_name, date, channel,
+                   out_dir, show) -> dict:
+    """一个周期：明细 → 统计值 → 公式 → 计算值，写文件、打印，返回汇总用的一行。"""
+    st = ctx.settings
     formula, weights = st.score_formula, ctx.score_weights
 
     # ---- 本期区间、补数上限 ----
     lo, hi = D.macro_period_ranges(spec, date)["cur"]
     win = D.macro_backfill_window(spec)
     lookback = int(ctx.backfill_lookback([win]).get(win, 0))
-    fetch_lo = lo - pd.Timedelta(days=lookback)
     days = list(pd.date_range(lo, hi, freq="D"))
-
-    # ---- 取数：源评论 + 库里大盘表的这一行 ----
-    db = MySQL(st.db)
-    try:
-        raw = fetch_comments(db, _ds(fetch_lo), _ds(hi), [scenic])
-        ads = db.cfg.ads_db()
-        tbl = f"`{ads}`.`{TABLE_MACRO}`" if ads else f"`{TABLE_MACRO}`"
-        try:
-            stored = db.query_df(
-                f"select overall_sentiment_score, dimension_breakdown, comment_total, etl_time "
-                f"from {tbl} where scenic_id = %s and travel_date = %s "
-                f"and time_granularity = %s and channel = %s",
-                [scenic, int(date), spec["name"], channel])
-        except Exception as e:  # 表不存在等：不影响重算
-            print(f"（读大盘表失败，只做重算：{e}）")
-            stored = pd.DataFrame()
-    finally:
-        db.close()
-
-    # ---- 标准化：与跑批同一个函数（情感判定 / 日期归属）----
-    if raw is None or raw.empty:
-        raw = pd.DataFrame(columns=["scenic_id"])
-    raw = raw.reset_index(drop=True)
-    raw["comment_uk"] = raw.index          # 借这一列把源表原值（情感原文）带回明细
-    cf = build_comment_facts(raw) if not raw.empty else build_comment_facts(pd.DataFrame())
-    if not cf.empty:
-        cf = cf[(cf["scenic_spot_code"] == scenic)
-                & cf["travel_date"].between(_ds(fetch_lo), _ds(hi))]
     seen = cf["platform_code"].drop_duplicates().tolist() if not cf.empty else []
     channels = platform_scope(ctx, seen) if channel == D.MACRO_CHANNEL_ALL else [channel]
-    scenic_name = (cf["scenic_spot_name"].iloc[0] if not cf.empty else "")
 
     # ---- 1. 明细：每个渠道每一天 → 来源日的评论 ----
     day_rows, detail = [], []
@@ -252,7 +225,7 @@ def main(argv=None) -> int:
     if len(det):
         eng = build_dimension_facts(det, policy)
         if len(eng) != len(dim):
-            print(f"⚠ 维度明细条数与引擎不一致：脚本 {len(dim)}，引擎 {len(eng)}")
+            print(f"⚠ {spec['name']} 维度明细条数与引擎不一致：脚本 {len(dim)}，引擎 {len(eng)}")
 
     # ---- 2. 统计值 ----
     by_day = pd.DataFrame(day_rows)
@@ -273,21 +246,16 @@ def main(argv=None) -> int:
 
     # ---- 3/4. 公式与计算值 ----
     expr, overall = score_steps(pos, neu, neg, formula, weights)
-    st_overall, st_dims, st_info = None, {}, "库里没有这一行（还没跑过这一天，或已被删除）"
-    if not stored.empty:
-        row = stored.iloc[0]
-        st_overall = float(row["overall_sentiment_score"])
-        for it in json.loads(row["dimension_breakdown"] or "[]"):
+    st_overall, st_dims, st_total = None, {}, None
+    st_info = "库里没有这一行（还没跑过这一天，或已被删除）"
+    if stored_row is not None:
+        st_overall = float(stored_row["overall_sentiment_score"])
+        for it in json.loads(stored_row["dimension_breakdown"] or "[]"):
             st_dims[it.get("dimension1")] = float(it.get("dimension1Score"))
-        n = int(row["comment_total"])
-        st_info = (f"评论总数：重算 {_num(tot)}，库里 comment_total {n} → "
-                   f"{'一致' if n == int(tot) else '不一致（得分对不上先看这里：样本条数不同）'}"
-                   f"；库里这一行写入时间 {row['etl_time']}")
-
-    def _cmp(mine, theirs):
-        if theirs is None:
-            return "—"
-        return "一致" if abs(mine - theirs) < EPS else f"不一致（差 {mine - theirs:+.6f}）"
+        st_total = int(stored_row["comment_total"])
+        st_info = (f"评论总数：重算 {_num(tot)}，库里 comment_total {st_total} → "
+                   f"{'一致' if st_total == int(tot) else '不一致（得分对不上先看这里：样本条数不同）'}"
+                   f"；库里这一行写入时间 {stored_row['etl_time']}")
 
     dim_df["库里的值"] = [st_dims.get(d1) for d1 in dim_df["一级维度"]]
     dim_df["对比"] = [_cmp(m, t) for m, t in zip(dim_df["得分"], dim_df["库里的值"])]
@@ -311,7 +279,7 @@ def main(argv=None) -> int:
     for r in dim_stat:
         lines.append(f"    {r['一级维度']:<6s} 好 {r['好评']:>5d}  中 {r['中评']:>5d}  "
                      f"差 {r['差评']:>5d}  合计 {r['合计']:>5d}")
-    lines += ["", "【3. 计算公式】"] + ["  " + s for s in formula_text(formula, weights)]
+    lines += ["", "【3. 计算公式】"] + ["  " + x for x in formula_text(formula, weights)]
     lines += ["", "【4. 计算值】",
               "  综合得分",
               f"    {expr}",
@@ -324,9 +292,7 @@ def main(argv=None) -> int:
         lines.append(f"    {r.一级维度:<6s} {r.算式} = {r.得分:.6f}  库里 {theirs} → {r.对比}")
     lines += [f"  {st_info}", "=" * 72]
 
-    out = args.out or os.path.join(ROOT, "output", "score_explain",
-                                   f"{scenic}_{date}_{spec['name']}_{channel}")
-    os.makedirs(out, exist_ok=True)
+    os.makedirs(out_dir, exist_ok=True)
     files = {
         "1_评论明细.csv": cmt,
         "1_维度明细.csv": dim.drop(columns=["_s"]),
@@ -335,24 +301,130 @@ def main(argv=None) -> int:
         "4_计算值_维度.csv": dim_df,
     }
     for name, df in files.items():
-        df.to_csv(os.path.join(out, name), index=False, encoding="utf-8-sig")
-    with open(os.path.join(out, "3_4_公式与计算值.txt"), "w", encoding="utf-8") as f:
+        df.to_csv(os.path.join(out_dir, name), index=False, encoding="utf-8-sig")
+    with open(os.path.join(out_dir, "3_4_公式与计算值.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
     # ---- 屏幕输出 ----
+    print()
+    print("#" * 72)
+    print(f"# 周期 {spec['name']}（{spec['label']}）")
     with pd.option_context("display.max_columns", None, "display.width", 200,
                            "display.unicode.east_asian_width", True):
         print("【1. 明细】评论 %d 条、维度提及 %d 条（屏幕只显示前 %d 条，全部见文件）"
-              % (len(cmt), len(dim), args.show))
-        if len(cmt):
-            print(cmt.head(args.show).to_string(index=False))
-        print()
-        print("【2. 统计值 · 按天 × 渠道】")
-        if len(by_day):
-            print(by_day[by_day["合计"] > 0].to_string(index=False) if (by_day["合计"] > 0).any()
-                  else "（本期没有评论）")
+              % (len(cmt), len(dim), show))
+        if len(cmt) and show > 0:
+            print(cmt.head(show).to_string(index=False))
     print("\n".join(lines))
-    print(f"文件已写到：{out}")
+
+    row = {"周期": spec["name"], "周期名称": spec["label"],
+           "本期区间": f"{_ds(lo)}~{_ds(hi)}", "好评": int(pos), "中评": int(neu),
+           "差评": int(neg), "评论数": int(tot),
+           "库里评论数": st_total, "综合得分": overall, "库里综合得分": st_overall,
+           "综合得分对比": _cmp(overall, st_overall)}
+    for r in dim_df.itertuples(index=False):
+        row[f"{r.一级维度}得分"] = r.得分
+        row[f"{r.一级维度}对比"] = r.对比
+    return row
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="综合得分 / 维度综合得分 核对（明细 → 统计值 → 公式 → 计算值）")
+    ap.add_argument("--scenic", required=True, help="景区编码")
+    ap.add_argument("--date", required=True, help="跑数日期 yyyyMMdd（= 大盘表 travel_date）")
+    ap.add_argument("--gran", default=DEFAULT_GRANS,
+                    help=f"周期（= 大盘表 time_granularity），逗号分隔，默认 {DEFAULT_GRANS}")
+    ap.add_argument("--channel", default=D.MACRO_CHANNEL_ALL, help="渠道，默认 all（整体）")
+    ap.add_argument("--out", help="输出目录，默认 output/score_explain/<景区>_<日期>_<渠道>/")
+    ap.add_argument("--show", type=int, default=10, help="屏幕上每个周期的明细打印几行，默认 10")
+    args = ap.parse_args(argv)
+
+    scenic, date = args.scenic.strip(), args.date.strip()
+    channel = args.channel.strip().lower()
+    st = load_settings()
+    ctx = RunContext(settings=st, output_dates=[date], load_start=date, load_end=date,
+                     scenic_codes=[scenic])
+    specs = {g["name"]: g for g in ctx.macro_granularities}
+    grans = [g.strip() for g in args.gran.split(",") if g.strip()]
+    bad = [g for g in grans if g not in specs]
+    if bad or not grans:
+        print(f"没有周期 {'、'.join(bad) or '（空）'}，可选：{' / '.join(specs)}")
+        return 2
+    chosen = [specs[g] for g in dict.fromkeys(grans)]
+
+    # ---- 取数范围：各周期本期区间往前再多取补数上限，合并成一段，只查一次库 ----
+    spans = []
+    for spec in chosen:
+        lo, hi = D.macro_period_ranges(spec, date)["cur"]
+        win = D.macro_backfill_window(spec)
+        lb = int(ctx.backfill_lookback([win]).get(win, 0))
+        spans.append((lo - pd.Timedelta(days=lb), hi))
+    fetch_lo, fetch_hi = min(a for a, _ in spans), max(b for _, b in spans)
+
+    db = MySQL(st.db)
+    try:
+        raw = fetch_comments(db, _ds(fetch_lo), _ds(fetch_hi), [scenic])
+        ads = db.cfg.ads_db()
+        tbl = f"`{ads}`.`{TABLE_MACRO}`" if ads else f"`{TABLE_MACRO}`"
+        try:
+            stored = db.query_df(
+                f"select time_granularity, overall_sentiment_score, dimension_breakdown, "
+                f"comment_total, etl_time from {tbl} where scenic_id = %s and travel_date = %s "
+                f"and channel = %s and time_granularity in ({','.join(['%s'] * len(chosen))})",
+                [scenic, int(date), channel] + [g["name"] for g in chosen])
+        except Exception as e:  # 表不存在等：不影响重算
+            print(f"（读大盘表失败，只做重算：{e}）")
+            stored = pd.DataFrame(columns=["time_granularity"])
+    finally:
+        db.close()
+
+    # ---- 标准化：与跑批同一个函数（情感判定 / 日期归属）----
+    if raw is None or raw.empty:
+        raw = pd.DataFrame(columns=["scenic_id"])
+    raw = raw.reset_index(drop=True)
+    raw["comment_uk"] = raw.index          # 借这一列把源表原值（情感原文）带回明细
+    cf = build_comment_facts(raw) if not raw.empty else build_comment_facts(pd.DataFrame())
+    if not cf.empty:
+        cf = cf[(cf["scenic_spot_code"] == scenic)
+                & cf["travel_date"].between(_ds(fetch_lo), _ds(fetch_hi))]
+    scenic_name = (cf["scenic_spot_name"].iloc[0] if not cf.empty else "")
+
+    out = args.out or os.path.join(ROOT, "output", "score_explain",
+                                   f"{scenic}_{date}_{channel}")
+    summary = []
+    for spec in chosen:
+        hit = stored[stored["time_granularity"] == spec["name"]]
+        summary.append(explain_period(
+            spec, ctx=ctx, cf=cf, raw=raw, stored_row=hit.iloc[0] if len(hit) else None,
+            scenic=scenic, scenic_name=scenic_name, date=date, channel=channel,
+            out_dir=os.path.join(out, f"{spec['name']}_{spec['label']}"), show=args.show))
+
+    # ---- 各周期汇总 ----
+    sm = pd.DataFrame(summary)
+    os.makedirs(out, exist_ok=True)
+    sm.to_csv(os.path.join(out, "0_汇总_各周期得分.csv"), index=False, encoding="utf-8-sig")
+    dims = [c[:-2] for c in sm.columns if c.endswith("得分") and c not in ("综合得分", "库里综合得分")]
+    print()
+    print("#" * 72)
+    print(f"# 汇总：景区 {scenic} {scenic_name} | 日期 {date} | 渠道 {channel}")
+    cols = [("周期", 20, False), ("本期区间", 19, False), ("评论数", 8, True),
+            ("综合得分", 11, True)] + [(d + "得分", 13, True) for d in dims]
+    print("".join(_pad(c, w, right) for c, w, right in cols))
+    for r in summary:
+        vals = [f"{r['周期']}({r['周期名称']})", r["本期区间"], str(r["评论数"]),
+                f"{r['综合得分']:.6f}"] + [f"{r[d + '得分']:.6f}" for d in dims]
+        print("".join(_pad(v, w, right) for v, (_, w, right) in zip(vals, cols)))
+    marks = [c for c in sm.columns if c.endswith("对比")]
+    bad = [(r["周期"], c[:-2]) for r in summary for c in marks
+           if r[c] not in ("一致", "—")]
+    miss = [r["周期"] for r in summary if r["库里综合得分"] is None or pd.isna(r["库里综合得分"])]
+    if bad:
+        print("与库里不一致：" + "、".join(f"{g} {c}" for g, c in bad))
+    elif miss:
+        print("库里没有这些周期的行，只做了重算：" + "、".join(miss))
+    else:
+        print("各周期综合得分、维度得分与库里全部一致")
+    print(f"文件已写到：{out}（每个周期一个子目录，0_汇总_各周期得分.csv 是汇总）")
     return 0
 
 
