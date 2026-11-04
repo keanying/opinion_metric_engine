@@ -509,4 +509,15 @@ class Runner:
         self.store.update_run(run_id, status=status, exit_code=code, finished_at=now_str(),
                               summary=summary, message=msg)
         self._follow_up(run_id, status, summary, run["log_path"])
+        self._save_log(run_id, run["log_path"])
         log.info("执行 #%s 结束：%s（退出码 %s）", run_id, status, code)
+
+    def _save_log(self, run_id: int, path: str) -> None:
+        """跑完把日志文件存一份到库里（执行日志表）：文件被删 / 换了服务器 / 两台服务器连同一个库时照样能看。"""
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+            import socket
+            self.store.save_run_log(run_id, data.decode("utf-8", "replace"), len(data), socket.gethostname())
+        except Exception:                             # noqa: BLE001 —— 存不进去不影响执行结果，文件还在
+            log.exception("执行 #%s 的日志存库失败（日志文件 %s 还在）", run_id, path)

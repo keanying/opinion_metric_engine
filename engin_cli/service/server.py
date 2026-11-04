@@ -405,19 +405,36 @@ class App:
         return run
 
     def run_log(self, run_id: int, offset: int = 0) -> dict:
+        """执行日志：先读本机的日志文件（执行中实时追加）；文件没有 / 是空的就读库里跑完时存的那份。
+        都没有时 missing 说明原因（例如日志文件在另一台服务器上）。"""
         run = self.store.get_run(run_id)
         if not run:
             raise ApiError(404, "执行记录不存在")
-        text, size = "", 0
+        done = run["status"] not in ("queued", "running")
+        out = {"status": run["status"], "done": done, "source": "file", "missing": ""}
         path = run.get("log_path") or ""
-        if path and os.path.exists(path):
-            size = os.path.getsize(path)
-            with open(path, "rb") as f:
-                f.seek(max(0, min(int(offset), size)))
-                text = f.read(512 * 1024).decode("utf-8", "replace")
-        return {"text": text, "offset": int(offset) + len(text.encode("utf-8")),
-                "size": size, "status": run["status"],
-                "done": run["status"] not in ("queued", "running")}
+        size = os.path.getsize(path) if path and os.path.exists(path) else 0
+        if size or not done:
+            data = b""
+            if size:
+                with open(path, "rb") as f:
+                    f.seek(max(0, min(int(offset), size)))
+                    data = f.read(512 * 1024)
+            return dict(out, text=data.decode("utf-8", "replace"), offset=int(offset) + len(data), size=size)
+        saved = self.store.get_run_log(run_id)
+        if saved and saved["text"]:
+            data = saved["text"].encode("utf-8")
+            chunk = data[max(0, min(int(offset), len(data))):][:512 * 1024]
+            return dict(out, source="db", saved_at=saved["saved_at"], host=saved["host"],
+                        text=chunk.decode("utf-8", "replace"), offset=int(offset) + len(chunk), size=len(data))
+        if not path:
+            why = "这次执行没有日志"
+        elif not os.path.exists(path):
+            why = (f"这台服务器上没有日志文件 {path}，库里也没存（这个版本之前跑的执行不存库）。"
+                   f"可能是被清理了，或者是另一台连同一个库的服务跑的这次执行，到那台服务器上看")
+        else:
+            why = f"日志文件是空的（{path}），子进程没有输出"
+        return dict(out, source="none", missing=why, text="", offset=0, size=0)
 
     # ------------------------------------------------------------ 概览
     def overview(self) -> dict:

@@ -86,6 +86,7 @@ export const RunDetail = {
   props: { id: [String, Number] },
   setup(p) {
     const run = ref(null), err = ref(''), log = ref(''), logEl = ref(null), follow = ref(true), wrap = ref(true)
+    const logSrc = ref(null)              // 日志从哪来：{ source: file / db / none, missing: 没有日志的原因, saved_at, host }
     const open = reactive({}), lq = ref(''), onlyBad = ref(false)
     let offset = 0, timer, stopped = false
     const load = async () => {
@@ -99,12 +100,14 @@ export const RunDetail = {
       if (stopped) return
       try {
         const r = await api(`/api/runs/${p.id}/log?offset=${offset}`)
+        logSrc.value = { source: r.source, missing: r.missing, saved_at: r.saved_at, host: r.host }
         if (r.text) {
           log.value += r.text; offset = r.offset
           if (follow.value) { await nextTick(); if (logEl.value) logEl.value.scrollTop = logEl.value.scrollHeight }
         }
         if (r.done && run.value && ['queued', 'running'].includes(run.value.status)) await load()
-        if (!r.done || !run.value || ['queued', 'running'].includes(run.value.status)) timer = setTimeout(pull, 1500)
+        if (r.done && r.text && r.offset < r.size) timer = setTimeout(pull, 50)          // 日志大，一次 512KB，接着拿完
+        else if (!r.done || !run.value || ['queued', 'running'].includes(run.value.status)) timer = setTimeout(pull, 1500)
       } catch (e) { timer = setTimeout(pull, 4000) }
     }
     onMounted(async () => { await load(); pull() })
@@ -178,7 +181,7 @@ export const RunDetail = {
       return out.filter(g => g.items.length)
     }
     return { run, err, log, logEl, follow, wrap, open, lq, onlyBad, cancel, scenics, rowsOf, totals, passed, cmd, copy,
-             download, logHtml, logLines, badCount, KIND, TRIGGER, TABLE_LABEL, duration, fmtNum, noteGroups }
+             download, logHtml, logLines, badCount, KIND, TRIGGER, TABLE_LABEL, duration, fmtNum, noteGroups, logSrc, esc }
   },
   template: `
   <div>
@@ -255,7 +258,8 @@ export const RunDetail = {
       </div>
 
       <div class="card dark-card">
-        <div class="card-head log-head"><h3>执行日志<small>{{ logLines.length }} 行</small></h3>
+        <div class="card-head log-head"><h3>执行日志<small>{{ logLines.length }} 行</small>
+          <small v-if="logSrc && logSrc.source === 'db'" class="log-src" :title="'跑完时存进库里的日志' + (logSrc.host ? '（在 ' + logSrc.host + ' 上跑的）' : '')">库里保存的日志 · {{ logSrc.saved_at }}</small></h3>
           <div class="toolbar">
             <span class="search dark"><Icon name="search" :size="14"/><input v-model="lq" placeholder="搜索日志"/></span>
             <button class="btn sm ghost-dark" :class="{on: onlyBad}" @click="onlyBad = !onlyBad">只看警告 / 错误<em v-if="badCount">{{ badCount }}</em></button>
@@ -264,7 +268,7 @@ export const RunDetail = {
             <button class="s-btn-icon light" title="复制日志" @click="copy(log, '日志')"><Icon name="file" :size="16"/></button>
             <button class="s-btn-icon light" title="下载日志" @click="download"><Icon name="down" :size="16"/></button>
           </div></div>
-        <pre ref="logEl" class="log" :class="{nowrap: !wrap}" v-html="logHtml || (run.status === 'queued' ? '排队中：前面还有执行没跑完，轮到它就开始（同一时间只跑一个）' : '（暂无输出）')"></pre>
+        <pre ref="logEl" class="log" :class="{nowrap: !wrap}" v-html="logHtml || (run.status === 'queued' ? '排队中：前面还有执行没跑完，轮到它就开始（同一时间只跑一个）' : (logSrc && logSrc.missing ? '（没有日志）' + esc(logSrc.missing) : '（暂无输出）'))"></pre>
       </div>
     </template>
   </div>`,

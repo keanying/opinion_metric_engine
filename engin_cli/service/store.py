@@ -8,6 +8,8 @@
     dim_trf_social_opinion_service_setting_f   服务级设置（定时总开关、推送设置、通知设置）
     dwd_trf_social_opinion_task_run_di         任务执行记录（travel_date 分区）
     dwd_trf_social_opinion_schedule_log_di     调度日志（travel_date 分区）
+    dwd_trf_social_opinion_quality_check_di    数据质量检测记录（travel_date 分区）
+    dwd_trf_social_opinion_task_run_log_di     执行日志全文（跑完存一份，travel_date 分区）
 
 SQL 里一律写「库.表」。service_store = "sqlite" 只给单测和没有库时本机试用，表名、字段名与 MySQL 相同。
 对外的字典键（id / name / status / created_at …）保持不变，页面和接口不用跟着改。
@@ -31,7 +33,9 @@ TABLE_SETTING = "dim_trf_social_opinion_service_setting_f"
 TABLE_RUN = "dwd_trf_social_opinion_task_run_di"
 TABLE_SCHEDULE_LOG = "dwd_trf_social_opinion_schedule_log_di"
 TABLE_QUALITY = "dwd_trf_social_opinion_quality_check_di"
-SYSTEM_TABLES = (TABLE_TASK, TABLE_SETTING, TABLE_RUN, TABLE_SCHEDULE_LOG, TABLE_QUALITY)
+TABLE_RUN_LOG = "dwd_trf_social_opinion_task_run_log_di"
+SYSTEM_TABLES = (TABLE_TASK, TABLE_SETTING, TABLE_RUN, TABLE_SCHEDULE_LOG, TABLE_QUALITY, TABLE_RUN_LOG)
+RUN_LOG_MAX = 4 * 1024 * 1024                 # 库里最多存日志的最后 4MB
 
 DDL_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
                         "sql", "sys_trf_social_opinion_service_ddl.sql")
@@ -77,6 +81,9 @@ create table if not exists {TABLE_QUALITY} (
     check_summary text not null default '', check_detail text, operator text not null default '',
     create_time text not null);
 create index if not exists idx_quality_check_date on {TABLE_QUALITY} (travel_date);
+create table if not exists {TABLE_RUN_LOG} (
+    run_id integer primary key, travel_date integer not null, log_text text, log_size integer not null default 0,
+    host_name text not null default '', create_time text not null);
 """
 
 _IDENT = re.compile(r"^[A-Za-z0-9_]+$")
@@ -150,7 +157,7 @@ class Store:
                 self._ensure_tables()
         self.t_task, self.t_setting = q(TABLE_TASK), q(TABLE_SETTING)
         self.t_run, self.t_log = q(TABLE_RUN), q(TABLE_SCHEDULE_LOG)
-        self.t_quality = q(TABLE_QUALITY)
+        self.t_quality, self.t_run_log = q(TABLE_QUALITY), q(TABLE_RUN_LOG)
 
     @classmethod
     def sqlite(cls, path: str) -> "Store":
@@ -463,8 +470,31 @@ class Store:
                           (now_str(),)).rowcount
 
     def delete_runs_before(self, before: str) -> List[str]:
-        """删掉 before 之前已结束的执行记录，返回它们的日志路径（由调用方删文件）。"""
+        """删掉 before 之前已结束的执行记录（连同库里存的日志），返回它们的日志路径（由调用方删文件）。"""
         cond = (f"create_time<? and run_status in ('success','failed','blocked','cancelled')")
-        rows = self._all(f"select log_path from {self.t_run} where {cond}", (before,))
+        rows = self._all(f"select run_id, log_path from {self.t_run} where {cond}", (before,))
         self._exec(f"delete from {self.t_run} where {cond}", (before,))
+        self._exec(f"delete from {self.t_run_log} where create_time<?", (before,))
         return [r["log_path"] for r in rows if r["log_path"]]
+
+    # ------------------------------------------------------------ 执行日志（库里存一份）
+    def save_run_log(self, run_id: int, text: str, size: int, host: str = "") -> None:
+        """存一次执行的完整日志：太长只留最后 RUN_LOG_MAX 字节。同一个 run_id 再存就覆盖。"""
+        data = text.encode("utf-8")
+        if len(data) > RUN_LOG_MAX:
+            cut = len(data) - RUN_LOG_MAX
+            text = (f"（日志太长，库里只存了最后 {RUN_LOG_MAX // 1024 // 1024}MB，前面 {cut:,} 字节没存；"
+                    f"完整的看服务器上的日志文件）\n") + data[cut:].decode("utf-8", "ignore")
+        t = now_str()
+        self._exec(f"delete from {self.t_run_log} where run_id=?", (int(run_id),))
+        self._exec(f"insert into {self.t_run_log} (run_id, travel_date, log_text, log_size, host_name, create_time) "
+                   f"values (?,?,?,?,?,?)", (int(run_id), _ymd(t), text, int(size), str(host or "")[:128], t))
+
+    def get_run_log(self, run_id: int) -> Optional[Dict[str, Any]]:
+        rows = self._all(f"select log_text, log_size, host_name, create_time from {self.t_run_log} where run_id=?",
+                         (int(run_id),))
+        if not rows:
+            return None
+        r = rows[0]
+        return {"text": r["log_text"] or "", "size": int(r["log_size"] or 0), "host": r["host_name"] or "",
+                "saved_at": _ts(r["create_time"])}
