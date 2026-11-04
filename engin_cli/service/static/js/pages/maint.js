@@ -61,7 +61,28 @@ export default {
         notify(`已删除 ${r.deleted_runs} 条记录、${r.deleted_files} 个文件`) } catch (e) { notify(e.message, 'err') }
     }
     const show = v => typeof v === 'object' && v !== null ? JSON.stringify(v) : (v === '' || v === null ? '（空）' : String(v))
-    return { cfg, cleanDays, config, pushOff, doRun, doNotify, doClean, show, tasks, rr, curTask, taskText, todayYmd,
+    // 当前配置：键名换成中文（悬停看原来的配置项名），值按类型显示
+    const CFG_ICON = { 数据库: 'db', 推送: 'send', 计算: 'chart', 数据质量: 'shield', 服务: 'gear' }
+    const CFG_LABEL = {
+      host: '地址', port: '端口', user: '用户', database: '计算 / 系统表库', ads_database: '指标库（ADS）', src_database: '源数据库',
+      password: '密码', push_url: '推送地址', push_headers: '请求头', push_batch_size: '每批行数', push_timeout: '超时（秒）',
+      push_retries: '重试次数', push_log_dir: '推送记录目录', rerun_days: '往前重跑天数', backfill_lookback: '补数上限（天）',
+      lookback_days: '取数天数', drill_keyword_filter: '下钻按关键字过滤', score_formula: '得分公式', quality_gate: '不通过就回退',
+      quality_retries: '重算次数', notify_feishu_webhook: '通知地址', notify_feishu_from: '通知地址来源', notify_feishu_secret: '签名密钥',
+      push_dry_run: '试推', push_strict: '推送失败算执行失败', push_retry_backoff: '重试间隔', store: '系统表存储', data_dir: '数据目录', push_settings_from_page: '页面改过的推送设置', app_root: '程序目录', started_at: '启动时间' }
+    // 值的显示方式：tag（是 / 否、已配置 / 未配置）、list（对象，一项一行）、mono（地址 / 路径）、text
+    const cfgVal = v => {
+      if (typeof v === 'boolean') return { kind: 'tag', text: v ? '是' : '否', color: v ? 'green' : 'grey' }
+      if (v === '已配置' || v === '未配置') return { kind: 'tag', text: v, color: v === '已配置' ? 'green' : 'grey' }
+      if (v && typeof v === 'object') {
+        const items = Object.entries(v).map(([k, x]) => `${CFG_LABEL[k] || k}：${typeof x === 'object' ? JSON.stringify(x) : x}`)
+        return items.length ? { kind: 'list', items } : { kind: 'empty', text: '无' }
+      }
+      if (v === '' || v === null || v === undefined) return { kind: 'empty', text: '未设置' }
+      const t = String(v)
+      return { kind: /^https?:\/\/|[\\/]/.test(t) ? 'mono' : 'text', text: t }
+    }
+    return { cfg, cleanDays, config, pushOff, doRun, doNotify, doClean, show, CFG_ICON, CFG_LABEL, cfgVal, tasks, rr, curTask, taskText, todayYmd,
              fs, fsEdit, fsSaving, openFs, saveFs, clearFs, FS_SRC }
   },
   template: `
@@ -119,9 +140,16 @@ export default {
 
     <div class="card" v-if="config">
       <div class="card-head"><h3>当前配置<Tip text="只读；修改请编辑 settings_local.py 后重启服务（推送参数可在「推送」页改），密钥已打码"/></h3></div>
-      <div class="grid cards3">
-        <div v-for="(v,k) in config" :key="k" class="cfg"><h4>{{ k }}</h4>
-          <dl class="kv"><template v-for="(vv,kk) in v" :key="kk"><dt :title="kk">{{ kk }}</dt><dd :title="show(vv)">{{ show(vv) }}</dd></template></dl></div>
+      <div class="cfg-grid">
+        <div v-for="(v,k) in config" :key="k" class="cfg" :class="{ wide: k === '服务' }">
+          <h4><span class="cfg-ico"><Icon :name="CFG_ICON[k] || 'tool'" :size="15" :sw="2.2"/></span>{{ k }}</h4>
+          <dl class="cfg-kv"><div v-for="(vv,kk) in v" :key="kk" class="cfg-row">
+            <dt :title="kk">{{ CFG_LABEL[kk] || kk }}</dt>
+            <dd v-for="x in [cfgVal(vv)]" :key="kk" :class="x.kind">
+              <Tag v-if="x.kind === 'tag'" :color="x.color">{{ x.text }}</Tag>
+              <template v-else-if="x.kind === 'list'"><span v-for="it in x.items" :key="it">{{ it }}</span></template>
+              <template v-else>{{ x.text }}</template></dd></div></dl>
+        </div>
       </div>
     </div>
   </div>`,
