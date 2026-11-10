@@ -332,6 +332,10 @@ class FakeDB:
         if "group by scenic_id" in sql:
             return pd.DataFrame([{"scenic_id": "S1", "scenic_name": "景区1",
                                   "first_date": int(m.travel_date.min()), "last_date": int(m.travel_date.max())}])
+        if "src_opinion_social_scenic" in sql:
+            assert "enabled = 1" in sql
+            return pd.DataFrame([{"scenic_id": "S1", "scenic_name": "景区1"},
+                                 {"scenic_id": "S9", "scenic_name": "还没跑过的景区"}])
         if "max(travel_date) d" in sql:
             return pd.DataFrame([{"d": int(m.travel_date.max())}])
         if "time_granularity=%s order by channel" in sql:
@@ -645,6 +649,15 @@ def test_overview_and_quality_views(server):
     assert len(ov["daily"]) == 14 and ov["recent"][0]["id"] == rid
     code, q = _call(base, "/api/quality?days=7")
     assert q["items"][0]["quality_blocked"] and q["items"][0]["attempts"] == 2
+
+
+def test_scenic_options_from_scenic_table(server):
+    """景区下拉取景区表 src_opinion_social_scenic 里启用的景区，没跑过的也在。"""
+    base, _, _ = server
+    code, d = _call(base, "/api/scenics")
+    assert code == 200 and d["db_error"] == ""
+    assert d["items"] == [{"scenic_id": "S1", "scenic_name": "景区1"},
+                          {"scenic_id": "S9", "scenic_name": "还没跑过的景区"}]
 
 
 def test_metrics_endpoints(server):

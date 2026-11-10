@@ -93,6 +93,7 @@ def _compressible(ctype: str) -> bool:
 
 
 # 执行日志实时流（SSE）：/api/runs/<id>/log/stream?offset=已经拿到的字节数
+TABLE_SCENIC = "src_opinion_social_scenic"   # 景区下拉的来源（使用方导入的景区清单）
 _LOG_STREAM = re.compile(r"^/api/runs/(\d+)/log/stream$")
 
 
@@ -853,12 +854,15 @@ class App:
                            f"from {self._ads(TABLE_MACRO)} group by scenic_id order by scenic_id")
 
     def scenic_options(self) -> List[dict]:
-        """景区下拉的选项：库里大盘表有数据的景区。"""
+        """景区下拉的选项：源库景区表 src_opinion_social_scenic 里启用的景区（enabled=1）。"""
+        src = self.settings.db.src_db()
+        table = f"`{src}`.`{TABLE_SCENIC}`" if src else f"`{TABLE_SCENIC}`"
         out: List[dict] = []
         db_error = ""
         try:
-            out = [{"scenic_id": str(r["scenic_id"]), "scenic_name": r.get("scenic_name") or "",
-                    "last_date": r.get("last_date")} for r in self.metric_scenics()]
+            out = [{"scenic_id": str(r["scenic_id"]), "scenic_name": r.get("scenic_name") or ""}
+                   for r in self._query(f"select scenic_id, scenic_name from {table} "
+                                        f"where enabled = 1 order by scenic_id")]
         except ApiError as e:
             db_error = str(e)
         return {"items": out, "db_error": db_error}
