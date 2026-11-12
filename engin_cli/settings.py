@@ -179,6 +179,9 @@ class EtlSettings:
     # 按 scenic_id 取本景区的。关闭（默认）= 原来的逻辑，评论全收。
     # 只影响下钻表，其余各表照常按全部评论算。
     drill_keyword_filter: bool = False
+    # 默认开启的插件（engin_cli/plugins/ 里的客户特意化逻辑，按名字），如 ["score_redirect"]。
+    # 任务 / 命令行 --plugins 指定了就用指定的；空 = 不开，原样输出计算结果。
+    plugins: List[str] = field(default_factory=list)
 
     # content_snippet 掩码：除命中的关键词外，其余内容一律隐藏（口径见 domain 第 9 章）
     #   原文    我是体力一般，来回两个半小时左右

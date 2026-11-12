@@ -173,6 +173,10 @@ def cmd_run(args) -> int:
         st.drill_keyword_filter = True
     if args.no_drill_keyword_filter:
         st.drill_keyword_filter = False
+    if args.plugins is not None:
+        st.plugins = args.plugins
+    if args.no_plugins:
+        st.plugins = []
     if args.no_macro:
         st.enable_macro_metric = False
     if getattr(args, "tables", None):
@@ -817,6 +821,14 @@ def cmd_notify_test(args) -> int:
     return 0 if ok else 1
 
 
+def _plugin_names(value: str):
+    from .plugins import parse_names
+    try:
+        return parse_names(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e))
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="engin_cli", description="舆情指标引擎：源表 → 四张 ADS 指标表 + 下钻明细表")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -844,6 +856,11 @@ def build_parser() -> argparse.ArgumentParser:
                           "src_opinion_scenic_keyword ∪ src_opinion_scenic_filter_word，按 scenic_id）")
     kwg.add_argument("--no-drill-keyword-filter", action="store_true",
                      help="关闭上面的过滤（原逻辑，评论全收），覆盖 settings 里的 drill_keyword_filter")
+    plg = r.add_mutually_exclusive_group()
+    plg.add_argument("--plugins", type=_plugin_names,
+                     help="开启插件（engin_cli/plugins/ 里的客户特意化逻辑），逗号分隔，"
+                          "如 score_redirect；数据质量检测之后、落库推送之前执行")
+    plg.add_argument("--no-plugins", action="store_true", help="不开任何插件，覆盖 settings 里的 plugins")
     r.add_argument("--drill-keywords-csv",
                    help="离线 / 不连库时的采集关键字 CSV（scenic_id, word 两列），配合 --drill-keyword-filter")
     r.add_argument("--no-quality-gate", action="store_true",
