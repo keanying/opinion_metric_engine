@@ -75,7 +75,7 @@ python -m pytest -q
 | `publish_time` | **归属日期**（不是 crawl_time） | 所有表的 `travel_date` |
 | `scenic_id / scenic_name` | 景区 | 所有表 |
 | `work_id` + 作品表 `work_url/title` | 下钻跳转 | 下钻明细表 |
-| `content / likes / commenter_name` | 明细展示 | 下钻明细表 |
+| `content / likes / commenter_name` | 明细展示；**content 为空（NULL / 空串 / 只有空白，只发了图片、视频）的评论整条不参与任何统计** | 下钻明细表 |
 | `location` | 地域，归一到省级简称（§12） | 大盘表 `period_comment_heatmap`、下钻表 `region` |
 | `entity_tags` | 不参与指标计算，原样带到明细 | 下钻表 `entity_tags` |
 
