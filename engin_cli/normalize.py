@@ -77,6 +77,15 @@ normalize_sentiment = judge_sentiment
 # ============================================================
 # 评论明细
 # ============================================================
+def empty_content_mask(comments: pd.DataFrame) -> pd.Series:
+    """评论内容为空（NULL / 空串 / 只有空白）的行 —— 只发了图片、视频的评论，不参与任何统计。
+    源数据没有 content 列（老 CSV）时一律当作有内容。"""
+    if comments is None or comments.empty or "content" not in comments.columns:
+        return pd.Series(False, index=getattr(comments, "index", None), dtype=bool)
+    c = comments["content"]
+    return c.isna() | (c.astype(str).str.strip() == "")
+
+
 def build_comment_facts(comments: pd.DataFrame) -> pd.DataFrame:
     """src_opinion_social_work_comment_di → 评论粒度事实。
 
@@ -85,11 +94,19 @@ def build_comment_facts(comments: pd.DataFrame) -> pd.DataFrame:
       platform_code / platform_name / comment_id / work_id / comment_uk /
       sentiment / is_positive / is_neutral / is_negative / publish_dt /
       region（location 归一后的地域，见 domain §1.11）
+    内容为空（NULL / 空串 / 只有空白）的评论直接剔除，不参与任何统计。
     """
     if comments.empty:
         return _empty_comment_facts()
 
     df = comments.copy()
+    # 内容为空的评论（只有图片 / 视频）不参与统计：各表计数、得分、维度、关键词、下钻表都不算
+    empty = empty_content_mask(df)
+    if empty.any():
+        log.info("评论内容为空（只有图片 / 视频），不参与统计：%d 条", int(empty.sum()))
+        df = df[~empty]
+        if df.empty:
+            return _empty_comment_facts()
     df["publish_dt"] = pd.to_datetime(df["publish_time"], errors="coerce")
     # publish_time 为空的评论没有归属日期，无法进任何日粒度指标。
     # 需求六.2 明确「按 publish_time 拉取」，这里显式丢弃并计数告警。

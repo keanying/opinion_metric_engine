@@ -38,7 +38,8 @@ from .loader import (TABLE_CONTENT, TABLE_CORE, TABLE_DIMENSION, TABLE_DRILL_ANA
 from .metric_calc_domain import (CORE_WINDOWS, daily_channel_presence,
                                  daily_core_facts_by_platform)
 from .metric_calc_domain import PLATFORM_WINDOWS as D_PLATFORM_WINDOWS
-from .normalize import (build_comment_facts, build_dimension_facts, build_keyword_facts)
+from .normalize import (build_comment_facts, build_dimension_facts, build_keyword_facts,
+                        empty_content_mask)
 from .notify import send_feishu
 from .pusher import PushReport, push_all
 from .settings import EtlSettings
@@ -143,6 +144,9 @@ def _compute(settings: EtlSettings,
         return res, scenic_codes
 
     # ---- 2. 标准化（全部在内存，不落中间表）----
+    n_empty = int(empty_content_mask(comments_df).sum())
+    if n_empty:
+        res.notes.append(f"评论内容为空（只有图片 / 视频）的 {n_empty:,} 条不参与统计")
     cf_all = build_comment_facts(comments_df)
     # 取数区间外的评论一律不参与计算。MySQL 侧已经按 publish_time 过滤过，
     # 但离线 CSV / 手工导出不一定 —— 源表里混进一条 2013 年的评论，
