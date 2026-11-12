@@ -40,6 +40,7 @@ TASK_DEFAULTS: Dict[str, Any] = {
     "push": "drill,macro",      # 推哪些表；"" = 不推送
     "skip_db": False,           # True = 不写 ADS 表（只算 + 推送）
     "drill_keyword_filter": False,
+    "plugins": [],              # 开启的插件名（engin_cli/plugins/）；空 = 用 settings.plugins
     "quality_gate": True,
     "quality_retries": None,    # None = 用 settings.quality_retries
     "backfill_lookback": "",    # "" = 用 settings
@@ -182,6 +183,8 @@ def normalize_config(cfg: Optional[dict]) -> Dict[str, Any]:
     for k in ("skip_db", "drill_keyword_filter", "quality_gate", "verbose"):
         out[k] = bool(out[k])
     out["backfill_lookback"] = str(out["backfill_lookback"] or "").strip()
+    from ..plugins import parse_names
+    out["plugins"] = parse_names(out["plugins"])
     return out
 
 
@@ -217,6 +220,8 @@ def build_run_argv(cfg: Dict[str, Any], today: Optional[dt.date] = None) -> Tupl
         argv.append("--skip-db")
     if cfg["drill_keyword_filter"]:
         argv.append("--drill-keyword-filter")
+    if cfg["plugins"]:
+        argv += ["--plugins", ",".join(cfg["plugins"])]
     if not cfg["quality_gate"]:
         argv.append("--no-quality-gate")
     if cfg["quality_retries"] is not None:

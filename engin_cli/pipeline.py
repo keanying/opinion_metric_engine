@@ -253,6 +253,11 @@ def _compute(settings: EtlSettings,
     res.quality_steps = []
     res.errors = validate_all(checks, trace=res.quality_steps)
 
+    # 插件（engin_cli/plugins/，客户特意化逻辑）：检测核对的是真实计算结果，检测完再执行
+    if getattr(settings, "plugins", None):
+        from .plugins import run_plugins
+        res.notes.extend(run_plugins(settings.plugins, res.tables, ctx))
+
     # 回补可见化：输出日期里有多少「景区·渠道·日」是复制来的明细
     lb = ctx.backfill_lookback(D_PLATFORM_WINDOWS)
     if lb:

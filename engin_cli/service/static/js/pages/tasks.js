@@ -6,10 +6,12 @@ const KEYS = TABLES.map(t => t.key)
 
 export function blankConfig() {
   return { copies: [], scenics: '', tables: '', date_mode: 'today', recent_days: 3, start_date: '', end_date: '',
-           rerun_days: '', push: 'drill,macro', skip_db: false, drill_keyword_filter: false,
+           rerun_days: '', push: 'drill,macro', skip_db: false, drill_keyword_filter: false, plugins: [],
            quality_gate: true, quality_retries: '', backfill_lookback: '', verbose: true }
 }
 const split = s => String(s || '').split(',').filter(Boolean)
+let _plugins = null
+const loadPlugins = () => (_plugins = _plugins || api('/api/plugins').catch(() => []))
 const modeText = c => ({ today: '当天', yesterday: '昨天', recent: `近 ${c.recent_days} 天`,
   range: `${c.start_date}~${c.end_date}` })[c.date_mode] || ''
 
@@ -50,7 +52,15 @@ export const TaskBody = {
     }
     const preset = keys => { p.cfg.tables = keys.length === KEYS.length ? '' : keys.join(',');
       p.cfg.push = split(p.cfg.push).filter(x => keys.includes(x)).join(',') }
-    return { calc, push, setCalc, setPush, preset, TABLES, DATE_MODES, KEYS }
+    // 插件（engin_cli/plugins/ 里的客户特意化逻辑）：列表从服务取，新加的插件自动出现
+    const plugins = ref([])
+    loadPlugins().then(x => { plugins.value = x })
+    const pluginOn = n => (p.cfg.plugins || []).includes(n)
+    const setPlugin = (n, on) => {
+      const cur = (p.cfg.plugins || []).filter(x => x !== n)
+      p.cfg.plugins = on ? plugins.value.map(x => x.name).filter(x => x === n || cur.includes(x)) : cur
+    }
+    return { calc, push, setCalc, setPush, preset, plugins, pluginOn, setPlugin, TABLES, DATE_MODES, KEYS }
   },
   template: `
   <div class="tb">
@@ -118,6 +128,8 @@ export const TaskBody = {
             <Switch v-model="cfg.quality_gate"/></div></div>
         <div class="opt"><div><b>下钻表按采集关键字过滤</b><Tip text="下钻表只收评论包含本景区采集关键字（及词云里的词）的评论"/></div>
           <Switch v-model="cfg.drill_keyword_filter"/></div>
+        <div v-for="g in plugins" :key="g.name" class="opt"><div><b>{{ g.label }}</b><Tag color="violet" style="margin-left:6px">插件</Tag><Tip :text="g.description + '（质量检测之后、落库推送之前执行）'"/></div>
+          <Switch :model-value="pluginOn(g.name)" @update:model-value="v => setPlugin(g.name, v)"/></div>
         <div class="opt"><div><b>只算不写库</b><Tip text="不写 ADS 表（只算 + 推送），一般不用"/></div><Switch v-model="cfg.skip_db"/></div>
         <div class="opt"><div><b>往前重跑 / 补数上限</b><Tip text="往前多重跑几天，覆盖延迟产出的数据；不填 = 用 settings 里的"/></div>
           <div class="opt-r"><input v-model="cfg.rerun_days" class="w64" placeholder="默认"/><span class="hint">天</span>

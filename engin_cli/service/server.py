@@ -97,6 +97,11 @@ TABLE_SCENIC = "src_opinion_social_scenic"   # 景区下拉的来源（使用方
 _LOG_STREAM = re.compile(r"^/api/runs/(\d+)/log/stream$")
 
 
+def _plugins_describe() -> List[dict]:
+    from ..plugins import describe
+    return describe()
+
+
 def _utf8_complete(data: bytes) -> int:
     """data 里完整 UTF-8 字符的长度：末尾一个多字节字符只写了一半时，把那半个去掉（下次再读）。"""
     for k in range(1, min(4, len(data)) + 1):
@@ -1000,7 +1005,7 @@ class App:
                    "push_retries": st.push_retries, "push_log_dir": st.push_log_dir},
             "计算": {"rerun_days": st.rerun_days, "backfill_lookback": st.backfill_lookback,
                    "lookback_days": st.lookback_days, "drill_keyword_filter": st.drill_keyword_filter,
-                   "score_formula": st.score_formula},
+                   "plugins": st.plugins, "score_formula": st.score_formula},
             "数据质量": {"quality_gate": st.quality_gate, "quality_retries": st.quality_retries,
                      "notify_feishu_webhook": nv["webhook"],
                      "notify_feishu_from": {"page": "服务页面", "local": "配置文件", "none": "未配置"}[nv["source"]],
@@ -1060,6 +1065,7 @@ def _route_table(app: App):
         ("POST", r"/api/quality/repair", lambda m, q, b: app.quality_repair(b)),
         ("GET", r"/api/metrics/scenics", lambda m, q, b: app.metric_scenics()),
         ("GET", r"/api/scenics", lambda m, q, b: app.scenic_options()),
+        ("GET", r"/api/plugins", lambda m, q, b: _plugins_describe()),
         ("GET", r"/api/metrics/cell", lambda m, q, b: app.metric_cell(
             q1(q, "scenic"), q1(q, "date"), q1(q, "granularity", "td"))),
         ("GET", r"/api/metrics/trend", lambda m, q, b: app.metric_trend(

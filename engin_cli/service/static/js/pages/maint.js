@@ -67,7 +67,7 @@ export default {
       host: '地址', port: '端口', user: '用户', database: '计算 / 系统表库', ads_database: '指标库（ADS）', src_database: '源数据库',
       password: '密码', push_url: '推送地址', push_headers: '请求头', push_batch_size: '每批行数', push_timeout: '超时（秒）',
       push_retries: '重试次数', push_log_dir: '推送记录目录', rerun_days: '往前重跑天数', backfill_lookback: '补数上限（天）',
-      lookback_days: '取数天数', drill_keyword_filter: '下钻按关键字过滤', score_formula: '得分公式', quality_gate: '不通过就回退',
+      lookback_days: '取数天数', drill_keyword_filter: '下钻按关键字过滤', plugins: '默认开启的插件', score_formula: '得分公式', quality_gate: '不通过就回退',
       quality_retries: '重算次数', notify_feishu_webhook: '通知地址', notify_feishu_from: '通知地址来源', notify_feishu_secret: '签名密钥',
       push_dry_run: '试推', push_strict: '推送失败算执行失败', push_retry_backoff: '重试间隔', store: '系统表存储', data_dir: '数据目录', push_settings_from_page: '页面改过的推送设置', app_root: '程序目录', started_at: '启动时间' }
     // 值的显示方式：tag（是 / 否、已配置 / 未配置）、list（对象，一项一行）、mono（地址 / 路径）、text
