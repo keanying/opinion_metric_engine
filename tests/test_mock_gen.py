@@ -202,3 +202,82 @@ def test_coverage_endpoint(tmp_path):
                                      {"start": "20261106", "end": "20261106", "days": 1}]
     assert by["drill"]["error"] and by["drill"]["days"] == 0
     assert any("`scenic_spot_code`=%s" in s for s in seen) and any("`scenic_id`=%s" in s for s in seen)
+
+
+# ══════════════════════════════════════════════════════════════════
+# 每日自动生成（「演示数据」页的定时）
+# ══════════════════════════════════════════════════════════════════
+class _Runner:
+    current = None
+
+    def __init__(self):
+        self.submitted = []
+
+    def queued(self):
+        return 0
+
+    def submit(self, kind, argv, title, trigger="manual", task=None, then=None):
+        self.submitted.append((kind, argv, title, trigger, task))
+        return len(self.submitted)
+
+
+def test_mockgen_schedule_normalize():
+    c = R.normalize_mockgen_schedule({"enabled": True, "times": ["1:20", "13:05", "01:20"], "recent_days": "5",
+                                      "push": "macro"})
+    assert c["times"] == ["01:20", "13:05"] and c["recent_days"] == 5
+    assert c["scenic"] == G.MOCK_SCENIC and c["name"] == G.MOCK_NAME
+    assert c["tables"] == "drill,macro,core,platform,dimension,content" and c["push"] == "macro"
+    argv, title = R.mockgen_schedule_argv(c, date(2026, 11, 23))
+    assert argv[argv.index("--start-date") + 1] == "20261119" and argv[argv.index("--end-date") + 1] == "20261123"
+    assert "每日" in title
+    for bad, why in (({"enabled": True, "times": []}, "执行时间"), ({"times": ["25:00"]}, "HH:MM"),
+                     ({"recent_days": 0}, "1 ~ 60"), ({"recent_days": "x"}, "数字"),
+                     ({"skip_db": True, "push": ""}, "不写库也不推送")):
+        with pytest.raises(ValueError, match=why):
+            R.normalize_mockgen_schedule(bad)
+
+
+def test_mockgen_schedule_fires_once_a_day(tmp_path):
+    import datetime as dt
+    from engin_cli.service import scheduler as SC
+    from engin_cli.service.store import Store
+    store = Store(str(tmp_path / "s.db"))
+    fr = _Runner()
+    s = SC.Scheduler(store, fr)
+    now = dt.datetime(2026, 11, 23, 1, 21)
+    assert s.tick(now) == []                                                   # 没设置 = 不跑
+    store.set_kv(R.MOCKGEN_SCHEDULE_KEY, R.normalize_mockgen_schedule(
+        {"enabled": True, "times": ["01:20"], "recent_days": 3, "push": "drill,macro",
+         "saved_at": "2026-11-20 10:00:00"}))
+    assert s.tick(now) == [1]
+    kind, argv, title, trigger, task = fr.submitted[0]
+    assert kind == "mock-gen" and trigger == "schedule" and task == R.MOCKGEN_TASK
+    assert argv[argv.index("--start-date") + 1] == "20261121" and argv[argv.index("--push") + 1] == "drill,macro"
+    assert s.tick(now + dt.timedelta(minutes=2)) == []                         # 一天一次
+    assert s.tick(dt.datetime(2026, 11, 24, 1, 25)) == [2]                     # 第二天照常
+    # 定时总开关关着：不触发，过了补触发窗口记一笔「跳过」
+    s.set_enabled(False)
+    assert s.tick(dt.datetime(2026, 11, 25, 1, 21)) == []
+    assert s.tick(dt.datetime(2026, 11, 25, 2, 0)) == []
+    assert any("跳过 01:20：定时总开关关着" in e["text"] for e in store.list_events())
+    # 关掉每日生成：不再触发
+    s.set_enabled(True)
+    store.set_kv(R.MOCKGEN_SCHEDULE_KEY, {**store.get_kv(R.MOCKGEN_SCHEDULE_KEY), "enabled": False})
+    assert s.tick(dt.datetime(2026, 11, 26, 1, 21)) == []
+
+
+def test_mockgen_schedule_api(tmp_path):
+    from engin_cli.service.server import ApiError, App
+    st = EtlSettings()
+    st.service_store = "sqlite"
+    app = App(st, data_dir=str(tmp_path), scheduler_enabled=False, db_factory=lambda: None, auth=object())
+    v = app.mockgen_schedule_view()
+    assert not v["saved"] and not v["config"]["enabled"] and v["next_fire"] is None
+    with pytest.raises(ApiError, match="执行时间"):
+        app.save_mockgen_schedule({"enabled": True, "times": []})
+    v = app.save_mockgen_schedule({"enabled": True, "times": ["01:20"], "recent_days": 2,
+                                   "tables": "macro", "push": "macro,drill"})
+    assert v["saved"] and v["config"]["push"] == "macro" and v["next_fire"]
+    assert "mock-gen --scenic PFTSCM00000001" in v["command_preview"] and "--tables macro" in v["command_preview"]
+    assert v["config"]["saved_at"]
+    assert any("每日自动生成已开启" in e["text"] for e in app.store.list_events())

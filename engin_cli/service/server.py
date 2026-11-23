@@ -36,7 +36,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .runner import (APP_ROOT, PUSH_DEFAULTS, TABLE_KEYS, Runner, TASK_DEFAULTS, apply_push_switch,
                      build_mockgen_argv, build_push_argv, build_run_argv, build_task_argv, normalize_config, normalize_push_settings,
-                     MOCKGEN_MAX_DAYS,
+                     MOCKGEN_MAX_DAYS, MOCKGEN_SCHEDULE_DEFAULTS, MOCKGEN_SCHEDULE_KEY, MOCKGEN_TASK,
+                     mockgen_schedule_argv, normalize_mockgen_schedule,
                      push_overrides, task_dates, normalize_notify_settings)
 from .auth import COOKIE, SESSION_HOURS, Auth, AuthError, UserRepository, denied_reason
 from .scheduler import GRACE, Scheduler, next_fire, normalize_times
@@ -982,6 +983,36 @@ class App:
             raise ApiError(400, str(e))
         return {"run_id": self.runner.submit("mock-gen", argv, title)}
 
+    def mockgen_schedule_view(self) -> dict:
+        raw = self.store.get_kv(MOCKGEN_SCHEDULE_KEY, None) or {}
+        error = ""
+        try:
+            cfg = normalize_mockgen_schedule(raw)
+        except ValueError as e:
+            cfg, error = {**MOCKGEN_SCHEDULE_DEFAULTS, **raw}, str(e)
+        nf = next_fire(cfg["times"], dt.datetime.now()) if cfg["enabled"] and cfg["times"] and not error else None
+        preview = ""
+        if not error:
+            argv, _ = mockgen_schedule_argv(cfg)
+            preview = "python -m engin_cli.cli " + " ".join(argv)
+        runs = self.store.list_runs(kind="mock-gen", limit=20, count=False)["items"]
+        last = next((r for r in runs if r.get("trigger") == "schedule"), None)
+        return {"config": cfg, "saved": bool(raw), "error": error,
+                "next_fire": nf.strftime("%Y-%m-%d %H:%M") if nf else None,
+                "scheduler_available": self.scheduler is not None,
+                "scheduler_enabled": bool(self.scheduler and self.scheduler.enabled),
+                "command_preview": preview, "last_run": last}
+
+    def save_mockgen_schedule(self, body: dict) -> dict:
+        try:
+            cfg = normalize_mockgen_schedule({**(body or {}), "saved_at": now_str()})
+        except ValueError as e:
+            raise ApiError(400, str(e))
+        self.store.set_kv(MOCKGEN_SCHEDULE_KEY, cfg)
+        self.store.add_event("每日自动生成已" + (f"开启：每天 {'、'.join(cfg['times'])}，每次生成近 {cfg['recent_days']} 天"
+                                               if cfg["enabled"] else "关闭"), MOCKGEN_TASK)
+        return self.mockgen_schedule_view()
+
     # ------------------------------------------------------------ 通知设置（飞书机器人）
     def notify_settings_view(self) -> dict:
         """页面上配的飞书机器人（优先）；没配就用 settings_local / 环境变量的。地址里带令牌，只回打码后的。"""
@@ -1114,6 +1145,8 @@ def _route_table(app: App):
         ("GET", r"/api/mockgen/coverage", lambda m, q, b: app.mockgen_coverage(
             q1(q, "scenic"), q1(q, "start"), q1(q, "end"))),
         ("POST", r"/api/mockgen/run", lambda m, q, b: app.mockgen_run(b)),
+        ("GET", r"/api/mockgen/schedule", lambda m, q, b: app.mockgen_schedule_view()),
+        ("PUT", r"/api/mockgen/schedule", lambda m, q, b: app.save_mockgen_schedule(b)),
         ("POST", r"/api/maint/run", lambda m, q, b: app.maint_run(b)),
         ("POST", r"/api/maint/notify-test", lambda m, q, b: app.maint_notify()),
         ("GET", r"/api/notify/settings", lambda m, q, b: app.notify_settings_view()),

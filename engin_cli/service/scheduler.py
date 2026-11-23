@@ -14,7 +14,8 @@ import re
 import threading
 from typing import List, Optional
 
-from .runner import Runner, build_task_argv
+from .runner import (MOCKGEN_FIRED_KEY, MOCKGEN_SCHEDULE_KEY, MOCKGEN_TASK, Runner, build_task_argv,
+                     mockgen_schedule_argv, normalize_mockgen_schedule)
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -143,7 +144,46 @@ class Scheduler:
             self.store.add_event(f"{'、'.join(slots)} 到点，已触发执行 #{run_id}（{title}）"
                                  + ("，前面还有执行没跑完，先排队" if busy else ""), task)
             log.info("定时触发任务「%s」（%s）", task["name"], "、".join(slots))
+        fired += self._tick_mockgen(now, on)
         return fired
+
+    def _tick_mockgen(self, now: dt.datetime, on: bool) -> List[int]:
+        """演示数据每日自动生成（「演示数据」页设置）：到点提交一次 mock-gen，规则和任务定时一样。"""
+        raw = self.store.get_kv(MOCKGEN_SCHEDULE_KEY, None)
+        if not raw or not raw.get("enabled"):
+            return []
+        try:
+            cfg = normalize_mockgen_schedule(raw)
+        except ValueError as e:
+            log.error("演示数据每日生成的设置有误，跳过：%s", e)
+            return []
+        today = now.strftime("%Y-%m-%d")
+        last = dict(self.store.get_kv(MOCKGEN_FIRED_KEY, {}) or {})
+        slots = due_slots(cfg["times"], last, now) if on else []
+        missed = missed_slots(cfg["times"], last, now)
+        if not (slots or missed):
+            return []
+        for t in slots + missed:
+            last[t] = today
+        self.store.set_kv(MOCKGEN_FIRED_KEY, last)          # 先记下，再触发：出错也不会反复触发
+        saved = cfg["saved_at"]
+        if missed and (saved[:10] != today or saved[11:16] < min(missed)):
+            why = "定时总开关关着" if not on else "服务当时没在运行"
+            self.store.add_event(f"跳过 {'、'.join(missed)}：{why}，超过 {int(GRACE.total_seconds() // 60)} 分钟"
+                                 "不补跑（下一次会把近几天一起生成）", MOCKGEN_TASK, "warn")
+        if not slots:
+            return []
+        try:
+            argv, title = mockgen_schedule_argv(cfg, now.date())
+        except ValueError as e:
+            self.store.add_event(f"{'、'.join(slots)} 到点，但设置有误，没有执行：{e}", MOCKGEN_TASK, "error")
+            return []
+        busy = self.runner.current is not None or self.runner.queued() > 0
+        run_id = self.runner.submit("mock-gen", argv, title, trigger="schedule", task=MOCKGEN_TASK)
+        self.store.add_event(f"{'、'.join(slots)} 到点，已触发执行 #{run_id}（{title}）"
+                             + ("，前面还有执行没跑完，先排队" if busy else ""), MOCKGEN_TASK)
+        log.info("定时触发演示数据生成（%s）", "、".join(slots))
+        return [run_id]
 
     def _loop(self):
         while not self._stop.wait(self.interval):

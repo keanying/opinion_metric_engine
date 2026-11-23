@@ -548,7 +548,13 @@ python -m engin_cli.cli mock-gen --date 20261122 --tables drill,macro --skip-db 
 
 页面：左侧菜单「演示数据」（★）。选景区（默认 A级景区）、日期区间、表、写库 / 推送，点「开始生成」，跳到执行记录看日志。
 右边列出每张表库里**已经生成了哪些日期**、所选区间里**还缺哪些日期**；「补到今天」从已生成的最后一天往后补到今天。
-接口：`GET /api/mockgen/coverage?scenic=&start=&end=`、`POST /api/mockgen/run`（执行类型 `mock-gen`）。
+**每日自动生成**：同一页下方「每日自动生成」，设每天几点、每次生成近 N 天（到当天为止，默认 3 天，哪天没跑成下一次顺带补上），
+景区 / 表 / 写库 / 推送取保存时上面表单的设置。存在系统表 `service_setting` 的 `mockgen_schedule`（触发记录另存 `mockgen_schedule_fired`），
+由服务的定时线程触发（`Scheduler._tick_mockgen`），规则和任务定时一样：受定时总开关控制、停机超过 30 分钟的不补跑；
+执行记录里显示为「演示数据 · 每日生成」，调度日志同名。
+
+接口：`GET /api/mockgen/coverage?scenic=&start=&end=`、`POST /api/mockgen/run`（执行类型 `mock-gen`）、
+`GET` / `PUT /api/mockgen/schedule`（每日自动生成的设置）。
 
 ### 12. 大盘 KPI 表（需求 2.0，`builders/macro.py`）
 

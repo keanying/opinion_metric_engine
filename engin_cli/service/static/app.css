@@ -1021,3 +1021,4 @@ details summary { cursor: pointer; color: var(--primary); font-size: 13px; margi
 .mg-row:last-of-type { border-bottom: 0; padding-bottom: 0; }
 .mg-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .mg-head small { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mg-sc-state { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; }

@@ -335,6 +335,58 @@ def build_mockgen_argv(body: Optional[dict]) -> Tuple[List[str], str]:
     return argv, title
 
 
+# 演示数据每日自动生成（页面「演示数据」上设置，存系统表 service_setting 的 mockgen_schedule）
+MOCKGEN_SCHEDULE_KEY = "mockgen_schedule"
+MOCKGEN_FIRED_KEY = "mockgen_schedule_fired"        # {时刻: 最后触发的日期}，和保存的设置分开存，改设置不会重复触发
+MOCKGEN_TASK = {"id": None, "name": "演示数据 · 每日生成"}   # 执行记录 / 调度日志里显示的名字
+MOCKGEN_SCHEDULE_DEFAULTS: Dict[str, Any] = {
+    "enabled": False,
+    "times": ["01:20"],         # 每天几点（服务器时间），可以多个
+    "recent_days": 3,           # 每次生成近几天（到当天为止）：哪天没跑成，下一次顺带补上；同一天重复生成结果一样
+    "scenic": "", "name": "",   # 空 = PFTSCM00000001 / A级景区
+    "tables": "",               # 空 = 全部 6 张
+    "push": "",                 # 推哪些表；空 = 不推送
+    "skip_db": False,
+    "saved_at": "",
+}
+
+
+def normalize_mockgen_schedule(data: Optional[dict]) -> Dict[str, Any]:
+    """补齐默认值并校验（时间格式、天数、表、写库 / 推送），配错抛 ValueError。"""
+    from ..mock_gen import MOCK_NAME, MOCK_SCENIC
+    from .scheduler import normalize_times
+    out = dict(MOCKGEN_SCHEDULE_DEFAULTS)
+    for k, v in (data or {}).items():
+        if k in out:
+            out[k] = v
+    out["enabled"] = bool(out["enabled"])
+    out["skip_db"] = bool(out["skip_db"])
+    out["times"] = normalize_times(out["times"])
+    if out["enabled"] and not out["times"]:
+        raise ValueError("每日自动生成：至少加一个执行时间")
+    try:
+        out["recent_days"] = int(3 if out["recent_days"] in (None, "") else out["recent_days"])
+    except (TypeError, ValueError):
+        raise ValueError("每次生成近几天要填数字")
+    if not 1 <= out["recent_days"] <= 60:
+        raise ValueError("每次生成近几天：填 1 ~ 60")
+    out["scenic"] = str(out["scenic"] or MOCK_SCENIC).strip()
+    out["name"] = str(out["name"] or MOCK_NAME).strip()
+    argv, _ = mockgen_schedule_argv(out)                # 表 / 推送 / 写库 的校验和手动生成一样
+    out["tables"] = argv[argv.index("--tables") + 1]
+    out["push"] = argv[argv.index("--push") + 1] if "--push" in argv else ""
+    out["saved_at"] = str(out["saved_at"] or "")
+    return out
+
+
+def mockgen_schedule_argv(cfg: Dict[str, Any], today: Optional[dt.date] = None) -> Tuple[List[str], str]:
+    """每日自动生成这一次要跑的命令：近 recent_days 天（到 today 为止）。"""
+    today = today or dt.date.today()
+    start = today - dt.timedelta(days=int(cfg["recent_days"]) - 1)
+    argv, title = build_mockgen_argv({**cfg, "start": _ymd(start), "end": _ymd(today)})
+    return argv, title.replace("演示数据 · ", "演示数据 · 每日 · ", 1)
+
+
 def final_status(exit_code: int, summary: dict) -> str:
     if exit_code == 0:
         return "success"

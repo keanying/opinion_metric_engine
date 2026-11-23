@@ -1,7 +1,7 @@
 // 演示数据：给演示景区（默认 PFTSCM00000001 A级景区）按日期区间生成数据（engin_cli mock-gen）
 // 评论是按「景区 + 日期」凭空生成的，再走正常的跑批计算；同一天每次生成结果都一样，分几次生成、重复生成都没关系
 import { ref, reactive, onMounted, computed, watch } from 'vue'
-import { api, notify, todayYmd, TABLES, TABLE_LABEL, fmtNum } from '../api.js'
+import { api, notify, todayYmd, TABLES, TABLE_LABEL, fmtNum, confirmBox } from '../api.js'
 import { loadScenics } from '../ui.js'
 
 const ymdAdd = (s, n) => {
@@ -63,8 +63,43 @@ export default {
         notify(`已提交执行 #${r.run_id}`); location.hash = '/runs/' + r.run_id
       } catch (e) { notify(e.message, 'err') } finally { busy.value = false }
     }
+    // ── 每日自动生成：时间 / 近几天在这里设，景区 / 表 / 写库 / 推送 保存时取上面「生成数据」的设置
+    const sc = ref(null), sf = reactive({ enabled: false, times: [], recent_days: 3 }), newTime = ref(''), saving = ref(false)
+    const loadSc = async () => {
+      try { sc.value = await api('/api/mockgen/schedule')
+        Object.assign(sf, { enabled: sc.value.config.enabled, times: [...sc.value.config.times], recent_days: sc.value.config.recent_days })
+      } catch (e) { notify(e.message, 'err') }
+    }
+    onMounted(loadSc)
+    const addTime = () => {
+      const t = newTime.value.trim()
+      if (!/^([01]?\d|2[0-3]):[0-5]\d$/.test(t)) return notify('时间格式是 HH:MM，例如 01:20', 'err')
+      const v = t.padStart(5, '0')
+      if (!sf.times.includes(v)) sf.times.push(v)
+      sf.times.sort(); newTime.value = ''
+    }
+    const tabText = v => { const k = String(v || '').split(',').filter(Boolean)
+      return !k.length ? '不推送' : k.length === TABLES.length ? '全部 6 张' : k.map(x => TABLE_LABEL[x] || x).join('、') }
+    const saveSc = async () => {
+      if (sf.enabled && !picked.value.length) { notify('至少选一张表', 'err'); return }
+      const body = { enabled: sf.enabled, times: sf.times, recent_days: sf.recent_days, scenic: f.scenic, name: f.name,
+                     tables: f.tables, push: f.push ? f.tables : '', skip_db: !f.write_db }
+      if (sf.enabled && !await confirmBox({ title: '保存每日自动生成', okText: '保存', items: [
+        ['时间', '每天 ' + sf.times.join('、')], ['日期', `每次生成近 ${sf.recent_days} 天（到当天）`],
+        ['景区', `${f.name}（${f.scenic}）`], ['表', tabText(f.tables)], ['写库', f.write_db ? '写入 ADS 库' : '不写库'],
+        ['推送', f.push ? (pushOff.value ? '推送（推送总开关已关闭，暂不推）' : '推送') : '不推送']] })) return
+      saving.value = true
+      try { sc.value = await api('/api/mockgen/schedule', { method: 'PUT', body }); notify('已保存'); }
+      catch (e) { notify(e.message, 'err') } finally { saving.value = false }
+    }
+    // 把保存过的定时设置填回上面的表单（看 / 改的时候用）
+    const useSaved = () => {
+      const c = sc.value && sc.value.config; if (!c) return
+      Object.assign(f, { scenic: c.scenic, name: c.name, tables: c.tables, push: !!c.push, write_db: !c.skip_db })
+    }
     return { f, cov, loading, busy, pushOff, picked, toggle, rows, days, lastDay, fillToToday, quick, missDays, submit,
-             load, TABLES, TABLE_LABEL, fmtNum, todayYmd, ymd, segText }
+             load, TABLES, TABLE_LABEL, fmtNum, todayYmd, ymd, segText,
+             sc, sf, newTime, saving, addTime, saveSc, useSaved, tabText }
   },
   template: `
   <div>
@@ -123,6 +158,35 @@ export default {
           </div>
           <div v-if="!rows.length" class="hint">先在左边选表</div>
         </div>
+      </div>
+    </div>
+
+    <div class="card sect" v-if="sc">
+      <div class="sect-head"><h3>每日自动生成<Tip wide text="每天到点自动生成「近 N 天」的数据（到当天为止），哪天没跑成下一次顺带补上；同一天重复生成结果一样。景区、表、写库、推送保存时取上面「生成数据」里的设置。到点规则和任务定时一样：服务停机超过 30 分钟的不补跑，定时总开关关着时不执行"/></h3>
+        <span class="mg-sc-state">
+          <Tag v-if="sc.error" color="orange" icon="alert">设置有误：{{ sc.error }}</Tag>
+          <Tag v-else-if="!sc.config.enabled" color="grey">未开启</Tag>
+          <Tag v-else-if="!sc.scheduler_enabled" color="orange" icon="alert">定时总开关已暂停，到点不会执行</Tag>
+          <Tag v-else color="green" icon="clock">下次 {{ sc.next_fire }}</Tag>
+          <span v-if="sc.last_run" class="hint">上次：<a class="link" :href="'#/runs/' + sc.last_run.id">#{{ sc.last_run.id }}</a>
+            <StatusTag :status="sc.last_run.status"/></span></span></div>
+      <div class="sect-body">
+        <div class="frow"><label>开启</label><Switch v-model="sf.enabled"/></div>
+        <div class="frow"><label>每天</label><div class="chips">
+          <span v-for="(t,i) in sf.times" :key="t" class="time-chip">{{ t }}<a @click="sf.times.splice(i,1)">×</a></span>
+          <span class="time-add"><input v-model="newTime" type="time" @keyup.enter="addTime"/><Icon name="clock" :size="14"/></span>
+          <button class="btn light" @click="addTime"><Icon name="plus" :size="13" :sw="2.4"/>添加</button></div></div>
+        <div class="frow"><label>每次生成</label>近 <input type="number" min="1" max="60" v-model.number="sf.recent_days" class="w64"/> 天（到当天为止）</div>
+        <div class="frow ro" v-if="sc.saved"><label>已保存</label><div class="chips">
+          <span class="chip grey">{{ sc.config.name }}（{{ sc.config.scenic }}）</span>
+          <span class="chip grey">表：{{ tabText(sc.config.tables) }}</span>
+          <span class="chip grey">{{ sc.config.skip_db ? '不写库' : '写库' }}</span>
+          <span class="chip grey">推送：{{ tabText(sc.config.push) }}</span>
+          <a class="link" @click="useSaved">填回上面的表单</a></div></div>
+        <div class="frow ro" v-if="sc.command_preview && sc.config.enabled"><label>命令</label>
+          <span class="mono ell grow" :title="sc.command_preview">{{ sc.command_preview }}</span></div>
+        <div class="actions"><span class="hint">景区、表、写库、推送用上面「生成数据」里当前的设置</span>
+          <button class="btn primary" :disabled="saving" @click="saveSc">{{ saving ? '保存中…' : '保存' }}</button></div>
       </div>
     </div>
   </div>`,
