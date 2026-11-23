@@ -193,3 +193,121 @@ def test_mock_preview_does_not_send(produced, monkeypatch, gateway, capsys):
     assert rc == 0 and not bodies
     out = capsys.readouterr().out
     assert "报文预览" in out and DST in out
+
+
+# ══════════════════════════════════════════════════════════════════
+# 关键字替换：源景区名 → 新景区名（长白山好看 → A级景区好看）
+# ══════════════════════════════════════════════════════════════════
+CBS, CBS_NAME, A_ID, A_NAME = "S_CBS", "长白山景区", "PFTSCM00000001", "A级景区"
+
+
+@pytest.fixture(scope="module")
+def cbs():
+    """景区名「长白山景区」，评论关键词里有「长白山好看」「长白山景区真美」，也有和景区名无关的词。"""
+    rows = []
+    for i, d in enumerate(pd.date_range("2026-09-01", "2026-09-12")):
+        ds = d.strftime("%Y%m%d")
+        for cid, text, words, s in ((f"a{ds}", "长白山好看，天池很美", ["长白山好看", "天池"], 1),
+                                    (f"b{ds}", "长白山景区真美", ["长白山景区真美"], 1),
+                                    (f"c{ds}", "排队太久了", ["排队"], -1)):
+            r = _comment(cid, text, words, ds)
+            r.update(scenic_id=CBS, scenic_name=CBS_NAME, sentiment_score=s,
+                     sentiment_label="正向" if s > 0 else "负向")
+            rows.append(r)
+    st = EtlSettings()
+    st.write_db = False
+    st.lookback_days = 30
+    res = run(st, ["20260911", "20260912"], comments_df=pd.DataFrame(rows))
+    assert res.ok, res.errors
+    return res.tables
+
+
+def _words(tables):
+    from engin_cli.loader import TABLE_CONTENT
+    out = set(tables[TABLE_CONTENT]["emotion_word"]) | set(tables[TABLE_DRILL_ANALYSIS]["emotion_word"])
+    for v in tables[TABLE_MACRO]["wordcloud_map"]:
+        for items in json.loads(v).values():
+            out |= {it["word"] for it in items}
+    return out
+
+
+def test_default_replace_words():
+    assert M.default_replace_words(["长白山景区"]) == ["长白山景区", "长白山"]
+    assert M.default_replace_words(["泰宁九龙潭生态旅游区", "故宫"]) == ["泰宁九龙潭生态旅游区", "泰宁九龙潭", "故宫"]
+    assert M.default_replace_words(["山景区", "", None]) == ["山景区"]          # 去后缀剩 1 个字：不拆
+    assert M.parse_words(" 长白山，长白山景区、长白山 ,") == ["长白山", "长白山景区"]
+
+
+def test_replacer_longest_first_and_single_pass():
+    rep = M.make_replacer(["长白山", "长白山景区"], "A级景区")
+    assert rep("长白山景区真美") == "A级景区真美"                                # 不会变成 A级景区景区真美
+    assert rep("长白山好看") == "A级景区好看" and rep("天池") == "天池" and rep(None) is None
+    # 新名称里含旧词：只换一次
+    assert M.make_replacer(["长白山"], "长白山演示")("长白山好看") == "长白山演示好看"
+    assert M.make_replacer(["A级景区"], "A级景区") is None
+
+
+def test_wordcloud_words_replaced_and_merged():
+    rep = M.make_replacer(["长白山景区", "长白山"], "A级景区")
+    v = json.dumps({"positiveWord": [{"word": "长白山好看", "rate": 30.5}, {"word": "天池", "rate": 20.0},
+                                     {"word": "长白山景区好看", "rate": 10.25}],
+                    "negativeWord": []}, ensure_ascii=False, separators=(",", ":"))
+    out = json.loads(M._replace_wordcloud(v, rep))
+    assert out["positiveWord"] == [{"word": "A级景区好看", "rate": 40.75}, {"word": "天池", "rate": 20.0}]
+    same = json.dumps({"positiveWord": [{"word": "天池", "rate": 1.0}]})
+    assert M._replace_wordcloud(same, rep) == same                              # 没有要换的：原样
+    assert M._replace_wordcloud(None, rep) is None
+
+
+def test_copy_replaces_source_name_in_keywords(cbs):
+    out, notes = M.build_mock(FakeDB(cbs), CBS, A_ID, A_NAME, "20260911", "20260912", list(cbs))
+    before, after = _words(cbs), _words(out)
+    assert {"长白山好看", "长白山景区真美"} <= before
+    assert {"A级景区好看", "A级景区真美", "天池", "排队"} <= after
+    assert not any("长白山" in w for w in after)
+    drill = out[TABLE_DRILL_ANALYSIS]
+    assert not drill["content_snippet"].str.contains("长白山").any()
+    assert drill["content_snippet"].str.contains("A级景区").any()
+    # detail_uk 按替换后的词重算：跟跑批同一个公式，且不重复
+    assert drill["detail_uk"].tolist() == M.drill_detail_uk(drill) and drill["detail_uk"].is_unique
+    # 指标数值不动：除了景区、名称、关键字、etl_time、detail_uk，其余列与原表一致
+    from engin_cli.loader import TABLE_CONTENT
+    c0, c1 = cbs[TABLE_CONTENT].sort_values("travel_date", kind="stable").reset_index(drop=True), \
+        out[TABLE_CONTENT].reset_index(drop=True)
+    keep = [c for c in c1.columns if c not in ("scenic_spot_code", "scenic_spot_name", "emotion_word", "etl_time")]
+    pd.testing.assert_frame_equal(c1[keep], c0[keep], check_dtype=False)
+    assert any(n.startswith("关键字替换：长白山景区、长白山 → A级景区") for n in notes)
+
+
+def test_copy_with_explicit_words_and_switch_off(cbs):
+    out, notes = M.build_mock(FakeDB(cbs), CBS, A_ID, A_NAME, "20260911", "20260912", [TABLE_MACRO],
+                              replace_words="长白山好看")
+    words = _words({**cbs, TABLE_MACRO: out[TABLE_MACRO]})
+    assert "A级景区" in words and "长白山景区真美" in words                     # 只换指定的词
+    out, notes = M.build_mock(FakeDB(cbs), CBS, A_ID, A_NAME, "20260911", "20260912", [TABLE_MACRO],
+                              replace=False)
+    assert out[TABLE_MACRO]["wordcloud_map"].tolist() == \
+        cbs[TABLE_MACRO].sort_values("travel_date", kind="stable")["wordcloud_map"].tolist()
+    assert any("已关闭" in n for n in notes)
+
+
+def test_collision_after_replace_is_reported(cbs):
+    # 「长白山好看」「长白山景区真美」都换成「A级景区」→ 同一个词，内容表主键撞车，要提示
+    out, notes = M.build_mock(FakeDB(cbs), CBS, A_ID, A_NAME, "20260911", "20260912", list(cbs),
+                              replace_words=["长白山好看", "长白山景区真美"])
+    assert any("主键重复" in n for n in notes)
+
+
+def test_mock_command_replace_words(cbs, monkeypatch, gateway, capsys):
+    url, bodies = gateway
+    monkeypatch.setattr(cli, "MySQL", lambda cfg: FakeDB(cbs))
+    rc = cli.main(["mock", "--from-scenic", CBS, "--to-scenic", A_ID, "--to-name", A_NAME, "--no-progress",
+                   "--date", "20260912", "--tables", "content", "--push-url", url])
+    assert rc == 0
+    words = {r["emotion_word"] for b in bodies for r in b["data"]}
+    assert "A级景区好看" in words and not any("长白山" in w for w in words)
+    assert "关键字替换：长白山景区、长白山 → A级景区" in capsys.readouterr().out
+    bodies.clear()
+    rc = cli.main(["mock", "--from-scenic", CBS, "--to-scenic", A_ID, "--to-name", A_NAME, "--no-progress",
+                   "--date", "20260912", "--tables", "content", "--push-url", url, "--no-replace-words"])
+    assert rc == 0 and "长白山好看" in {r["emotion_word"] for b in bodies for r in b["data"]}

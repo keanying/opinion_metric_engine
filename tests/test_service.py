@@ -1123,6 +1123,12 @@ def test_copy_steps_follow_the_run():
     # 只算了部分表：复制同样的表
     _, _, _, then2 = R.build_task_argv({**COPY_CFG, "tables": "drill,macro"}, dt.date(2026, 11, 3))
     assert then2[0]["argv"][-2:] == ["--tables", "drill,macro"]
+    # 关键字替换词：页面上填了就带上（中文逗号 / 顿号 / 空格都认），不填不带（mock 默认用源景区名称）
+    _, _, _, then3 = R.build_task_argv({**COPY_CFG, "copies": [{**COPY_CFG["copies"][0],
+                                                                "replace_words": " 九嶷山，九嶷山景区、 "}]},
+                                       dt.date(2026, 11, 3))
+    assert then3[0]["argv"][-2:] == ["--replace-words", "九嶷山,九嶷山景区"]
+    assert "--replace-words" not in then[0]["argv"]
     with pytest.raises(ValueError, match="不在这个任务要跑的景区里"):
         R.normalize_config({**COPY_CFG, "copies": [{"from_scenic": "X", "to_scenic": "Y", "to_name": "n"}]})
     with pytest.raises(ValueError, match="不能和源景区一样"):
@@ -1139,7 +1145,7 @@ def test_legacy_standalone_copy_task_becomes_run_plus_copy():
     cfg = R.normalize_config(old)
     assert cfg["scenics"] == "PFTSCA01016184"                                     # 不会变成跑全部景区
     assert cfg["copies"] == [{"from_scenic": "PFTSCA01016184", "to_scenic": "PFTSCA01018088",
-                              "to_name": "泰宁九龙潭生态旅游区"}]
+                              "to_name": "泰宁九龙潭生态旅游区", "replace_words": ""}]
 
 
 def test_scheduler_passes_copy_steps(tmp_path):

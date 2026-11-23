@@ -523,6 +523,13 @@ python -m engin_cli.cli mock --from-scenic PFTSCA01016184 --to-scenic PFTSCA0999
 - 下钻表的 `detail_uk` 用与 `drill_analysis._expand` 相同的公式按新景区重算，避免和原景区 pkId 相撞。
   `etl_time` 记为执行时间。
 - 新编号和原编号相同时拒绝执行。
+- **关键字里的源景区名换成新名称**：`长白山好看 → A级景区好看`。换的列（`mock.KEYWORD_COLUMNS`）：
+  内容表 / 下钻表的 `emotion_word`、下钻表 `content_snippet`、大盘表 `wordcloud_map` 里的 `word`（换完同名的词合并、rate 相加）。
+  要换的词默认取源景区名称（库里的 `scenic_name`），连同去掉「景区 / 风景区 / 旅游区…」后缀的叫法（`长白山景区` → 换 `长白山景区` 和 `长白山`）；
+  `--replace-words 长白山,长白山景区` 自己指定，`--no-replace-words` 关闭。一次扫描、长词优先，不会换出「A级景区景区」。
+  替换先于 `detail_uk` 重算（它含 `emotion_word`）。指标数值不动。
+  替换后两个词变成同一个词（内容表主键重复）时会提示：下游按主键只留一条。
+  任务里「跑完后复制」每一行也可以填替换词（`copies[].replace_words`），不填 = 源景区名称。
 - 从库里读出来的 `DECIMAL` / `datetime` / `date` 由 `pusher._jsonable` 转成数字和字符串。
 
 ### 12. 大盘 KPI 表（需求 2.0，`builders/macro.py`）

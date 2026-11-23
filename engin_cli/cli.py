@@ -744,7 +744,9 @@ def cmd_mock(args) -> int:
     db = MySQL(st.db)
     try:
         tables, notes = build_mock(db, args.from_scenic, args.to_scenic, args.to_name,
-                                   dates[0], dates[-1], names)
+                                   dates[0], dates[-1], names,
+                                   replace_words=args.replace_words,
+                                   replace=not args.no_replace_words)
     except ValueError as e:
         print(f"✗ {e}")
         return 2
@@ -928,6 +930,12 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--tables", metavar="表名",
                    help="表名，逗号分隔；不填或 all=全部。"
                         "简写：core/platform/dimension/content/drill/macro")
+    rw = m.add_mutually_exclusive_group()
+    rw.add_argument("--replace-words", metavar="词",
+                    help="关键字里要换成新景区名称的词，逗号分隔，如 长白山,长白山景区；"
+                         "不填 = 源景区名称（连同去掉「景区 / 风景区…」后缀的叫法）。"
+                         "换的列：内容表 / 下钻表的 emotion_word、下钻表 content_snippet、大盘表词云")
+    rw.add_argument("--no-replace-words", action="store_true", help="关键字原样复制，不替换")
     m.add_argument("--push-url", help="推送地址，覆盖配置")
     m.add_argument("--push-dry-run", action="store_true", help="只组报文不真发（只统计批次）")
     m.add_argument("--preview", action="store_true",

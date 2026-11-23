@@ -28,7 +28,8 @@ APP_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 
 TASK_DEFAULTS: Dict[str, Any] = {
     # 跑完后复制给其他景区（engin_cli mock：把源景区刚算好的 ADS 结果复制给新景区编号并推送，不写本地库）
-    # [{"from_scenic": 源景区, "to_scenic": 新景区编号, "to_name": 新景区名称}]；日期、表和本次跑批一样
+    # [{"from_scenic": 源景区, "to_scenic": 新景区编号, "to_name": 新景区名称,
+    #   "replace_words": 关键字里换成新名称的词（逗号分隔，空 = 源景区名称）}]；日期、表和本次跑批一样
     "copies": [],
     "scenics": "",              # 逗号分隔；空 = 取数区间内有评论的全部景区
     "tables": "",               # 计算 / 输出哪些表（逗号分隔简写）；空 = 全部
@@ -240,8 +241,9 @@ def _copies(items, scenics: str) -> List[Dict[str, str]]:
     run_sc = [s for s in scenics.split(",") if s]
     out, seen = [], set()
     for c in items or []:
-        c = {k: str((c or {}).get(k) or "").strip() for k in ("from_scenic", "to_scenic", "to_name")}
-        if not any(c.values()):
+        c = {k: str((c or {}).get(k) or "").strip()
+             for k in ("from_scenic", "to_scenic", "to_name", "replace_words")}
+        if not any(c[k] for k in ("from_scenic", "to_scenic", "to_name")):
             continue                                   # 页面上加了一行没填，忽略
         if not c["from_scenic"] and len(run_sc) == 1:
             c["from_scenic"] = run_sc[0]
@@ -251,6 +253,8 @@ def _copies(items, scenics: str) -> List[Dict[str, str]]:
             raise ValueError(f"跑完后复制：新景区编号不能和源景区一样（{c['to_scenic']}）")
         if run_sc and c["from_scenic"] not in run_sc:
             raise ValueError(f"跑完后复制：源景区 {c['from_scenic']} 不在这个任务要跑的景区里")
+        from ..mock import parse_words
+        c["replace_words"] = ",".join(parse_words(c["replace_words"]))
         if c["to_scenic"] in seen:
             raise ValueError(f"跑完后复制：新景区 {c['to_scenic']} 重复了")
         seen.add(c["to_scenic"])
@@ -266,6 +270,8 @@ def build_copy_steps(cfg: Dict[str, Any], start: str, end: str) -> List[Dict[str
                 "--to-name", c["to_name"], "--start-date", start, "--end-date", end]
         if cfg["tables"]:
             argv += ["--tables", cfg["tables"]]
+        if c.get("replace_words"):
+            argv += ["--replace-words", c["replace_words"]]
         steps.append({"from_scenic": c["from_scenic"], "kind": "mock", "argv": argv,
                       "title": f"复制 {c['from_scenic']} → {c['to_scenic']}（{c['to_name']}） · "
                                f"{start if start == end else f'{start}~{end}'}"})

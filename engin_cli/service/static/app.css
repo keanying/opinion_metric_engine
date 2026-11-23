@@ -258,7 +258,7 @@ input:not([type=checkbox]):not([type=radio]), select {
 input:focus, select:focus { border-color: #bfc2f5; background: #fff; box-shadow: 0 0 0 3px rgba(91, 95, 224, .12); }
 input::placeholder { color: #a5a2bb; }
 .w64 { width: 64px; } .w80 { width: 80px; } .w100 { width: 100px; } .w120 { width: 120px; }
-.w140 { width: 140px; } .w160 { width: 160px; } .w240 { width: 240px; }
+.w140 { width: 140px; } .w160 { width: 160px; } .w200 { width: 200px; } .w240 { width: 240px; }
 .toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .search { display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 12px; border-radius: 12px; background: #eef0fb; color: var(--muted); }
 .search input { background: transparent !important; border: 0 !important; box-shadow: none !important; height: 34px !important; padding: 0 !important; width: 170px; color: var(--ink); }
