@@ -42,7 +42,7 @@ export const STATUS = {
   cancelled: { text: '已取消', cls: 'gray' },
 }
 
-export const KIND = { run: '跑批', mock: '复制数据', push: '补推', notify: '通知测试' }
+export const KIND = { run: '跑批', mock: '复制数据', 'mock-gen': '演示数据', push: '补推', notify: '通知测试' }
 export const TRIGGER = { schedule: '定时', manual: '手动' }
 
 export const TABLES = [

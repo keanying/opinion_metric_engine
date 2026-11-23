@@ -795,6 +795,72 @@ def cmd_mock(args) -> int:
     return 0
 
 
+def cmd_mock_gen(args) -> int:
+    """演示景区造数：凭空生成评论，走正常的跑批计算，写库 / 推送（见 mock_gen.py）。"""
+    from . import mock_gen as G
+
+    st = load_settings()
+    st.write_db = not args.skip_db
+    st.dry_run = False
+    st.drill_keyword_filter = False        # 造出来的评论没有采集关键字
+    st.plugins = []                        # 不跑客户特意化插件，输出就是计算结果
+    if args.no_quality_gate:
+        st.quality_gate = False
+    st.write_tables = _resolve_tables(args.tables or ",".join(G.DEFAULT_TABLES))
+    _apply_push_args(st, args)
+    _setup_log(args.log_level or st.log_level)
+    scenic, name = args.scenic.strip(), args.name.strip()
+    dates = _explicit_dates(args)
+    if not dates:
+        print("要指定日期：--date yyyyMMdd，或 --start-date / --end-date")
+        return 2
+    if not scenic or not name:
+        print("景区编号、名称不能为空")
+        return 2
+    if st.push_enabled and not st.push_url and not st.push_dry_run:
+        print("未配置推送地址：在 settings_local.py 里填 push_url，"
+              "或设环境变量 OPINION_PUSH_URL，或用 --push-url 传入")
+        return 2
+
+    db = None
+    if st.write_db:
+        db = MySQL(st.db)
+    t0 = time.time()
+    detail: dict = {}
+    try:
+        if db is not None:
+            n = G.real_comment_count(db, scenic, dates[0], dates[-1])
+            if n:
+                print(f"✗ 景区 {scenic} 在 {dates[0]}~{dates[-1]} 有 {n:,} 条真实评论："
+                      "造数会按「景区 + 日期」覆盖它的真实结果，已停止。请换一个演示景区编号")
+                _write_summary(args, {"command": "mock-gen", "dates": dates, "scenics": [],
+                                      "exit_code": 2, "error": f"{scenic} 有真实评论，拒绝造数"})
+                return 2
+        comments, works, ranges = G.build_source(st, dates, scenic, name)
+        print("=" * 72)
+        print(f"演示数据生成：{scenic}（{name}）  目标日期 {dates[0]} ~ {dates[-1]}（{len(dates)} 天）")
+        print(f"  生成评论 {len(comments):,} 条（日期段 {'、'.join(f'{a}~{b}' for a, b in ranges)}，"
+              "含算窗口 / 环比 / 同比要用的历史），只在内存里，不写源表")
+        print(f"  输出：{'、'.join(st.write_tables)}"
+              + ("" if st.write_db else "（不写库）")
+              + (f"   推送 → {st.push_url}" if st.push_enabled else "   不推送"))
+        print("=" * 72)
+        ok, line = _run_one_scenic(st, scenic, dates, db, comments, works,
+                                   verbose=bool(args.verbose), no_progress=bool(args.no_progress),
+                                   detail=detail)
+    finally:
+        if db is not None:
+            db.close()
+    detail["line"] = line
+    detail.pop("quality_trace", None)
+    rc = 0 if ok else 1
+    print(f"\n{'完成 ✓' if ok else '未完成 ✗'}  {line}（用时 {time.time() - t0:.1f}s）")
+    _write_summary(args, {"command": "mock-gen", "dates": dates, "asked_dates": dates,
+                          "scenics": [detail], "elapsed": round(time.time() - t0, 2),
+                          "exit_code": rc})
+    return rc
+
+
 def cmd_serve(args) -> int:
     """启动指标计算服务：页面上编辑任务、定时、看执行日志 / 数据质量 / 历史 / 指标。"""
     from .service.server import serve
@@ -935,6 +1001,27 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--no-progress", action="store_true", help="不显示推送进度条")
     m.add_argument("--log-level")
     m.set_defaults(func=cmd_mock)
+
+    g = sub.add_parser("mock-gen", help="演示景区造数：凭空生成评论，按正常口径算出各表，写库 / 推送（每天数据不同）")
+    g.add_argument("--scenic", default="PFTSCM00000001", help="演示景区编号，默认 PFTSCM00000001")
+    g.add_argument("--name", default="A级景区", help="演示景区名称，默认 A级景区")
+    g.add_argument("--date", help="只生成这一天 yyyyMMdd")
+    g.add_argument("--start-date", help="生成这段日期：起 yyyyMMdd")
+    g.add_argument("--end-date", help="生成这段日期：止 yyyyMMdd")
+    g.add_argument("--tables", metavar="表名",
+                   help="生成哪些表，逗号分隔，认简写 drill,macro,core,platform,dimension,content；"
+                        "不填 = core,platform,dimension,content,macro；all = 全部 6 张")
+    g.add_argument("--skip-db", action="store_true", help="不写本地 ADS 库（只算 + 推送）")
+    g.add_argument("--push", nargs="?", const="all", metavar="表名", help="生成后推送下游，不带值 = 全部生成的表")
+    g.add_argument("--no-push", action="store_true", help="不推送")
+    g.add_argument("--push-url", help="推送地址，覆盖配置")
+    g.add_argument("--push-dry-run", action="store_true", help="只组报文不真发")
+    g.add_argument("--no-quality-gate", action="store_true", help="数据质量检测不通过也照常写库、推送")
+    g.add_argument("--no-progress", action="store_true", help="不显示推送进度条")
+    g.add_argument("-v", "--verbose", action="store_true")
+    g.add_argument("--log-level")
+    g.add_argument("--summary-json", metavar="PATH", help="把结果写成 JSON（指标服务用）")
+    g.set_defaults(func=cmd_mock_gen)
 
     v = sub.add_parser("serve", help="启动指标计算服务（页面：任务 / 定时 / 执行日志 / 数据质量 / 指标）")
     v.add_argument("--host", help="监听地址，默认 settings.service_host=127.0.0.1（只本机）")

@@ -35,7 +35,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .runner import (APP_ROOT, PUSH_DEFAULTS, TABLE_KEYS, Runner, TASK_DEFAULTS, apply_push_switch,
-                     build_push_argv, build_run_argv, build_task_argv, normalize_config, normalize_push_settings,
+                     build_mockgen_argv, build_push_argv, build_run_argv, build_task_argv, normalize_config, normalize_push_settings,
+                     MOCKGEN_MAX_DAYS,
                      push_overrides, task_dates, normalize_notify_settings)
 from .auth import COOKIE, SESSION_HOURS, Auth, AuthError, UserRepository, denied_reason
 from .scheduler import GRACE, Scheduler, next_fire, normalize_times
@@ -943,6 +944,44 @@ class App:
             raise ApiError(400, str(e))
         return {"run_id": self.runner.submit("run", argv, "临时 · " + title)}
 
+    # ------------------------------------------------------------ 演示数据（mock_gen.py）
+    def mockgen_coverage(self, scenic: str = "", start: str = "", end: str = "") -> dict:
+        """演示景区各表在库里已经有哪些日期（连续段），以及 [start, end] 里还没生成的日期。"""
+        from .. import mock_gen as G
+        from ..loader import (TABLE_CONTENT, TABLE_CORE, TABLE_DIMENSION, TABLE_DRILL_ANALYSIS,
+                              TABLE_MACRO, TABLE_PLATFORM, scenic_key)
+        names = {"drill": TABLE_DRILL_ANALYSIS, "macro": TABLE_MACRO, "core": TABLE_CORE,
+                 "platform": TABLE_PLATFORM, "dimension": TABLE_DIMENSION, "content": TABLE_CONTENT}
+        scenic = (scenic or G.MOCK_SCENIC).strip()
+        out, errors = [], []
+        for key in TABLE_KEYS:
+            table = names[key]
+            try:
+                rows = self._query(f"select distinct travel_date d from {self._ads(table)} "
+                                   f"where `{scenic_key(table)}`=%s", (scenic,))
+                dates = [str(r["d"]) for r in rows if r.get("d") is not None]
+                err = ""
+            except ApiError as e:
+                dates, err = [], str(e)
+                errors.append(f"{key}：{e}")
+            segs = G.date_segments(dates)
+            item = {"key": key, "table": table, "days": len(set(dates)), "segments": segs,
+                    "first": segs[0]["start"] if segs else "", "last": segs[-1]["end"] if segs else "",
+                    "error": err}
+            if start and end:
+                item["missing"] = G.missing_segments(dates, start, end)
+            out.append(item)
+        return {"scenic": scenic, "default_scenic": G.MOCK_SCENIC, "default_name": G.MOCK_NAME,
+                "default_tables": list(G.DEFAULT_TABLES), "max_days": MOCKGEN_MAX_DAYS,
+                "tables": out, "db_error": errors[0] if len(errors) == len(TABLE_KEYS) else ""}
+
+    def mockgen_run(self, body: dict) -> dict:
+        try:
+            argv, title = build_mockgen_argv(body)
+        except ValueError as e:
+            raise ApiError(400, str(e))
+        return {"run_id": self.runner.submit("mock-gen", argv, title)}
+
     # ------------------------------------------------------------ 通知设置（飞书机器人）
     def notify_settings_view(self) -> dict:
         """页面上配的飞书机器人（优先）；没配就用 settings_local / 环境变量的。地址里带令牌，只回打码后的。"""
@@ -1072,6 +1111,9 @@ def _route_table(app: App):
             q1(q, "scenic"), q1(q, "channel", "all"), q1(q, "granularity", "td"),
             q1(q, "start"), q1(q, "end"))),
         ("POST", r"/api/maint/push", lambda m, q, b: app.maint_push(b)),
+        ("GET", r"/api/mockgen/coverage", lambda m, q, b: app.mockgen_coverage(
+            q1(q, "scenic"), q1(q, "start"), q1(q, "end"))),
+        ("POST", r"/api/mockgen/run", lambda m, q, b: app.mockgen_run(b)),
         ("POST", r"/api/maint/run", lambda m, q, b: app.maint_run(b)),
         ("POST", r"/api/maint/notify-test", lambda m, q, b: app.maint_notify()),
         ("GET", r"/api/notify/settings", lambda m, q, b: app.notify_settings_view()),

@@ -107,12 +107,12 @@ def notify_overrides(ns: Dict[str, str]) -> Dict[str, str]:
 
 
 def apply_push_switch(argv: List[str], enabled: bool) -> List[str]:
-    """推送总开关关着：run 命令去掉 --push xxx，换成 --no-push；mock 改成只预览报文、不发送。"""
+    """推送总开关关着：run / mock-gen 命令去掉 --push xxx，换成 --no-push；mock 改成只预览报文、不发送。"""
     if enabled or not argv:
         return list(argv)
     if argv[0] == "mock":
         return list(argv) if "--preview" in argv else list(argv) + ["--preview"]
-    if argv[0] != "run":
+    if argv[0] not in ("run", "mock-gen"):
         return list(argv)
     out, skip = [], False
     for a in argv:
@@ -298,6 +298,43 @@ def build_push_argv(scenics: str = "", tables: str = "", start: str = "",
     return argv, title
 
 
+MOCKGEN_MAX_DAYS = 400          # 一次最多生成多少天（一年约 1 分钟；更长分几次生成，结果一样）
+
+
+def build_mockgen_argv(body: Optional[dict]) -> Tuple[List[str], str]:
+    """演示景区造数：`engin_cli.cli mock-gen`（mock_gen.py：凭空生成评论 → 正常计算 → 写库 / 推送）。
+
+    body：{scenic, name, start, end, tables, push, skip_db}；tables / push 是逗号分隔简写，
+    tables 空 = core,platform,dimension,content,macro；push 只能是 tables 里的表，空 = 不推送。
+    """
+    from ..mock_gen import DEFAULT_TABLES, MOCK_NAME, MOCK_SCENIC
+    b = body or {}
+    scenic = str(b.get("scenic") or MOCK_SCENIC).strip()
+    name = str(b.get("name") or MOCK_NAME).strip()
+    start, end = str(b.get("start") or "").strip(), str(b.get("end") or b.get("start") or "").strip()
+    if not (_valid_ymd(start) and _valid_ymd(end)):
+        raise ValueError("要选开始、结束日期（yyyyMMdd）")
+    if start > end:
+        raise ValueError("开始日期晚于结束日期")
+    days = (dt.datetime.strptime(end, "%Y%m%d") - dt.datetime.strptime(start, "%Y%m%d")).days + 1
+    if days > MOCKGEN_MAX_DAYS:
+        raise ValueError(f"一次最多生成 {MOCKGEN_MAX_DAYS} 天（这次 {days} 天），请分几段生成；"
+                         "每天的数据是固定的，分段生成结果一样")
+    tables = _tables(b.get("tables") or ",".join(DEFAULT_TABLES), "生成的表")
+    push = ",".join(t for t in _tables(b.get("push"), "推送的表").split(",") if t and t in tables.split(","))
+    skip_db = bool(b.get("skip_db"))
+    if skip_db and not push:
+        raise ValueError("不写库也不推送，生成了也没地方放：至少选一项")
+    argv = ["mock-gen", "--scenic", scenic, "--name", name, "--start-date", start, "--end-date", end,
+            "--tables", tables]
+    argv += ["--push", push] if push else ["--no-push"]
+    if skip_db:
+        argv.append("--skip-db")
+    argv.append("-v")
+    title = f"演示数据 · {name}（{scenic}） · " + (start if start == end else f"{start}~{end}")
+    return argv, title
+
+
 def final_status(exit_code: int, summary: dict) -> str:
     if exit_code == 0:
         return "success"
@@ -469,7 +506,7 @@ class Runner:
         argv = apply_push_switch(run["command"], ps["enabled"])
         push_cut = argv != list(run["command"])
         summary_path = os.path.join(self.run_dir, f"{run_id}.summary.json")
-        if argv and argv[0] == "run":
+        if argv and argv[0] in ("run", "mock-gen"):
             argv += ["--summary-json", summary_path]
         cmd = [self.python, "-m", "engin_cli.cli"] + argv
         env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
