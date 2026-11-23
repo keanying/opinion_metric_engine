@@ -305,7 +305,7 @@ def build_mockgen_argv(body: Optional[dict]) -> Tuple[List[str], str]:
     """演示景区造数：`engin_cli.cli mock-gen`（mock_gen.py：凭空生成评论 → 正常计算 → 写库 / 推送）。
 
     body：{scenic, name, start, end, tables, push, skip_db}；tables / push 是逗号分隔简写，
-    tables 空 = core,platform,dimension,content,macro；push 只能是 tables 里的表，空 = 不推送。
+    tables 空 = 全部 6 张；push 只能是 tables 里的表，空 = 不推送。
     """
     from ..mock_gen import DEFAULT_TABLES, MOCK_NAME, MOCK_SCENIC
     b = body or {}

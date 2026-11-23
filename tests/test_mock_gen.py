@@ -117,7 +117,8 @@ def test_cli_default_tables_and_push_dry_run(tmp_path, capsys):
     assert s["command"] == "mock-gen" and s["exit_code"] == 0
     sc = s["scenics"][0]
     assert sc["scenic"] == G.MOCK_SCENIC and sc["ok"]
-    # 默认 5 张：四张指标表 + 大盘表，不出下钻表
+    # 默认全部 6 张
+    assert len(G.DEFAULT_TABLES) == 6
     assert set(sc["tables"]) == {cli.TABLE_ALIAS[k] for k in G.DEFAULT_TABLES}
     assert {p["table"] for p in sc["push"]} == set(sc["tables"])
     assert not sc["loads"]                                                     # --skip-db
@@ -146,6 +147,11 @@ def test_cli_refuses_scenic_with_real_comments(monkeypatch, capsys):
 # ══════════════════════════════════════════════════════════════════
 def test_build_mockgen_argv():
     argv, title = R.build_mockgen_argv({"start": "20261101", "end": "20261122",
+                                        "push": "core,macro,drill"})
+    assert argv[argv.index("--tables") + 1] == "drill,macro,core,platform,dimension,content"   # 默认 6 张
+    assert argv[argv.index("--push") + 1] == "drill,macro,core"
+    argv, title = R.build_mockgen_argv({"start": "20261101", "end": "20261122",
+                                        "tables": "macro,core,platform,dimension,content",
                                         "push": "core,macro,drill"})
     assert argv[:9] == ["mock-gen", "--scenic", G.MOCK_SCENIC, "--name", G.MOCK_NAME,
                         "--start-date", "20261101", "--end-date", "20261122"]

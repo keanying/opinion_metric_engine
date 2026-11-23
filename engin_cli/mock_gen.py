@@ -4,7 +4,7 @@
 
     python -m engin_cli.cli mock-gen --start-date 20260101 --end-date 20261122
     python -m engin_cli.cli mock-gen --start-date 20261101 --end-date 20261122 \\
-        --tables core,platform,dimension,content,macro --push core,platform,dimension,content,macro
+        --tables drill,macro --push drill,macro
 
 几个决定
 --------
@@ -32,8 +32,8 @@ import pandas as pd
 
 MOCK_SCENIC = "PFTSCM00000001"
 MOCK_NAME = "A级景区"
-# 页面默认勾选的表：四张 ADS 指标表 + 大盘表（下钻明细表可选）
-DEFAULT_TABLES = ("core", "platform", "dimension", "content", "macro")
+# 默认生成的表：全部 6 张（下钻表、大盘表、四张 ADS 指标表）
+DEFAULT_TABLES = ("drill", "macro", "core", "platform", "dimension", "content")
 
 CHANNELS = ["douyin", "xiaohongshu", "weibo", "ctrip", "kuaishou", "tongcheng"]
 CHANNEL_WEIGHTS = [26, 22, 16, 16, 12, 8]

@@ -1010,7 +1010,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--end-date", help="生成这段日期：止 yyyyMMdd")
     g.add_argument("--tables", metavar="表名",
                    help="生成哪些表，逗号分隔，认简写 drill,macro,core,platform,dimension,content；"
-                        "不填 = core,platform,dimension,content,macro；all = 全部 6 张")
+                        "不填或 all = 全部 6 张")
     g.add_argument("--skip-db", action="store_true", help="不写本地 ADS 库（只算 + 推送）")
     g.add_argument("--push", nargs="?", const="all", metavar="表名", help="生成后推送下游，不带值 = 全部生成的表")
     g.add_argument("--no-push", action="store_true", help="不推送")

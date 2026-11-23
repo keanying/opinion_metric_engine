@@ -530,9 +530,9 @@ python -m engin_cli.cli mock --from-scenic PFTSCA01016184 --to-scenic PFTSCA0999
 给一个**没有真实评论**的演示景区（默认 `PFTSCM00000001` A级景区，已登记在景区表）按日期区间生成数据：
 
 ```
-python -m engin_cli.cli mock-gen --start-date 20260101 --end-date 20261122            # 默认 5 张表，写库，不推送
+python -m engin_cli.cli mock-gen --start-date 20260101 --end-date 20261122            # 默认全部 6 张表，写库，不推送
 python -m engin_cli.cli mock-gen --start-date 20261101 --end-date 20261122 --push      # 生成后推送
-python -m engin_cli.cli mock-gen --date 20261122 --tables all --skip-db --push         # 6 张表都要、只推不写库
+python -m engin_cli.cli mock-gen --date 20261122 --tables drill,macro --skip-db --push # 只要下钻表和大盘表、只推不写库
 ```
 
 - **造的是源评论，不是直接造结果**：按「景区 + 日期」在内存里生成当天的评论（不写源表），
@@ -541,7 +541,7 @@ python -m engin_cli.cli mock-gen --date 20261122 --tables all --skip-db --push  
 - **每天的数据不一样**：评论量（周末 / 节假日多）、好中差比例（缓慢起伏 + 每天随机波动）、渠道、维度、关键词、地域每天都变。
 - **同一天的数据是固定的**：随机种子 = 景区 + 日期，所以分几段生成、重复生成同一段日期，结果都一样（只有 `etl_time` 不同），
   窗口指标也接得上。只生成算这些日期要用到的历史（取数区间 + 补数 + 大盘表的上期 / 去年同期）。
-- **表**：默认 `core,platform,dimension,content,macro`（四张指标表 + 大盘表）；`--tables all` 或加上 `drill` 也出下钻明细表。
+- **表**：默认全部 6 张（下钻表、大盘表、core、platform、dimension、content）；`--tables drill,macro` 这样可以只生成其中几张。
 - **写库**：和跑批一样按「景区 + 日期」先删后写；`--skip-db` 不写库。推送跟跑批一样受推送设置 / 总开关控制。
 - **防误伤**：景区编号在源表里有真实评论时拒绝执行，免得用假数据覆盖真实景区的结果。不跑插件、不做下钻关键字过滤。
 - 一年大约 1 分钟；页面上一次最多 400 天。

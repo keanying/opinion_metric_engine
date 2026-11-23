@@ -14,7 +14,7 @@ const segText = g => g.start === g.end ? ymd(g.start) : `${ymd(g.start)} ~ ${ymd
 export default {
   setup() {
     const f = reactive({ scenic: 'PFTSCM00000001', name: 'A级景区', start: todayYmd(-29), end: todayYmd(),
-                         tables: 'core,platform,dimension,content,macro', write_db: true, push: true })
+                         tables: 'drill,macro,core,platform,dimension,content', write_db: true, push: true })
     const cov = ref(null), loading = ref(false), busy = ref(false), pushOff = ref(false)
     const picked = computed(() => f.tables.split(',').filter(Boolean))
     const load = async () => {
