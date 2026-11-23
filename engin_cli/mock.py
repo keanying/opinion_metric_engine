@@ -118,34 +118,48 @@ def make_replacer(words: Sequence[str], to_name: str) -> Optional[Callable[[str]
     return lambda v: pat.sub(to_name, v) if isinstance(v, str) else v
 
 
+def _replace_json(obj, rep: Callable[[str], str]):
+    """JSON 里所有字符串值都换（不管第几层、键叫什么）；[{"word", "rate"}] 这种词列表换完同名的合并（rate 相加）。"""
+    if isinstance(obj, str):
+        return rep(obj)
+    if isinstance(obj, dict):
+        return {k: _replace_json(v, rep) for k, v in obj.items()}
+    if not isinstance(obj, list):
+        return obj
+    merged: Dict[str, object] = {}
+    for it in obj:
+        it = _replace_json(it, rep)
+        w = it.get("word") if isinstance(it, dict) else None
+        if isinstance(w, str) and w in merged:
+            prev = merged[w]
+            if isinstance(prev.get("rate"), (int, float)) and isinstance(it.get("rate"), (int, float)):
+                prev["rate"] = round(prev["rate"] + it["rate"], 6)
+            continue
+        merged[w if isinstance(w, str) else f"\x00{len(merged)}"] = it
+    return list(merged.values())
+
+
 def _replace_wordcloud(text, rep: Callable[[str], str]):
-    """wordcloud_map：{"positiveWord":[{"word","rate"},...],...}，换 word；换完同名的词合并（rate 相加）。"""
+    """wordcloud_map：{"positiveWord":[{"word","rate"},...],"neutralWord":[...],"negativeWord":[...]}。
+
+    好 / 中 / 差三组里的词都换，换完同名的词合并（rate 相加）。库里读出来的形态不一定规整，都认：
+    bytes、被编码了两次的 JSON 字符串、带空格 / \\u 转义的写法；解析不了的当普通文本换。没换到任何词就原样返回。
+    """
+    if isinstance(text, (bytes, bytearray)):
+        text = bytes(text).decode("utf-8", "replace")
     if not isinstance(text, str) or not text.strip():
         return text
     try:
         obj = json.loads(text)
     except ValueError:
         return rep(text)
-    if not isinstance(obj, dict):
+    if isinstance(obj, str):                       # 编码了两次：里面那层换完再按原样包回去
+        inner = _replace_wordcloud(obj, rep)
+        return text if inner == obj else json.dumps(inner, ensure_ascii=False)
+    new = _replace_json(obj, rep)
+    if new == obj:
         return text
-    changed = False
-    for key, items in obj.items():
-        if not isinstance(items, list):
-            continue
-        merged: Dict[str, dict] = {}
-        for it in items:
-            if not isinstance(it, dict) or "word" not in it:
-                merged[f"\x00{len(merged)}"] = it
-                continue
-            w = rep(it["word"])
-            changed |= w != it["word"]
-            if w in merged and isinstance(merged[w].get("rate"), (int, float)) \
-                    and isinstance(it.get("rate"), (int, float)):
-                merged[w]["rate"] = round(merged[w]["rate"] + it["rate"], 6)
-            else:
-                merged[w] = dict(it, word=w)
-        obj[key] = list(merged.values())
-    return json.dumps(obj, ensure_ascii=False, separators=(",", ":")) if changed else text
+    return json.dumps(new, ensure_ascii=False, separators=(",", ":"))
 
 
 def replace_keywords(table: str, df: pd.DataFrame, rep: Optional[Callable[[str], str]]) -> tuple:

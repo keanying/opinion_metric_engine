@@ -339,3 +339,20 @@ def test_mock_command_replace_words(cbs, monkeypatch, gateway, capsys):
                    "--replace-words", "天池,排队"])
     words = {r["emotion_word"] for b in bodies for r in b["data"]}
     assert rc == 0 and "A级景区好看" in words and not words & {"天池", "排队"}
+
+
+def test_user_words_in_wordcloud_any_shape():
+    """客户给的词（逗号分隔、有重复）；词云从库里读出来的形态不一定规整：转义、编码两次、bytes 都要换到。"""
+    rep = M.make_replacer(M.parse_words("九嶷,三分石,九嶷山,宁远,舜帝道德,九嶷,舜文化,舜帝陵"), "A级景区")
+    assert rep("舜帝道德文化的鼻祖") == "A级景区文化的鼻祖"
+    assert rep("九嶷山三分石") == "A级景区A级景区"
+    obj = {"positiveWord": [{"word": "舜帝道德文化的鼻祖", "rate": 3.2}],
+           "neutralWord": [{"word": "宁远县城", "rate": 2.0}], "negativeWord": [{"word": "舜帝陵排队", "rate": 1.0}]}
+    want = {"positiveWord": [{"word": "A级景区文化的鼻祖", "rate": 3.2}],
+            "neutralWord": [{"word": "A级景区县城", "rate": 2.0}], "negativeWord": [{"word": "A级景区排队", "rate": 1.0}]}
+    plain = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    for v in (plain, json.dumps(obj), json.dumps(obj, ensure_ascii=False, indent=1), plain.encode("utf-8")):
+        assert json.loads(M._replace_wordcloud(v, rep)) == want
+    twice = M._replace_wordcloud(json.dumps(plain, ensure_ascii=False), rep)
+    assert json.loads(json.loads(twice)) == want                              # 编码两次的，换完照原样包回去
+    assert M._replace_wordcloud("舜帝陵 不是 JSON", rep) == "A级景区 不是 JSON"
