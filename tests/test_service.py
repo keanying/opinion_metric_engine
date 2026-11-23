@@ -1129,6 +1129,12 @@ def test_copy_steps_follow_the_run():
                                        dt.date(2026, 11, 3))
     assert then3[0]["argv"][-2:] == ["--replace-words", "九嶷山,九嶷山景区"]
     assert "--replace-words" not in then[0]["argv"]
+    _, _, _, then4 = R.build_task_argv({**COPY_CFG, "copies": [{**COPY_CFG["copies"][0],
+                                                                "replace_words": "天池 → 景点A；长白山"}]},
+                                       dt.date(2026, 11, 3))
+    assert then4[0]["argv"][-2:] == ["--replace-words", "天池=景点A,长白山"]
+    with pytest.raises(ValueError, match="跑完后复制（PFTSCA01018088）：替换规则「天池=」没写换成什么"):
+        R.normalize_config({**COPY_CFG, "copies": [{**COPY_CFG["copies"][0], "replace_words": "天池="}]})
     with pytest.raises(ValueError, match="不在这个任务要跑的景区里"):
         R.normalize_config({**COPY_CFG, "copies": [{"from_scenic": "X", "to_scenic": "Y", "to_name": "n"}]})
     with pytest.raises(ValueError, match="不能和源景区一样"):

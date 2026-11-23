@@ -105,7 +105,7 @@ export const TaskBody = {
     </div>
 
     <div v-if="withCopies" class="card sect">
-      <div class="sect-head"><h3>跑完后复制给其他景区<Tip wide text="跑批成功后，把源景区刚算好的结果复制给新景区编号并推送给下游（engin_cli mock，不写本地库）；日期、表和这次跑批一样。源景区这次没通过（失败 / 质量回退）就不复制。关键字（词云、情感词、下钻片段）里的源景区名会换成新名称，如 长白山好看 → A级景区好看；替换词不填 = 源景区名称"/></h3>
+      <div class="sect-head"><h3>跑完后复制给其他景区<Tip wide text="跑批成功后，把源景区刚算好的结果复制给新景区编号并推送给下游（engin_cli mock，不写本地库）；日期、表和这次跑批一样。源景区这次没通过（失败 / 质量回退）就不复制。关键字（词云、情感词、下钻片段）里的源景区名会换成新名称，如 长白山好看 → A级景区好看。还有别的词要换就填在每行最后：多个用逗号分隔，写「旧词=新词」换成指定的词，只写旧词就换成新景区名称，如 天池=景点A,长白山北坡"/></h3>
         <button class="btn xs light" @click="cfg.copies.push({ from_scenic: '', to_scenic: '', to_name: '', replace_words: '' })"><Icon name="plus" :size="12" :sw="2.4"/>添加复制</button></div>
       <div class="sect-body">
         <div v-for="(c, i) in cfg.copies" :key="i" class="frow copy-row">
@@ -113,8 +113,8 @@ export const TaskBody = {
           <Icon name="arrowR" :size="16" />
           <input v-model="c.to_scenic" class="w240" placeholder="新景区编号，如 PFTSCA01018088" />
           <input v-model="c.to_name" class="grow" placeholder="新景区名称，如 泰宁九龙潭生态旅游区" />
-          <input v-model="c.replace_words" class="w200" title="关键字里要换成新名称的词，逗号分隔；不填 = 源景区名称（含去掉「景区」等后缀的叫法）"
-            placeholder="替换词，默认源景区名" />
+          <input v-model="c.replace_words" class="w240" title="源景区名称总会换成新名称。还要换别的词就填这里：多个用逗号分隔，「旧词=新词」换成指定的词，只写旧词换成新景区名称"
+            placeholder="其他替换词，如 天池=景点A" />
           <button class="s-btn-icon danger" title="删除这一行" @click="cfg.copies.splice(i, 1)"><Icon name="del" :size="16"/></button>
         </div>
         <span v-if="!cfg.copies.length" class="hint">不复制</span>

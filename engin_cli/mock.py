@@ -18,8 +18,9 @@
 · **新旧编号相同直接拒绝**：那等于拿演示名称覆盖真实景区的数据。
 · **关键字里的源景区名换成新名称**：词云、情感词、下钻片段里常带景区名（「长白山好看」），
   原样复制过去一眼就露馅。默认把源景区名称（库里的 scenic_name，连同去掉「景区 / 风景区…」
-  后缀的叫法）换成新名称：长白山好看 → A级景区好看。也可以用 --replace-words 自己指定要换的词，
-  --no-replace-words 关掉。只改 KEYWORD_COLUMNS 里的列，指标数值不动。
+  后缀的叫法）换成新名称：长白山好看 → A级景区好看。--replace-words 再加别的词，
+  每个词可以换成不同的内容（天池=景点A），一段文字里有几个都一起换；--no-replace-words 关掉。
+  只改 KEYWORD_COLUMNS 里的列，指标数值不动。
 """
 
 from __future__ import annotations
@@ -87,27 +88,64 @@ def default_replace_words(names: Sequence[str]) -> List[str]:
     return out
 
 
-def parse_words(text) -> List[str]:
-    """命令行 / 页面上填的替换词：逗号（中英文）、顿号分隔。"""
-    if isinstance(text, (list, tuple)):
-        parts = [str(x) for x in text]
-    else:
-        parts = re.split(r"[,，、]", str(text or ""))
-    out: List[str] = []
-    for p in parts:
-        p = p.strip()
-        if p and p not in out:
-            out.append(p)
+_RULE_SEP = re.compile(r"[,，、;；\n]")
+_RULE_ARROW = re.compile(r"\s*(?:=|＝|->|→)\s*")
+
+
+def parse_replace_rules(text, to_name: str) -> Dict[str, str]:
+    """命令行 / 页面上填的替换规则 → {旧词: 新词}（保持填写顺序）。
+
+    多条用逗号（中英文）、顿号、分号或换行分隔；每条两种写法：
+      · 长白山            → 换成新景区名称（to_name）
+      · 天池=景点A        → 换成指定的词（= 也可以写成 ＝ -> →）
+    同一个旧词写了两次以后面的为准。旧词或新词没填抛 ValueError。
+    """
+    items = ([str(x) for x in text] if isinstance(text, (list, tuple))
+             else _RULE_SEP.split(str(text or "")))
+    out: Dict[str, str] = {}
+    for it in items:
+        it = it.strip()
+        if not it:
+            continue
+        parts = _RULE_ARROW.split(it, maxsplit=1)
+        src = parts[0].strip()
+        dst = parts[1].strip() if len(parts) > 1 else str(to_name or "").strip()
+        if not src:
+            raise ValueError(f"替换规则「{it}」少了要替换的词")
+        if not dst:
+            raise ValueError(f"替换规则「{it}」没写换成什么")
+        out.pop(src, None)
+        out[src] = dst
     return out
 
 
-def make_replacer(words: Sequence[str], to_name: str) -> Optional[Callable[[str], str]]:
-    """一次扫描替换（长词优先）：「长白山景区好看」只换一次，新名称里含旧词也不会被再换一遍。"""
-    ws = sorted({w for w in words if w and w != to_name}, key=len, reverse=True)
-    if not ws:
+def format_replace_rules(rules: Dict[str, str], to_name: str) -> str:
+    """{旧词: 新词} → 规则文本（换成新景区名称的只写旧词），parse_replace_rules 的反操作。"""
+    return ",".join(s if d == to_name else f"{s}={d}" for s, d in rules.items())
+
+
+def describe_rules(rules: Dict[str, str]) -> str:
+    """「长白山景区、长白山 → A级景区；天池 → 景点A」：按新词归组，写进执行日志。"""
+    groups: Dict[str, List[str]] = {}
+    for s, d in rules.items():
+        if s != d:
+            groups.setdefault(d, []).append(s)
+    return "；".join(f"{'、'.join(ss)} → {d}" for d, ss in groups.items())
+
+
+def make_replacer(rules: Dict[str, str]) -> Optional[Callable[[str], str]]:
+    """按 {旧词: 新词} 替换，一段文字里有几个、有几种都一起换。
+
+    · 一次扫描：每个位置只换一次，换出来的新词不会再被别的规则换（天池→长白山、长白山→A级景区
+      不会把天池连换两次变成 A级景区），新词里含旧词也不会越换越长；
+    · 长词优先：「长白山景区好看」按「长白山景区」换，不会先换掉「长白山」剩下「A级景区景区好看」；
+    · 旧词 = 新词的规则不换（可以用来让某个默认替换的词保持原样）。
+    """
+    rs = {s: d for s, d in (rules or {}).items() if s and s != d}
+    if not rs:
         return None
-    pat = re.compile("|".join(re.escape(w) for w in ws))
-    return lambda s: pat.sub(to_name, s) if isinstance(s, str) else s
+    pat = re.compile("|".join(re.escape(s) for s in sorted(rs, key=len, reverse=True)))
+    return lambda v: pat.sub(lambda m: rs[m.group(0)], v) if isinstance(v, str) else v
 
 
 def _replace_wordcloud(text, rep: Callable[[str], str]):
@@ -257,10 +295,12 @@ def fetch_scenic_tables(db, from_scenic: str, start: str, end: str,
 
 def build_mock(db, from_scenic: str, to_scenic: str, to_name: str,
                start: str, end: str, tables: Sequence[str],
-               replace_words: Optional[Sequence[str]] = None, replace: bool = True) -> tuple:
+               replace_words=None, replace: bool = True) -> tuple:
     """读出来 + 换到新景区。出参：({表: DataFrame}, [说明])。
 
-    replace_words：关键字里要换成新名称的词；None / 空 = 用源景区名称（default_replace_words）。
+    关键字替换规则 = 源景区名称（default_replace_words）→ to_name，再加上 replace_words
+    （parse_replace_rules 的写法：「天池=景点A,长白山北坡」，不写 = 号的换成 to_name；
+    和默认规则同一个旧词的，以 replace_words 为准，写「长白山=长白山」就是这个词不换）。
     replace=False：关键字原样复制（旧行为）。
     """
     if str(from_scenic).strip() == str(to_scenic).strip():
@@ -268,17 +308,19 @@ def build_mock(db, from_scenic: str, to_scenic: str, to_name: str,
                          "请换一个新编号")
     src, notes = fetch_scenic_tables(db, from_scenic, start, end, tables)
     now = datetime.now()
-    rep, words = None, []
+    rep, rules = None, {}
     if replace:
-        words = parse_words(replace_words)
-        if not words:
-            names = []
-            for t, df in src.items():
-                col = scenic_name_col(t)
-                if col in df.columns:
-                    names += [str(x) for x in df[col].dropna().unique() if str(x).strip()]
-            words = default_replace_words(sorted(set(names), key=names.index))
-        rep = make_replacer(words, to_name)
+        extra = parse_replace_rules(replace_words, to_name)     # 先解析：写错了直接报错，别读完库才发现
+        names = []
+        for t, df in src.items():
+            col = scenic_name_col(t)
+            if col in df.columns:
+                names += [str(x) for x in df[col].dropna().unique() if str(x).strip()]
+        rules = {w: to_name for w in default_replace_words(sorted(set(names), key=names.index))}
+        for s, d in extra.items():
+            rules.pop(s, None)
+            rules[s] = d
+        rep = make_replacer(rules)
     out, counts = {}, []
     for t, df in src.items():
         df, n = replace_keywords(t, df, rep)
@@ -293,6 +335,6 @@ def build_mock(db, from_scenic: str, to_scenic: str, to_name: str,
     elif rep is None:
         notes.append("关键字替换：没有可替换的词（源景区没有名称，也没指定 --replace-words）")
     else:
-        notes.append(f"关键字替换：{'、'.join(words)} → {to_name}："
+        notes.append(f"关键字替换：{describe_rules(rules)}："
                      + ("、".join(counts) if counts else "这段日期的关键字里没有出现"))
     return out, notes

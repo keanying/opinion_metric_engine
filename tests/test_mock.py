@@ -235,20 +235,53 @@ def test_default_replace_words():
     assert M.default_replace_words(["长白山景区"]) == ["长白山景区", "长白山"]
     assert M.default_replace_words(["泰宁九龙潭生态旅游区", "故宫"]) == ["泰宁九龙潭生态旅游区", "泰宁九龙潭", "故宫"]
     assert M.default_replace_words(["山景区", "", None]) == ["山景区"]          # 去后缀剩 1 个字：不拆
-    assert M.parse_words(" 长白山，长白山景区、长白山 ,") == ["长白山", "长白山景区"]
+
+
+
+def test_parse_replace_rules():
+    to = "A级景区"
+    assert M.parse_replace_rules(" 长白山，长白山景区、长白山 ,", to) == {"长白山景区": to, "长白山": to}
+    # 每个词可以换成不同的内容；= ＝ -> → 都认；分号、换行也能分隔
+    r = M.parse_replace_rules("天池=景点A；长白山北坡 → 北坡\n 二道白河->白河镇,长白山", to)
+    assert r == {"天池": "景点A", "长白山北坡": "北坡", "二道白河": "白河镇", "长白山": to}
+    assert M.parse_replace_rules("天池=景点A,天池=景点B", to) == {"天池": "景点B"}     # 后写的为准
+    assert M.parse_replace_rules(["天池=景点A", "长白山"], to) == {"天池": "景点A", "长白山": to}
+    assert M.parse_replace_rules(None, to) == {} and M.parse_replace_rules("", to) == {}
+    for bad, why in (("=景点A", "少了要替换的词"), ("天池=", "没写换成什么")):
+        with pytest.raises(ValueError, match=why):
+            M.parse_replace_rules(bad, to)
+    assert M.format_replace_rules(r, to) == "天池=景点A,长白山北坡=北坡,二道白河=白河镇,长白山"
+    assert M.parse_replace_rules(M.format_replace_rules(r, to), to) == r
+    assert M.describe_rules({"长白山景区": to, "长白山": to, "天池": "景点A", "x": "x"}) == \
+        "长白山景区、长白山 → A级景区；天池 → 景点A"
 
 
 def test_replacer_longest_first_and_single_pass():
-    rep = M.make_replacer(["长白山", "长白山景区"], "A级景区")
+    to = "A级景区"
+    rep = M.make_replacer({"长白山": to, "长白山景区": to})
     assert rep("长白山景区真美") == "A级景区真美"                                # 不会变成 A级景区景区真美
     assert rep("长白山好看") == "A级景区好看" and rep("天池") == "天池" and rep(None) is None
     # 新名称里含旧词：只换一次
-    assert M.make_replacer(["长白山"], "长白山演示")("长白山好看") == "长白山演示好看"
-    assert M.make_replacer(["A级景区"], "A级景区") is None
+    assert M.make_replacer({"长白山": "长白山演示"})("长白山好看") == "长白山演示好看"
+    assert M.make_replacer({"A级景区": to}) is None
+
+
+def test_replacer_many_words_in_one_text():
+    to = "A级景区"
+    rep = M.make_replacer({"长白山景区": to, "长白山": to, "天池": "景点A", "二道白河": "白河镇"})
+    # 一段文字里有好几个、好几种，全部一起换
+    assert rep("长白山天池好看，长白山景区门口的二道白河也不错，下次还来长白山") == \
+        "A级景区景点A好看，A级景区门口的白河镇也不错，下次还来A级景区"
+    # 换出来的词不会再被别的规则换：天池→长白山、长白山→A级景区，天池只换一次
+    rep = M.make_replacer({"天池": "长白山", "长白山": to})
+    assert rep("长白山天池") == "A级景区长白山"
+    # 两个旧词挨在一起 / 一个旧词包含另一个：按长词切，不会拆坏
+    rep = M.make_replacer({"长白山": to, "白山天池": "景点A"})
+    assert rep("长白山天池") == "A级景区天池"                                  # 从左往右，先遇到「长白山」
 
 
 def test_wordcloud_words_replaced_and_merged():
-    rep = M.make_replacer(["长白山景区", "长白山"], "A级景区")
+    rep = M.make_replacer({"长白山景区": "A级景区", "长白山": "A级景区"})
     v = json.dumps({"positiveWord": [{"word": "长白山好看", "rate": 30.5}, {"word": "天池", "rate": 20.0},
                                      {"word": "长白山景区好看", "rate": 10.25}],
                     "negativeWord": []}, ensure_ascii=False, separators=(",", ":"))
@@ -279,11 +312,24 @@ def test_copy_replaces_source_name_in_keywords(cbs):
     assert any(n.startswith("关键字替换：长白山景区、长白山 → A级景区") for n in notes)
 
 
-def test_copy_with_explicit_words_and_switch_off(cbs):
+def test_copy_with_extra_rules_and_switch_off(cbs):
+    # 源景区名照常换；另外加的规则：天池 → 景点A、排队 → 换成新景区名
+    out, notes = M.build_mock(FakeDB(cbs), CBS, A_ID, A_NAME, "20260911", "20260912", list(cbs),
+                              replace_words="天池=景点A,排队")
+    words = _words(out)
+    assert {"A级景区好看", "A级景区真美", "景点A", "A级景区"} <= words
+    assert not words & {"天池", "排队"} and not any("长白山" in w for w in words)
+    snip = out[TABLE_DRILL_ANALYSIS]["content_snippet"]
+    assert not snip.str.contains("长白山|天池").any() and snip.str.contains("景点A").any()
+    assert any("关键字替换：长白山景区、长白山、排队 → A级景区；天池 → 景点A" in n for n in notes)
+    # 写「长白山景区=长白山景区」：这个默认替换的词保持原样，其余照换
     out, notes = M.build_mock(FakeDB(cbs), CBS, A_ID, A_NAME, "20260911", "20260912", [TABLE_MACRO],
-                              replace_words="长白山好看")
+                              replace_words="长白山景区=长白山景区")
     words = _words({**cbs, TABLE_MACRO: out[TABLE_MACRO]})
-    assert "A级景区" in words and "长白山景区真美" in words                     # 只换指定的词
+    assert "长白山景区真美" in words and "A级景区好看" in words
+    with pytest.raises(ValueError, match="没写换成什么"):
+        M.build_mock(FakeDB(cbs), CBS, A_ID, A_NAME, "20260911", "20260912", [TABLE_MACRO],
+                     replace_words="天池=")
     out, notes = M.build_mock(FakeDB(cbs), CBS, A_ID, A_NAME, "20260911", "20260912", [TABLE_MACRO],
                               replace=False)
     assert out[TABLE_MACRO]["wordcloud_map"].tolist() == \
@@ -311,3 +357,9 @@ def test_mock_command_replace_words(cbs, monkeypatch, gateway, capsys):
     rc = cli.main(["mock", "--from-scenic", CBS, "--to-scenic", A_ID, "--to-name", A_NAME, "--no-progress",
                    "--date", "20260912", "--tables", "content", "--push-url", url, "--no-replace-words"])
     assert rc == 0 and "长白山好看" in {r["emotion_word"] for b in bodies for r in b["data"]}
+    bodies.clear()
+    rc = cli.main(["mock", "--from-scenic", CBS, "--to-scenic", A_ID, "--to-name", A_NAME, "--no-progress",
+                   "--date", "20260912", "--tables", "content", "--push-url", url,
+                   "--replace-words", "天池=景点A"])
+    words = {r["emotion_word"] for b in bodies for r in b["data"]}
+    assert rc == 0 and {"A级景区好看", "景点A"} <= words and "天池" not in words
