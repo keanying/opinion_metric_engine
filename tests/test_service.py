@@ -1123,18 +1123,14 @@ def test_copy_steps_follow_the_run():
     # 只算了部分表：复制同样的表
     _, _, _, then2 = R.build_task_argv({**COPY_CFG, "tables": "drill,macro"}, dt.date(2026, 11, 3))
     assert then2[0]["argv"][-2:] == ["--tables", "drill,macro"]
-    # 关键字替换词：页面上填了就带上（中文逗号 / 顿号 / 空格都认），不填不带（mock 默认用源景区名称）
+    # 关键字替换词：页面上逗号分隔（中英文逗号都认），去空去重后带上；不填不带（mock 只换源景区名称）
     _, _, _, then3 = R.build_task_argv({**COPY_CFG, "copies": [{**COPY_CFG["copies"][0],
-                                                                "replace_words": " 九嶷山，九嶷山景区、 "}]},
+                                                                "replace_words": " 九嶷山，九嶷山景区, ,九嶷山 "}]},
                                        dt.date(2026, 11, 3))
     assert then3[0]["argv"][-2:] == ["--replace-words", "九嶷山,九嶷山景区"]
     assert "--replace-words" not in then[0]["argv"]
-    _, _, _, then4 = R.build_task_argv({**COPY_CFG, "copies": [{**COPY_CFG["copies"][0],
-                                                                "replace_words": "天池 → 景点A；长白山"}]},
-                                       dt.date(2026, 11, 3))
-    assert then4[0]["argv"][-2:] == ["--replace-words", "天池=景点A,长白山"]
-    with pytest.raises(ValueError, match="跑完后复制（PFTSCA01018088）：替换规则「天池=」没写换成什么"):
-        R.normalize_config({**COPY_CFG, "copies": [{**COPY_CFG["copies"][0], "replace_words": "天池="}]})
+    cfg = R.normalize_config({**COPY_CFG, "copies": [{**COPY_CFG["copies"][0], "replace_words": "天池，北坡"}]})
+    assert cfg["copies"][0]["replace_words"] == "天池,北坡"
     with pytest.raises(ValueError, match="不在这个任务要跑的景区里"):
         R.normalize_config({**COPY_CFG, "copies": [{"from_scenic": "X", "to_scenic": "Y", "to_name": "n"}]})
     with pytest.raises(ValueError, match="不能和源景区一样"):

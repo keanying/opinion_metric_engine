@@ -29,8 +29,8 @@ APP_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 TASK_DEFAULTS: Dict[str, Any] = {
     # 跑完后复制给其他景区（engin_cli mock：把源景区刚算好的 ADS 结果复制给新景区编号并推送，不写本地库）
     # [{"from_scenic": 源景区, "to_scenic": 新景区编号, "to_name": 新景区名称,
-    #   "replace_words": 关键字额外的替换规则「天池=景点A,长白山北坡」（不写 = 号的换成新名称；
-    #                    源景区名称总是会换）}]；日期、表和本次跑批一样
+    #   "replace_words": 关键字里还要换成新景区名称的词，逗号分隔，如 "天池,长白山北坡"
+    #                    （源景区名称总会换，这里是额外的）}]；日期、表和本次跑批一样
     "copies": [],
     "scenics": "",              # 逗号分隔；空 = 取数区间内有评论的全部景区
     "tables": "",               # 计算 / 输出哪些表（逗号分隔简写）；空 = 全部
@@ -237,14 +237,20 @@ def build_run_argv(cfg: Dict[str, Any], today: Optional[dt.date] = None) -> Tupl
     return argv, title
 
 
+def _replace_words(text) -> str:
+    """「跑完后复制」一行的替换词（全部换成新景区名称）：逗号分隔（中英文逗号都认），去空、去重。"""
+    from ..mock import parse_words
+    return ",".join(parse_words(str(text or "")))
+
+
 def _copies(items, scenics: str) -> List[Dict[str, str]]:
     """校验「跑完后复制」：源景区默认 = 任务里唯一的景区；源景区要在本次跑批的景区里。"""
     run_sc = [s for s in scenics.split(",") if s]
     out, seen = [], set()
-    for c in items or []:
-        c = {k: str((c or {}).get(k) or "").strip()
-             for k in ("from_scenic", "to_scenic", "to_name", "replace_words")}
-        if not any(c[k] for k in ("from_scenic", "to_scenic", "to_name")):
+    for raw in items or []:
+        raw = raw or {}
+        c = {k: str(raw.get(k) or "").strip() for k in ("from_scenic", "to_scenic", "to_name")}
+        if not any(c.values()):
             continue                                   # 页面上加了一行没填，忽略
         if not c["from_scenic"] and len(run_sc) == 1:
             c["from_scenic"] = run_sc[0]
@@ -254,12 +260,7 @@ def _copies(items, scenics: str) -> List[Dict[str, str]]:
             raise ValueError(f"跑完后复制：新景区编号不能和源景区一样（{c['to_scenic']}）")
         if run_sc and c["from_scenic"] not in run_sc:
             raise ValueError(f"跑完后复制：源景区 {c['from_scenic']} 不在这个任务要跑的景区里")
-        from ..mock import format_replace_rules, parse_replace_rules
-        try:
-            c["replace_words"] = format_replace_rules(
-                parse_replace_rules(c["replace_words"], c["to_name"]), c["to_name"])
-        except ValueError as e:
-            raise ValueError(f"跑完后复制（{c['to_scenic']}）：{e}")
+        c["replace_words"] = _replace_words(raw.get("replace_words"))
         if c["to_scenic"] in seen:
             raise ValueError(f"跑完后复制：新景区 {c['to_scenic']} 重复了")
         seen.add(c["to_scenic"])

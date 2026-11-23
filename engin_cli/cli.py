@@ -931,10 +931,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="表名，逗号分隔；不填或 all=全部。"
                         "简写：core/platform/dimension/content/drill/macro")
     rw = m.add_mutually_exclusive_group()
-    rw.add_argument("--replace-words", metavar="规则",
-                    help="关键字里额外要替换的词，逗号分隔；写「旧词=新词」换成指定的词，只写旧词换成新景区名称，"
-                         "如 \"长白山北坡,天池=景点A\"。源景区名称（连同去掉「景区 / 风景区…」后缀的叫法）"
-                         "总是会换成新名称；写「长白山=长白山」可以让它保持原样。"
+    rw.add_argument("--replace-words", metavar="词",
+                    help="关键字里还要换成新景区名称的词，逗号分隔，如 天池,长白山北坡。"
+                         "源景区名称（连同去掉「景区 / 风景区…」后缀的叫法）总会换，不用写。"
                          "换的列：内容表 / 下钻表的 emotion_word、下钻表 content_snippet、大盘表词云")
     rw.add_argument("--no-replace-words", action="store_true", help="关键字原样复制，不替换")
     m.add_argument("--push-url", help="推送地址，覆盖配置")
