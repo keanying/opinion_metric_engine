@@ -107,12 +107,12 @@ def notify_overrides(ns: Dict[str, str]) -> Dict[str, str]:
 
 
 def apply_push_switch(argv: List[str], enabled: bool) -> List[str]:
-    """推送总开关关着：run / mock-gen 命令去掉 --push xxx，换成 --no-push；mock 改成只预览报文、不发送。"""
+    """推送总开关关着：run 命令去掉 --push xxx，换成 --no-push；mock 改成只预览报文、不发送。"""
     if enabled or not argv:
         return list(argv)
     if argv[0] == "mock":
         return list(argv) if "--preview" in argv else list(argv) + ["--preview"]
-    if argv[0] not in ("run", "mock-gen"):
+    if argv[0] != "run":
         return list(argv)
     out, skip = [], False
     for a in argv:
@@ -298,95 +298,6 @@ def build_push_argv(scenics: str = "", tables: str = "", start: str = "",
     return argv, title
 
 
-MOCKGEN_MAX_DAYS = 400          # 一次最多生成多少天（一年约 1 分钟；更长分几次生成，结果一样）
-
-
-def build_mockgen_argv(body: Optional[dict]) -> Tuple[List[str], str]:
-    """演示景区造数：`engin_cli.cli mock-gen`（mock_gen.py：凭空生成评论 → 正常计算 → 写库 / 推送）。
-
-    body：{scenic, name, start, end, tables, push, skip_db}；tables / push 是逗号分隔简写，
-    tables 空 = 全部 6 张；push 只能是 tables 里的表，空 = 不推送。
-    """
-    from ..mock_gen import DEFAULT_TABLES, MOCK_NAME, MOCK_SCENIC
-    b = body or {}
-    scenic = str(b.get("scenic") or MOCK_SCENIC).strip()
-    name = str(b.get("name") or MOCK_NAME).strip()
-    start, end = str(b.get("start") or "").strip(), str(b.get("end") or b.get("start") or "").strip()
-    if not (_valid_ymd(start) and _valid_ymd(end)):
-        raise ValueError("要选开始、结束日期（yyyyMMdd）")
-    if start > end:
-        raise ValueError("开始日期晚于结束日期")
-    days = (dt.datetime.strptime(end, "%Y%m%d") - dt.datetime.strptime(start, "%Y%m%d")).days + 1
-    if days > MOCKGEN_MAX_DAYS:
-        raise ValueError(f"一次最多生成 {MOCKGEN_MAX_DAYS} 天（这次 {days} 天），请分几段生成；"
-                         "每天的数据是固定的，分段生成结果一样")
-    tables = _tables(b.get("tables") or ",".join(DEFAULT_TABLES), "生成的表")
-    push = ",".join(t for t in _tables(b.get("push"), "推送的表").split(",") if t and t in tables.split(","))
-    skip_db = bool(b.get("skip_db"))
-    if skip_db and not push:
-        raise ValueError("不写库也不推送，生成了也没地方放：至少选一项")
-    argv = ["mock-gen", "--scenic", scenic, "--name", name, "--start-date", start, "--end-date", end,
-            "--tables", tables]
-    argv += ["--push", push] if push else ["--no-push"]
-    if skip_db:
-        argv.append("--skip-db")
-    argv.append("-v")
-    title = f"演示数据 · {name}（{scenic}） · " + (start if start == end else f"{start}~{end}")
-    return argv, title
-
-
-# 演示数据每日自动生成（页面「演示数据」上设置，存系统表 service_setting 的 mockgen_schedule）
-MOCKGEN_SCHEDULE_KEY = "mockgen_schedule"
-MOCKGEN_FIRED_KEY = "mockgen_schedule_fired"        # {时刻: 最后触发的日期}，和保存的设置分开存，改设置不会重复触发
-MOCKGEN_TASK = {"id": None, "name": "演示数据 · 每日生成"}   # 执行记录 / 调度日志里显示的名字
-MOCKGEN_SCHEDULE_DEFAULTS: Dict[str, Any] = {
-    "enabled": False,
-    "times": ["01:20"],         # 每天几点（服务器时间），可以多个
-    "recent_days": 3,           # 每次生成近几天（到当天为止）：哪天没跑成，下一次顺带补上；同一天重复生成结果一样
-    "scenic": "", "name": "",   # 空 = PFTSCM00000001 / A级景区
-    "tables": "",               # 空 = 全部 6 张
-    "push": "",                 # 推哪些表；空 = 不推送
-    "skip_db": False,
-    "saved_at": "",
-}
-
-
-def normalize_mockgen_schedule(data: Optional[dict]) -> Dict[str, Any]:
-    """补齐默认值并校验（时间格式、天数、表、写库 / 推送），配错抛 ValueError。"""
-    from ..mock_gen import MOCK_NAME, MOCK_SCENIC
-    from .scheduler import normalize_times
-    out = dict(MOCKGEN_SCHEDULE_DEFAULTS)
-    for k, v in (data or {}).items():
-        if k in out:
-            out[k] = v
-    out["enabled"] = bool(out["enabled"])
-    out["skip_db"] = bool(out["skip_db"])
-    out["times"] = normalize_times(out["times"])
-    if out["enabled"] and not out["times"]:
-        raise ValueError("每日自动生成：至少加一个执行时间")
-    try:
-        out["recent_days"] = int(3 if out["recent_days"] in (None, "") else out["recent_days"])
-    except (TypeError, ValueError):
-        raise ValueError("每次生成近几天要填数字")
-    if not 1 <= out["recent_days"] <= 60:
-        raise ValueError("每次生成近几天：填 1 ~ 60")
-    out["scenic"] = str(out["scenic"] or MOCK_SCENIC).strip()
-    out["name"] = str(out["name"] or MOCK_NAME).strip()
-    argv, _ = mockgen_schedule_argv(out)                # 表 / 推送 / 写库 的校验和手动生成一样
-    out["tables"] = argv[argv.index("--tables") + 1]
-    out["push"] = argv[argv.index("--push") + 1] if "--push" in argv else ""
-    out["saved_at"] = str(out["saved_at"] or "")
-    return out
-
-
-def mockgen_schedule_argv(cfg: Dict[str, Any], today: Optional[dt.date] = None) -> Tuple[List[str], str]:
-    """每日自动生成这一次要跑的命令：近 recent_days 天（到 today 为止）。"""
-    today = today or dt.date.today()
-    start = today - dt.timedelta(days=int(cfg["recent_days"]) - 1)
-    argv, title = build_mockgen_argv({**cfg, "start": _ymd(start), "end": _ymd(today)})
-    return argv, title.replace("演示数据 · ", "演示数据 · 每日 · ", 1)
-
-
 def final_status(exit_code: int, summary: dict) -> str:
     if exit_code == 0:
         return "success"
@@ -558,7 +469,7 @@ class Runner:
         argv = apply_push_switch(run["command"], ps["enabled"])
         push_cut = argv != list(run["command"])
         summary_path = os.path.join(self.run_dir, f"{run_id}.summary.json")
-        if argv and argv[0] in ("run", "mock-gen"):
+        if argv and argv[0] == "run":
             argv += ["--summary-json", summary_path]
         cmd = [self.python, "-m", "engin_cli.cli"] + argv
         env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")

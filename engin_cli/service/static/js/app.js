@@ -9,7 +9,6 @@ import Quality, { QualityDetail } from './pages/quality.js'
 import Metrics from './pages/metrics.js'
 import Push from './pages/push.js'
 import Maint from './pages/maint.js'
-import MockGen from './pages/mockgen.js'
 
 const ROUTES = [
   { path: /^\/$/, comp: Overview, nav: '/', title: '概览', crumb: '指标计算服务 / 概览' },
@@ -22,7 +21,6 @@ const ROUTES = [
   { path: /^\/quality\/(\d+)$/, comp: QualityDetail, nav: '/quality', title: '检测详情', crumb: '质量 / 检测记录 / 详情', props: m => ({ id: m[1] }) },
   { path: /^\/metrics$/, comp: Metrics, nav: '/metrics', title: '指标查看', crumb: 'ADS / 大盘指标' },
   { path: /^\/push$/, comp: Push, nav: '/push', title: '推送', crumb: '下游 / 推送设置与记录' },
-  { path: /^\/mock$/, comp: MockGen, nav: '/mock', title: '演示数据', crumb: '下游 / 演示景区数据' },
   { path: /^\/maint$/, comp: Maint, nav: '/maint', title: '维护', crumb: '系统 / 维护' },
 ]
 
@@ -33,7 +31,6 @@ const NAV = [
   { to: '/quality', label: '数据质量', icon: 'shield' },
   { to: '/metrics', label: '指标查看', icon: 'chart' },
   { to: '/push', label: '推送', icon: 'send' },
-  { to: '/mock', label: '演示数据', icon: 'star' },
 ]
 
 const route = reactive({ path: '/' })
