@@ -128,7 +128,7 @@ def write_table(db, ds: Dict[str, Any], table: str, df: pd.DataFrame, *, setting
     """一张表：查目标表的列 → 删本次范围 → 写入（同一事务）。"""
     t0 = time.time()
     tgt = target_table(ds, table)
-    r = PushResult(table=table)
+    r = PushResult(table=table, via="数据源")
     rec: Dict[str, Any] = {"table": table, "push_table": tgt, "url": f"mysql://{describe(ds)}",
                            "batch": 1, "batches": 1, "rows": int(len(df)), "attempt": 1}
     scenics, dates = _scope(table, df, scope)
@@ -193,7 +193,7 @@ def write_all(tables: Dict[str, pd.DataFrame], *, settings, scope=None,
                      "成功 %d 行" % r.rows if r.ok else r.error)
             if r.unreachable:
                 for t2, _ in todo[k + 1:]:
-                    rep.results.append(PushResult(table=t2, skipped=True,
+                    rep.results.append(PushResult(table=t2, skipped=True, via="数据源",
                                                   error="未写入：数据源连不上，已停止（见上一张表的报错）"))
                 break
     finally:

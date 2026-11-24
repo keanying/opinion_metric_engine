@@ -55,7 +55,10 @@ TABLE_KEYS = ("drill", "macro", "core", "platform", "dimension", "content")
 # 推送设置（推送页面上改，存在服务的 kv 表里）。None / "" = 用 settings_local.py 里的
 PUSH_DEFAULTS: Dict[str, Any] = {
     "enabled": True,              # 总开关：关掉后任务一律只算不推（补推照常可用）
-    "target": "api",              # 推送方式："api" = HTTP 接口；数据源 id = 写进那个 MySQL 库（数据源在页面上管理）
+    # 两种推送方式各自开关，可以都开（总开关 enabled 关着时都不推）：
+    "api_enabled": True,          # API 接口推送（push_url）
+    "db_enabled": False,          # 写入数据源（写进 datasource 那个 MySQL 库，数据源在页面上管理）
+    "datasource": "",             # 写入哪个数据源（id）
     "push_url": "",
     "push_batch_size": None,
     "push_timeout": None,
@@ -66,18 +69,24 @@ PUSH_DEFAULTS: Dict[str, Any] = {
 
 
 def normalize_push_settings(data: Optional[dict]) -> Dict[str, Any]:
+    data = dict(data or {})
+    old = data.pop("target", None)
+    if old is not None and "db_enabled" not in data:
+        # 早先的「推送方式」二选一（target = "api" 或数据源 id）→ 两个开关
+        on = str(old or "api") != "api"
+        data.update(api_enabled=not on, db_enabled=on, datasource=str(old) if on else "")
     out = dict(PUSH_DEFAULTS)
-    for k, v in (data or {}).items():
+    for k, v in data.items():
         if k in out:
             out[k] = v
-    out["target"] = str(out["target"] or "api").strip() or "api"
+    out["datasource"] = str(out["datasource"] or "").strip()
     out["push_url"] = str(out["push_url"] or "").strip()
     if out["push_url"] and not out["push_url"].lower().startswith(("http://", "https://")):
         raise ValueError("推送地址要以 http:// 或 https:// 开头")
     for k, lo in (("push_batch_size", 1), ("push_retries", 0)):
         out[k] = None if out[k] in (None, "") else max(int(out[k]), lo)
     out["push_timeout"] = None if out["push_timeout"] in (None, "") else max(float(out["push_timeout"]), 1.0)
-    for k in ("enabled", "push_dry_run", "push_strict"):
+    for k in ("enabled", "api_enabled", "db_enabled", "push_dry_run", "push_strict"):
         out[k] = bool(out[k])
     return out
 
@@ -85,14 +94,16 @@ def normalize_push_settings(data: Optional[dict]) -> Dict[str, Any]:
 def push_overrides(ps: Dict[str, Any], datasource: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """推送设置 → 传给子进程的 OPINION_SETTINGS_JSON（只放页面上改过的）。
 
-    datasource：推送方式选了数据源时，那个数据源（含密码，只进子进程的环境变量，不写日志）。
+    datasource：开了「写入数据源」时，那个数据源（含密码，只进子进程的环境变量，不写日志）。
+    页面上关了 API 推送才带 push_api=False（默认就是开的）。
     """
     out = {k: v for k, v in ps.items() if k.startswith("push_") and v not in (None, "")}
     for k in ("push_dry_run", "push_strict"):
         if not ps.get(k):
             out.pop(k, None)               # 关着 = 用 settings_local 的
+    if not ps.get("api_enabled", True):
+        out["push_api"] = False
     if datasource:
-        out["push_target"] = "db"
         out["push_db"] = {k: datasource.get(k) for k in DATASOURCE_FIELDS}
     return out
 
@@ -421,14 +432,14 @@ class Runner:
         return list(self.store.get_kv(DATASOURCE_KEY, []) or [])
 
     def push_datasource(self, ps: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
-        """推送方式选的数据源（含密码）；选的是 API 返回 None；选的数据源已被删掉抛 ValueError。"""
+        """开了「写入数据源」时写哪个（含密码）；没开返回 None；开了但没选 / 选的已被删掉抛 ValueError。"""
         ps = ps or self.push_settings()
-        if ps.get("target", "api") == "api":
+        if not ps.get("db_enabled"):
             return None
         for d in self.datasources():
-            if d.get("id") == ps["target"]:
+            if d.get("id") == ps.get("datasource"):
                 return d
-        raise ValueError("推送方式选的数据源已经不存在了，请在「推送」页重新选择")
+        raise ValueError("写入数据源开着，但没选数据源或选的已经被删掉了，请在「推送」页重新选择")
 
     def queued(self) -> int:
         return self._q.qsize()
@@ -545,18 +556,20 @@ class Runner:
         if not run or run["status"] != "queued":
             return
         ps = self.push_settings()
-        argv = apply_push_switch(run["command"], ps["enabled"])
+        ds_error = ""
+        try:
+            ds = self.push_datasource(ps) if ps["enabled"] else None
+        except ValueError as e:
+            ds, ds_error = None, str(e)
+        # 两种方式都没在用（都关着，或只开了数据源却没选好）= 这次不推，免得 run 因为「没有推送方式」直接失败
+        ways = ps["enabled"] and (ps["api_enabled"] or ds is not None)
+        argv = apply_push_switch(run["command"], ways)
         push_cut = argv != list(run["command"])
         summary_path = os.path.join(self.run_dir, f"{run_id}.summary.json")
         if argv and argv[0] == "run":
             argv += ["--summary-json", summary_path]
         cmd = [self.python, "-m", "engin_cli.cli"] + argv
         env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
-        ds_error = ""
-        try:
-            ds = self.push_datasource(ps) if ps["enabled"] else None
-        except ValueError as e:
-            ds, ds_error = None, str(e)
         over = push_overrides(ps, ds)
         nover = notify_overrides(self.notify_settings())
         if over or nover:
@@ -567,14 +580,17 @@ class Runner:
         self.store.update_run(run_id, status="running", started_at=now_str())
         with open(run["log_path"], "w", encoding="utf-8") as logf:
             logf.write(f"$ {' '.join(cmd)}\n（工作目录 {self.app_root}）\n")
-            if push_cut:
-                logf.write("（推送总开关已关闭：本次只算不推）\n")
             if ds_error:
-                logf.write(f"（⚠ {ds_error}：本次按 API 推送设置执行）\n")
-            if ds:
+                logf.write(f"（⚠ {ds_error}）\n")
+            if push_cut:
+                logf.write("（推送总开关已关闭：本次只算不推）\n" if not ps["enabled"] else
+                           "（API 推送和写入数据源都没在用：本次只算不推）\n")
+            elif ps["enabled"] and run["command"] and run["command"][0] in ("run", "push", "mock"):
                 from ..sink_db import describe
-                logf.write(f"（推送方式：写入数据源 {describe(ds)}，先删本次景区 × 日期的旧行再写入）\n")
-            shown = [f"{k}={v}" for k, v in over.items() if k not in ("push_db", "push_target")]  # 数据源有密码，不写日志
+                ways_text = (["API 接口"] if ps["api_enabled"] else []) + (
+                    [f"写入数据源 {describe(ds)}（先删本次景区 × 日期的旧行再写入）"] if ds else [])
+                logf.write("（推送方式：" + " + ".join(ways_text) + "）\n")
+            shown = [f"{k}={v}" for k, v in over.items() if k not in ("push_db", "push_api")]  # 数据源有密码，不写日志
             if shown:
                 logf.write("（推送设置来自服务页面：" + "，".join(shown) + "）\n")
             if nover:

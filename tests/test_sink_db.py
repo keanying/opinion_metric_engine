@@ -87,7 +87,7 @@ def produced():
 
 def _st(**kw):
     st = EtlSettings()
-    st.push_enabled, st.push_target, st.push_db = True, "db", dict(DS)
+    st.push_enabled, st.push_api, st.push_db = True, False, dict(DS)
     for k, v in kw.items():
         setattr(st, k, v)
     return st
@@ -178,12 +178,16 @@ def test_check_connection():
 def test_settings_helpers():
     st = _st()
     assert push_dest(st) == "数据源 客户数仓（10.0.0.8:3307/dw）" and push_not_ready(st) == ""
+    st.push_api, st.push_url = True, "https://x.example/sync"
+    assert push_dest(st) == "API https://x.example/sync + 数据源 客户数仓（10.0.0.8:3307/dw）"
     st.push_db = {"host": "h"}
     assert "缺 user、database" in push_not_ready(st)
+    st.push_api, st.push_db = False, None
+    assert "都关着" in push_not_ready(st)
     api = EtlSettings()
     assert "未配置推送地址" in push_not_ready(api)
-    apply_overrides(api, json.dumps({"push_target": "db", "push_db": DS}))     # 服务传给子进程的方式
-    assert api.push_target == "db" and api.push_db["host"] == "10.0.0.8"
+    apply_overrides(api, json.dumps({"push_api": False, "push_db": DS}))     # 服务传给子进程的方式
+    assert api.push_api is False and api.push_db["host"] == "10.0.0.8"
 
 
 def test_cli_push_url_flag_means_api():
@@ -194,7 +198,7 @@ def test_cli_push_url_flag_means_api():
         no_push = push_dry_run = push_strict = False
         push_url = "https://x.example/sync"
     cli._apply_push_args(st, A())
-    assert st.push_target == "api"
+    assert st.push_api is True and st.push_db is None                         # 命令行给了地址：这次只按 API 推
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -214,10 +218,45 @@ def test_normalize_datasource():
 
 
 def test_push_overrides_carry_datasource_but_log_hides_password():
-    over = R.push_overrides({**R.PUSH_DEFAULTS, "target": "ds_1"}, {**DS, "id": "ds_1"})
-    assert over["push_target"] == "db" and over["push_db"]["password"] == "pw-secret"
+    over = R.push_overrides({**R.PUSH_DEFAULTS, "api_enabled": False, "db_enabled": True, "datasource": "ds_1"},
+                            {**DS, "id": "ds_1"})
+    assert over["push_api"] is False and over["push_db"]["password"] == "pw-secret"
     assert "id" not in over["push_db"]
-    assert "push_target" not in R.push_overrides(dict(R.PUSH_DEFAULTS))
+    plain = R.push_overrides(dict(R.PUSH_DEFAULTS))
+    assert "push_api" not in plain and "push_db" not in plain                 # 默认：API 开、数据源关，不用传
+
+
+def test_old_single_choice_setting_is_migrated():
+    """早先存的「推送方式」二选一（target）→ 两个开关。"""
+    ps = R.normalize_push_settings({"enabled": True, "target": "ds_1"})
+    assert (ps["api_enabled"], ps["db_enabled"], ps["datasource"]) == (False, True, "ds_1") and "target" not in ps
+    ps = R.normalize_push_settings({"target": "api"})
+    assert (ps["api_enabled"], ps["db_enabled"], ps["datasource"]) == (True, False, "")
+    ps = R.normalize_push_settings({})
+    assert (ps["api_enabled"], ps["db_enabled"]) == (True, False)
+
+
+def test_both_ways_on_push_api_then_write_datasource(produced, monkeypatch):
+    import engin_cli.pusher as P
+    sent = []
+
+    def fake_push_table(table, df, settings, progress=None):
+        sent.append(table)
+        return P.PushResult(table=table, rows=len(df), batches=1)
+    monkeypatch.setattr(P, "push_table", fake_push_table)
+    st = _st(push_api=True, push_url="https://x.example/sync")
+    rep = push_all({TABLE_CORE: produced[TABLE_CORE]}, settings=st, scope=(["S1"], ["20261101"]))
+    assert rep.ok and sent == [TABLE_CORE] and TargetDB.instances[0].writes[0]["table"] == TABLE_CORE
+    assert [r.via for r in rep.results] == ["", "数据源"]
+    assert any(n.startswith("推送 ads_trf_social_opinion_comment_core_di") for n in rep.notes())
+    assert any(n.startswith("写入数据源 ads_trf_social_opinion_comment_core_di") for n in rep.notes())
+    # 只开 API：不碰数据源
+    TargetDB.instances = []
+    rep = push_all({TABLE_CORE: produced[TABLE_CORE]}, settings=_st(push_api=True, push_url="https://x", push_db=None))
+    assert rep.ok and not TargetDB.instances
+    # 都关：不推，说清楚
+    rep = push_all({TABLE_CORE: produced[TABLE_CORE]}, settings=_st(push_api=False, push_db=None))
+    assert "都关着" in rep.results[0].error
 
 
 def _app(tmp_path):
@@ -245,20 +284,26 @@ def test_datasource_api(tmp_path):
     assert r["ok"] and {t["table"] for t in r["tables"]} == set(TABLE_COLUMNS)
     assert TargetDB.instances[-1].cfg.password == "pw-secret"
     # 推送方式选它
-    with pytest.raises(ApiError, match="不存在"):
-        app.save_push_settings({"target": "ds_nope"})
-    v = app.save_push_settings({"target": d["id"]})
+    with pytest.raises(ApiError, match="要选一个数据源"):
+        app.save_push_settings({"db_enabled": True, "datasource": "ds_nope"})
+    v = app.save_push_settings({"db_enabled": True, "datasource": d["id"]})
     assert v["target_datasource"]["name"] == "客户数仓" and app.push_ready() is True
-    assert "写入数据源" in app.config_view()["推送"]["push_target"]
+    assert v["ways"] == ["API 接口", "数据源「客户数仓」"]                      # 两个都开着：两个都推
+    assert app.config_view()["推送"]["push_target"] == "API 接口 + 写入数据源 客户数仓（10.0.0.9:3307/dw）"
+    v = app.save_push_settings({"api_enabled": False})
+    assert v["ways"] == ["数据源「客户数仓」"]
     assert "pw-secret" not in json.dumps(v, ensure_ascii=False)
     assert "pw-secret" not in json.dumps(app.config_view(), ensure_ascii=False, default=str)
     # 正在用的不能删；改回 API 再删
-    with pytest.raises(ApiError, match="正被选作推送方式"):
+    with pytest.raises(ApiError, match="正在写入"):
         app.delete_datasource(d["id"])
-    app.save_push_settings({"target": "api"})
+    v = app.save_push_settings({"db_enabled": False})
+    assert v["ways"] == [] and app.push_ready() is False                       # 两个都关：不推
     assert app.delete_datasource(d["id"])["ok"] and app.runner.datasources() == []
+    assert app.runner.push_settings()["datasource"] == ""                      # 选中的被删了：清掉
     texts = [e["text"] for e in app.store.list_events()]
-    assert any("推送方式改为写入数据源「客户数仓」" in t for t in texts)
+    assert any("写入数据源已开启：「客户数仓」" in t for t in texts)
+    assert any("API 接口推送已关闭" in t for t in texts) and any("写入数据源已关闭" in t for t in texts)
 
 
 def test_datasource_routes_are_admin_only():
@@ -275,7 +320,7 @@ def test_runner_hands_datasource_to_subprocess(tmp_path):
     import sys
     app = _app(tmp_path)
     d = app.save_datasource(DS)
-    app.save_push_settings({"target": d["id"]})
+    app.save_push_settings({"api_enabled": False, "db_enabled": True, "datasource": d["id"]})
     seen = {}
     fake = tmp_path / "fake_cli.py"
     fake.write_text("import os\n"
@@ -299,6 +344,19 @@ def test_runner_hands_datasource_to_subprocess(tmp_path):
         subprocess.Popen = real
         os.environ.pop("OUT", None)
     env = json.loads(out.read_text(encoding="utf-8"))
-    assert env["push_target"] == "db" and env["push_db"]["password"] == "pw-secret"
+    assert env["push_api"] is False and env["push_db"]["password"] == "pw-secret"
     log = open(app.store.get_run(rid)["log_path"], encoding="utf-8").read()
-    assert "写入数据源 客户数仓（10.0.0.8:3307/dw）" in log and "pw-secret" not in log
+    assert "（推送方式：写入数据源 客户数仓（10.0.0.8:3307/dw）" in log and "pw-secret" not in log
+    # 两种方式都关：跑批改成 --no-push（只算不推），不会因为「没有推送方式」失败
+    app.save_push_settings({"db_enabled": False})
+    try:
+        subprocess.Popen = popen
+        os.environ["OUT"] = str(out)
+        rid = runner.submit("run", ["run", "--date", "20261101", "--push", "drill,macro"], "跑批")
+        runner._execute(rid)
+    finally:
+        subprocess.Popen = real
+        os.environ.pop("OUT", None)
+    assert "--no-push" in seen["cmd"] and "--push" not in seen["cmd"]
+    log = open(app.store.get_run(rid)["log_path"], encoding="utf-8").read()
+    assert "API 推送和写入数据源都没在用：本次只算不推" in log

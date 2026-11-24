@@ -104,10 +104,15 @@ class PushResult:
     pk_sample: str = ""         # 一组重复行组成的请求 JSON（单行，可直接拿去推）
     pk_dump: str = ""           # 全部重复行组成的请求 JSON 文件路径
     log_path: str = ""          # 推送记录文件（每次请求的真实响应）
+    via: str = ""               # 推送方式：""（API）/ "数据源"，报告里区分两种方式的同名表
 
     @property
     def ok(self) -> bool:
         return not self.error and self.failed_batches == 0
+
+    @property
+    def label(self) -> str:
+        return f"写入数据源 {self.table}" if self.via == "数据源" else f"推送 {self.table}"
 
 
 @dataclass
@@ -120,7 +125,7 @@ class PushReport:
 
     @property
     def errors(self) -> List[str]:
-        return [f"推送 {r.table} 失败：{r.error}" for r in self.results if not r.ok]
+        return [f"{r.label} 失败：{r.error}" for r in self.results if not r.ok]
 
     def notes(self) -> List[str]:
         out = []
@@ -128,7 +133,7 @@ class PushReport:
             if r.skipped:
                 continue
             state = "成功" if r.ok else f"失败（{r.error}）"
-            out.append(f"推送 {r.table}：{r.rows:,} 行 / {r.batches} 批，"
+            out.append(f"{r.label}：{r.rows:,} 行 / {r.batches} 批，"
                        f"{r.elapsed:.1f}s，{state}")
             if r.warning:
                 out.append(f"⚠ {r.table}：{r.warning}")
@@ -829,14 +834,27 @@ def push_all(tables: Dict[str, pd.DataFrame], *, settings,
           （不给就按数据里出现的景区 / 日期删）
     出参：PushReport（.ok / .errors / .notes()）
     推送地址连不上时，剩下的表不再推，记为失败（error 里写明原因），可之后用 push 补推。
-    推送方式 settings.push_target = "db" 时不发 HTTP，改成写进数据源（sink_db.write_all）。
+    两种推送方式各自开关、可以都开：settings.push_api（HTTP 接口）、settings.push_db（写入数据源，
+    sink_db.write_all）。都开时先推 API、再写数据源，结果都在同一个 PushReport 里（via 区分）。
     """
     rep = PushReport()
     if not getattr(settings, "push_enabled", False):
         return rep
-    if getattr(settings, "push_target", "api") == "db":
+    if getattr(settings, "push_api", True):
+        rep.results += _push_api(tables, settings, progress_factory).results
+    if getattr(settings, "push_db", None):
         from .sink_db import write_all
-        return write_all(tables, settings=settings, scope=scope, progress_factory=progress_factory)
+        rep.results += write_all(tables, settings=settings, scope=scope,
+                                 progress_factory=progress_factory).results
+    if not getattr(settings, "push_api", True) and not getattr(settings, "push_db", None):
+        rep.results.append(PushResult(table="-", skipped=True,
+                                      error="API 推送和写入数据源都关着，没有推送"))
+    return rep
+
+
+def _push_api(tables: Dict[str, pd.DataFrame], settings, progress_factory=None) -> PushReport:
+    """HTTP 接口推送（push_all 的 API 那一半）。"""
+    rep = PushReport()
     if not getattr(settings, "push_url", ""):
         rep.results.append(PushResult(table="-", skipped=True,
                                       error="push_enabled=True 但 push_url 没配"))

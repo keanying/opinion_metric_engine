@@ -455,12 +455,24 @@ class App:
                 "push_dry_run": st.push_dry_run, "push_strict": st.push_strict}
         over = push_overrides(ps)
         dss = [datasource_view(d) for d in self.runner.datasources()]
-        cur = next((d for d in dss if d["id"] == ps["target"]), None)
+        cur = next((d for d in dss if d["id"] == ps["datasource"]), None)
         return {"settings": ps, "base": base, "effective": {**base, **over},
                 "headers": {k: _mask(v) for k, v in (st.push_headers or {}).items()},
                 "table_names": st.push_table_names or {}, "log_dir": self._push_log_dir(),
                 "datasources": dss, "target_datasource": cur,
-                "target_missing": ps["target"] != "api" and cur is None}
+                "target_missing": ps["db_enabled"] and cur is None,
+                "ways": self._push_ways(ps, cur)}
+
+    def _push_ways(self, ps: dict, ds: Optional[dict]) -> List[str]:
+        """现在实际在用的推送方式（页面顶上显示）：[] = 不推送。"""
+        if not ps["enabled"]:
+            return []
+        out = []
+        if ps["api_enabled"]:
+            out.append("API 接口")
+        if ps["db_enabled"] and ds:
+            out.append(f"数据源「{ds['name']}」")
+        return out
 
     def save_push_settings(self, body: dict) -> dict:
         """只改传进来的字段（例如只关总开关），其余保持原样。"""
@@ -469,12 +481,15 @@ class App:
         except (ValueError, TypeError) as e:
             raise ApiError(400, str(e))
         old = self.runner.push_settings()
-        if ps["target"] != "api" and not any(d.get("id") == ps["target"] for d in self.runner.datasources()):
-            raise ApiError(400, "选的数据源不存在，请先在「写入数据源」里添加")
+        names = {d.get("id"): d.get("name") for d in self.runner.datasources()}
+        if ps["db_enabled"] and ps["datasource"] not in names:
+            raise ApiError(400, "开了「写入数据源」要选一个数据源（没有就先在下面「写入数据源」里添加）")
         self.store.set_kv("push", ps)
-        if old["target"] != ps["target"]:
-            name = next((d["name"] for d in self.runner.datasources() if d.get("id") == ps["target"]), "")
-            self.store.add_event("推送方式改为" + (f"写入数据源「{name}」" if name else "API 接口"))
+        if old["api_enabled"] != ps["api_enabled"]:
+            self.store.add_event("API 接口推送已" + ("开启" if ps["api_enabled"] else "关闭"))
+        if (old["db_enabled"], old["datasource"]) != (ps["db_enabled"], ps["datasource"]):
+            self.store.add_event(f"写入数据源已开启：「{names[ps['datasource']]}」" if ps["db_enabled"]
+                                 else "写入数据源已关闭")
         if old["enabled"] != ps["enabled"]:
             self.store.add_event("推送总开关已" + ("打开" if ps["enabled"] else "关闭（任务只算不推）"),
                                  level="info" if ps["enabled"] else "warn")
@@ -514,9 +529,12 @@ class App:
 
     def delete_datasource(self, ds_id: str) -> dict:
         d = self._ds_find(ds_id)
-        if self.runner.push_settings()["target"] == ds_id:
-            raise ApiError(400, f"「{d['name']}」正被选作推送方式，先把推送方式改成别的再删")
+        ps = self.runner.push_settings()
+        if ps["datasource"] == ds_id and ps["db_enabled"]:
+            raise ApiError(400, f"「{d['name']}」正在写入，先关掉「写入数据源」或换一个数据源再删")
         self.store.set_kv(DATASOURCE_KEY, [x for x in self.runner.datasources() if x.get("id") != ds_id])
+        if ps["datasource"] == ds_id:
+            self.store.set_kv("push", {**ps, "datasource": ""})
         self.store.add_event(f"写入数据源「{d['name']}」已删除")
         return {"ok": True}
 
@@ -864,13 +882,13 @@ class App:
         return c
 
     def push_ready(self) -> bool:
-        """推送能用：总开关开着，且配了推送地址（页面设置或 settings_local），或选了存在的数据源。"""
+        """推送能用：总开关开着，且 API 开着并配了地址（页面设置或 settings_local），或写入数据源开着并选好了。"""
         ps = self.runner.push_settings()
         if not ps["enabled"]:
             return False
-        if ps["target"] != "api":
-            return any(d.get("id") == ps["target"] for d in self.runner.datasources())
-        return bool(ps.get("push_url") or getattr(self.settings, "push_url", ""))
+        if ps["db_enabled"] and any(d.get("id") == ps["datasource"] for d in self.runner.datasources()):
+            return True
+        return bool(ps["api_enabled"] and (ps.get("push_url") or getattr(self.settings, "push_url", "")))
 
     def quality_repair(self, body: dict) -> dict:
         """数据修复：把检测的**整段日期**按当前源数据一次重算（写库，可选推送）。
@@ -1058,14 +1076,14 @@ class App:
         return {"deleted_runs": len(paths), "deleted_files": removed, "before": before}
 
     def _push_target_text(self) -> str:
+        ps = self.runner.push_settings()
         try:
-            d = self.runner.push_datasource()
+            d = self.runner.push_datasource(ps)
         except ValueError as e:
             return str(e)
-        if not d:
-            return "API 接口"
         from ..sink_db import describe
-        return "写入数据源 " + describe(d)
+        ways = (["API 接口"] if ps["api_enabled"] else []) + (["写入数据源 " + describe(d)] if d else [])
+        return " + ".join(ways) or "不推送（API 和数据源都关着）"
 
     def config_view(self) -> dict:
         st = self.settings

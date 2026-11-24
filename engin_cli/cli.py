@@ -344,23 +344,29 @@ def _run_one_scenic(st, scenic: str, dates: List[str], db, comments_df, works_df
         for r in res.push.results:
             if r.skipped and not r.error:
                 continue
-            print(f"  推送 {r.table:<48} {r.rows:>8,} 行  [{r.batches} 批 {r.elapsed:.1f}s]"
+            print(f"  {'写库' if r.via == '数据源' else '推送'} {r.table:<48} {r.rows:>8,} 行  [{r.batches} 批 {r.elapsed:.1f}s]"
                   + ("" if r.ok else f"  ✗ {r.error}"))
             _print_pk_warning(r)
         for n in res.notes:
             if n.startswith("推送响应记录：") and not verbose:
                 print(f"  {n}")
         push_note = "推送 ✓" if res.push.ok else f"推送 ✗（{len(res.push.errors)} 张表失败，可用 push 补推）"
-        if any(r.unreachable for r in res.push.results):
-            # 地址连不上 / 证书校验失败，后面的景区推也是白等：只算、只落库，事后用 push 补推
-            st.push_enabled = False
+        # 连不上 / 证书校验失败，后面的景区推也是白等：只关掉出问题的那种方式，事后用 push 补推
+        if any(r.unreachable and r.via == "数据源" for r in res.push.results):
+            print(f"  ✗ 数据源连不上：{push_dest(st)}，后面的景区不再写入数据源")
+            st.push_db = None
+            push_note = "推送 ✗（数据源连不上，后面的景区不再写入，修好后用 push 补推）"
+        if any(r.unreachable and r.via != "数据源" for r in res.push.results):
+            st.push_api = False
             if any(r.cert_error for r in res.push.results):
                 push_note = "推送 ✗（对方 HTTPS 证书校验失败，后面的景区不再推送，修好后用 push 补推）"
-                print(f"  ✗ {st.push_url} 的 HTTPS 证书校验失败，后面的景区只计算、落库，不再推送。\n"
+                print(f"  ✗ {st.push_url} 的 HTTPS 证书校验失败，后面的景区不再 API 推送。\n"
                       "    证书过期 / 证书链不完整要找对方运维；也检查本机时间和根证书是否太旧")
             else:
                 push_note = "推送 ✗（地址连不上或没有响应，后面的景区不再推送，修好后用 push 补推）"
-                print(f"  ✗ 推送地址连不上或没有响应：{push_dest(st)}，后面的景区只计算、落库，不再推送")
+                print(f"  ✗ 推送地址连不上或没有响应：{st.push_url}，后面的景区不再 API 推送")
+        if not st.push_api and not st.push_db:
+            st.push_enabled = False
     if res.errors:
         for e in res.errors:
             print(f"  ✗ {e}")
@@ -578,7 +584,7 @@ def _apply_push_args(st, args) -> None:
         st.push_enabled = False
     if getattr(args, "push_url", None):
         st.push_url = args.push_url
-        st.push_target = "api"              # 命令行给了地址：这次就按 API 推
+        st.push_api, st.push_db = True, None   # 命令行给了地址：这次只按 API 推
         st.push_enabled = True
     if getattr(args, "push_dry_run", False):
         st.push_dry_run = True
@@ -645,8 +651,8 @@ def cmd_push(args) -> int:
         print(f"库里没有可推送的数据（{'，'.join(what)}）。先用 run 跑出结果写库，再补推。")
         return 2
 
-    if args.diagnose and st.push_target == "db":
-        print(f"推送方式是写入数据源（{push_dest(st)}）：诊断只用于 API 推送。"
+    if args.diagnose and not st.push_api:
+        print(f"API 推送关着（现在：{push_dest(st)}）：诊断只用于 API 推送。"
               "数据源连不连得上，在服务页面「推送 → 写入数据源」点「测试」")
         return 2
     if args.diagnose:
@@ -668,7 +674,7 @@ def cmd_push(args) -> int:
         n = int(args.preview_rows or 2)
         print("=" * 72)
         print(f"报文预览（不发送）→ {push_dest(st)}")
-        if st.push_target != "db":
+        if st.push_api:
             print(f"请求头：{json.dumps(_mask_headers(st.push_headers), ensure_ascii=False)}")
         print("=" * 72)
         for sc, tables in batches:
@@ -686,10 +692,10 @@ def cmd_push(args) -> int:
     print("=" * 72)
     print(f"补推 {len(batches)} 个景区 → {push_dest(st)}"
           + ("   [dry-run 只组报文不发送]" if st.push_dry_run else ""))
-    if st.push_target == "db":
-        print(f"每张表先删除这几个景区 {dates[0]}~{dates[-1]} 的旧行，再写入（同一事务），每批 {st.push_batch_size} 行")
-    else:
-        print(f"每批 {st.push_batch_size} 行，超时 {st.push_timeout:g}s，失败重试 {st.push_retries} 次")
+    if st.push_api:
+        print(f"API：每批 {st.push_batch_size} 行，超时 {st.push_timeout:g}s，失败重试 {st.push_retries} 次")
+    if st.push_db:
+        print(f"数据源：每张表先删除这几个景区 {dates[0]}~{dates[-1]} 的旧行，再写入（同一事务），每批 {st.push_batch_size} 行")
     print("=" * 72, flush=True)
     factory = None if args.no_progress else push_progress_factory()
     failed = []
@@ -701,21 +707,21 @@ def cmd_push(args) -> int:
                 print(f"  {n}")
         for r in rep.results:
             if factory is None or r.skipped:     # 有进度条时每张表已经打过结果行了
-                print(f"  {r.table:<52} {r.rows:>8,} 行  [{r.batches} 批 {r.elapsed:.1f}s]"
+                print(f"  {'写库 ' if r.via == '数据源' else ''}{r.table:<52} {r.rows:>8,} 行  [{r.batches} 批 {r.elapsed:.1f}s]"
                       + ("" if r.ok else f"  ✗ {r.error}"))
             _print_pk_warning(r)
         failed += [f"{sc} · {e}" for e in rep.errors]
+        if any(r.unreachable and r.via == "数据源" for r in rep.results):
+            print(f"\n✗ 数据源连不上：{push_dest(st)}\n"
+                  "  · 在服务页面「推送 → 写入数据源」点「测试」，确认地址、端口、账号密码、库名\n"
+                  "  后面的景区不再写入，修好后重新执行这条 push 补推。")
+            return 1
         if any(r.cert_error for r in rep.results):
             print(f"\n✗ {st.push_url} 的 HTTPS 证书校验失败，重试没有用：\n"
                   "  · 证书过期 / 证书链不完整：请对方运维续签或修正证书\n"
                   "  · 浏览器访问正常、只有这台机器报错：检查本机时间（date），"
                   "以及根证书是否太旧（更新 ca-certificates）\n"
                   "  后面的景区不再推送，修好后重新执行这条 push 补推。")
-            return 1
-        if any(r.unreachable for r in rep.results) and st.push_target == "db":
-            print(f"\n✗ 数据源连不上：{push_dest(st)}\n"
-                  "  · 在服务页面「推送 → 写入数据源」点「测试」，确认地址、端口、账号密码、库名\n"
-                  "  后面的景区不再写入，修好后重新执行这条 push 补推。")
             return 1
         if any(r.unreachable for r in rep.results):
             print(f"\n✗ 推送地址连不上或没有响应：{st.push_url}\n"
@@ -794,7 +800,7 @@ def cmd_mock(args) -> int:
     rep = push_all(tables, settings=st, progress_factory=factory, scope=([args.to_scenic], dates))
     for r in rep.results:
         if factory is None or r.skipped:
-            print(f"  {r.table:<52} {r.rows:>8,} 行  [{r.batches} 批 {r.elapsed:.1f}s]"
+            print(f"  {'写库 ' if r.via == '数据源' else ''}{r.table:<52} {r.rows:>8,} 行  [{r.batches} 批 {r.elapsed:.1f}s]"
                   + ("" if r.ok else f"  ✗ {r.error}"))
     for n in rep.notes():
         if n.startswith("推送响应记录："):

@@ -1024,3 +1024,10 @@ details summary { cursor: pointer; color: var(--primary); font-size: 13px; margi
 .ds-map > input { height: 34px !important; }
 .ds-test { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
 .ds-test-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; }
+/* 推送设置：两种推送方式各一个开关 */
+.way { border: 1px solid var(--line); border-radius: 14px; background: #fbfbfe; }
+.way.on { border-color: #c9ccf6; background: #fff; }
+.way-head { display: flex; align-items: center; gap: 12px; padding: 12px 14px; }
+.way-head b { font-size: 14px; }
+.way-head small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.way-body { display: flex; flex-direction: column; gap: 12px; padding: 4px 14px 14px; border-top: 1px dashed var(--line); padding-top: 12px; }

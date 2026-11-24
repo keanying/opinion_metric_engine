@@ -1,10 +1,10 @@
-import { ref, reactive, onMounted, computed } from 'vue'
+import { ref, reactive, onMounted, computed, watch } from 'vue'
 import { api, TABLES, TABLE_LABEL, PUSH_RESULT, fmtNum, notify, refreshSched, todayYmd, confirmBox } from '../api.js'
 import { Ring } from '../charts.js'
 
 const RING_C = { ok: ['#a3a6f3', '#5458d8'], dry_run: ['#8be3ef', '#22b8cf'], business_fail: ['#f6a4b8', '#ee5a7c'],
   http_error: ['#f28aa3', '#e04a6e'], network_error: ['#ffd88a', '#f5a524'], timeout: ['#ffe3a8', '#f7b43c'],
-  ssl_error: ['#54506c', '#282441'] }
+  ssl_error: ['#54506c', '#282441'], db_error: ['#f28aa3', '#d93f63'] }
 
 export default {
   components: { Ring },
@@ -57,7 +57,9 @@ export default {
 
     // ── 写入数据源：推送方式之二，写进另一个 MySQL 库（先删本次景区 × 日期，再写入）
     const dsEdit = ref(null), dsSaving = ref(false), dsTest = ref(null), dsTesting = ref('')
-    const curDs = computed(() => (view.value?.datasources || []).find(d => d.id === form.target))
+    const curDs = computed(() => (view.value?.datasources || []).find(d => d.id === form.datasource))
+    // 打开「写入数据源」时还没选：默认选第一个
+    watch(() => form.db_enabled, on => { if (on && !curDs.value && view.value?.datasources.length) form.datasource = view.value.datasources[0].id })
     const blankDs = () => ({ id: '', name: '', host: '', port: 3306, user: '', password: '', database: '', remark: '',
                              table_names: Object.fromEntries(TABLES.map(t => [t.table, ''])), has_password: false })
     const openDs = d => {
@@ -90,7 +92,8 @@ export default {
       try { await api('/api/datasources/' + d.id, { method: 'DELETE' }); notify('已删除'); await loadView() }
       catch (err) { notify(err.message, 'err') }
     }
-    const setTarget = v => { form.target = v === 'db' ? ((view.value.datasources[0] || {}).id || 'db') : 'api' }
+    const dsState = d => !view.value || d.id !== view.value.settings.datasource ? ''
+      : view.value.settings.db_enabled ? '正在写入' : '已选，写入数据源关着'
     const mapText = d => { const n = Object.keys(d.table_names || {}).length; return n ? `${n} 张表改了名` : '表名和本地相同' }
     const dsCols = [{ key: 'name', title: '数据源', width: 200 }, { key: 'addr', title: '地址 / 库', width: 260 },
       { key: 'user', title: '用户', width: 120 }, { key: 'map', title: '表名', width: 150 }, { key: 'op', title: '', width: 170, align: 'r' }]
@@ -106,49 +109,62 @@ export default {
     const ymd = s => s ? `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6)}` : ''
     return { view, form, saving, save, setMaster, logs, q, loadLogs, loadMoreLogs, moreLogs, loadingLogs, reset, re, toggleRe, doRepush,
              parts, total, okRate, cols, detail, ymd, TABLES, TABLE_LABEL, PUSH_RESULT, fmtNum, todayYmd,
-             dsEdit, dsSaving, dsTest, dsTesting, curDs, openDs, closeDs, saveDs, testDs, delDs, setTarget, mapText, dsCols }
+             dsEdit, dsSaving, dsTest, dsTesting, curDs, openDs, closeDs, saveDs, testDs, delDs, dsState, mapText, dsCols }
   },
   template: `
   <div v-if="view">
     <div class="card banner">
       <Switch :model-value="form.enabled" @change="setMaster"/>
-      <div class="grow"><b>启用推送</b><Tip wide :text="'任务算完、写库后，按任务里勾的表推给下游。关掉后所有任务只算不推（「补推」照常能用）。推送失败不影响跑批成败。推送记录写在 ' + (view.log_dir || '（未开启记录）')"/></div>
-      <Tag :color="form.enabled ? 'green' : 'grey'" :icon="form.enabled ? 'tickCircle' : 'minus'">{{ form.enabled ? '已启用' : '已关闭' }}</Tag>
+      <div class="grow"><b>启用推送</b><Tip wide :text="'总开关。任务算完、写库后，按任务里勾的表推出去，推到哪看下面两个开关（API 接口推送 / 写入数据源，可以都开）。关掉后所有任务只算不推（「补推」照常能用）。推送失败不影响跑批成败。推送记录写在 ' + (view.log_dir || '（未开启记录）')"/>
+        <p v-if="view.settings.enabled">{{ view.ways.length ? '现在推到：' + view.ways.join(' + ') : 'API 推送和写入数据源都关着，实际不推送' }}</p></div>
+      <Tag v-if="view.settings.enabled && !view.ways.length" color="orange" icon="alert">没有推送方式</Tag>
+      <Tag v-else :color="form.enabled ? 'green' : 'grey'" :icon="form.enabled ? 'tickCircle' : 'minus'">{{ form.enabled ? '已启用' : '已关闭' }}</Tag>
     </div>
 
     <div class="grid two">
       <div class="card sect push-set">
         <div class="sect-head"><h3>推送设置<Tip text="留空 = 用 settings_local.py 里的配置；保存后下一次执行生效"/></h3></div>
         <div class="sect-body">
-          <div class="frow"><label>推送方式<Tip wide text="API：按推送地址 POST 给下游。写入数据源：直接写进另一个 MySQL 库的表——每张表先删除「本次景区 × 本次日期」的旧行，再写入新行（同一事务，失败回滚）。跑批、补推、复制给其他景区都按这里的方式推"/></label>
-            <div class="seg"><button :class="{on: form.target === 'api'}" @click="setTarget('api')">API 接口</button>
-              <button :class="{on: form.target !== 'api'}" @click="setTarget('db')">写入数据源</button></div></div>
-          <div v-if="form.target !== 'api'" class="frow"><label>数据源</label>
-            <select v-model="form.target" class="grow">
-              <option v-if="!curDs" :value="form.target" disabled>请选择数据源</option>
-              <option v-for="d in view.datasources" :key="d.id" :value="d.id">{{ d.name }}（{{ d.host }}:{{ d.port }}/{{ d.database }}）</option></select>
-            <button class="btn light" @click="openDs()"><Icon name="plus" :size="13" :sw="2.4"/>添加</button></div>
-          <div v-if="form.target !== 'api' && !view.datasources.length" class="alert orange small">还没有数据源：点「添加」填数据库地址、账号、库名</div>
-          <div v-if="view.target_missing && form.target === view.settings.target" class="alert orange small">之前选的数据源已经被删掉了，请重新选择</div>
-          <div v-if="form.target === 'api'" class="frow"><label>推送地址</label>
-            <input v-model="form.push_url" class="grow" :placeholder="view.base.push_url || '未配置'" /></div>
+          <div class="way" :class="{on: form.api_enabled}">
+            <div class="way-head"><Switch v-model="form.api_enabled"/>
+              <div class="grow"><b>API 接口推送</b><small>按推送地址 POST 给下游</small></div>
+              <Tag :color="form.api_enabled ? 'green' : 'grey'">{{ form.api_enabled ? '开启' : '关闭' }}</Tag></div>
+            <div v-if="form.api_enabled" class="way-body">
+              <div class="frow"><label>推送地址</label>
+                <input v-model="form.push_url" class="grow" :placeholder="view.base.push_url || '未配置'" /></div>
+              <div class="frow"><label>超时</label><input v-model="form.push_timeout" class="w100" :placeholder="view.base.push_timeout + ' 秒'"/>
+                <label class="l2">重试</label><input v-model="form.push_retries" class="w100" :placeholder="view.base.push_retries + ' 次'"/></div>
+              <div class="frow ro"><label>请求头</label><div class="chips">
+                <span v-for="(v,k) in view.headers" :key="k" class="chip grey">{{ k }}: {{ v }}</span>
+                <span v-if="!Object.keys(view.headers).length" class="hint">未配置<Tip text="在 settings_local.py 的 push_headers 或环境变量 OPINION_PUSH_TOKEN 里配，页面不显示明文"/></span></div></div>
+              <div class="frow ro" v-if="Object.keys(view.table_names).length"><label>表名映射</label><div class="chips">
+                <span v-for="(v,k) in view.table_names" :key="k" class="chip grey" :title="k">{{ TABLE_LABEL[k] || k }} → {{ v }}</span></div></div>
+              <div class="frow ro"><label>生效地址<Tip text="这次执行实际推到哪：页面上填了用页面的，没填用 settings_local.py 的"/></label>
+                <span class="mono ell grow" :title="view.effective.push_url">{{ view.effective.push_url || '未配置' }}</span></div>
+            </div>
+          </div>
+          <div class="way" :class="{on: form.db_enabled}">
+            <div class="way-head"><Switch v-model="form.db_enabled"/>
+              <div class="grow"><b>写入数据源</b><Tip wide text="直接写进另一个 MySQL 库的表：每张表先删除「本次景区 × 本次日期」的旧行，再写入新行（同一事务，失败回滚）。数据源在下面「写入数据源」里添加"/>
+                <small>直接写进另一个 MySQL 库</small></div>
+              <Tag :color="form.db_enabled ? 'green' : 'grey'">{{ form.db_enabled ? '开启' : '关闭' }}</Tag></div>
+            <div v-if="form.db_enabled" class="way-body">
+              <div class="frow"><label>数据源</label>
+                <select v-model="form.datasource" class="grow">
+                  <option v-if="!curDs" :value="form.datasource" disabled>请选择数据源</option>
+                  <option v-for="d in view.datasources" :key="d.id" :value="d.id">{{ d.name }}（{{ d.host }}:{{ d.port }}/{{ d.database }}）</option></select>
+                <button class="btn light" @click="openDs()"><Icon name="plus" :size="13" :sw="2.4"/>添加</button></div>
+              <div v-if="!view.datasources.length" class="alert orange small">还没有数据源：点「添加」填数据库地址、账号、库名</div>
+              <div v-else-if="view.target_missing && !curDs" class="alert orange small">之前选的数据源已经被删掉了，请重新选择</div>
+            </div>
+          </div>
+          <div v-if="!form.api_enabled && !form.db_enabled" class="alert orange small">两种推送方式都关着：保存后任务只算不推</div>
           <div class="frow"><label>每批行数</label><input v-model="form.push_batch_size" class="w100" :placeholder="String(view.base.push_batch_size)"/>
-            <template v-if="form.target === 'api'">
-            <label class="l2">超时</label><input v-model="form.push_timeout" class="w100" :placeholder="view.base.push_timeout + ' 秒'"/>
-            <label class="l2">重试</label><input v-model="form.push_retries" class="w100" :placeholder="view.base.push_retries + ' 次'"/></template></div>
+            <span class="hint">API 每个请求的行数 / 写库每批的行数</span></div>
           <div class="opts compact">
-            <div class="opt"><div><b>试推</b><Tip text="只组报文不真发，验证配置用（推送记录里结果是「试推」）"/></div><Switch v-model="form.push_dry_run"/></div>
+            <div class="opt"><div><b>试推</b><Tip text="只组报文、不真发 / 不真写库，验证配置用（推送记录里结果是「试推」）"/></div><Switch v-model="form.push_dry_run"/></div>
             <div class="opt"><div><b>推送失败算执行失败</b><Tip text="默认推失败不影响跑批成败（数据已落库，可以补推）"/></div><Switch v-model="form.push_strict"/></div>
           </div>
-          <template v-if="form.target === 'api'">
-          <div class="frow ro"><label>请求头</label><div class="chips">
-            <span v-for="(v,k) in view.headers" :key="k" class="chip grey">{{ k }}: {{ v }}</span>
-            <span v-if="!Object.keys(view.headers).length" class="hint">未配置<Tip text="在 settings_local.py 的 push_headers 或环境变量 OPINION_PUSH_TOKEN 里配，页面不显示明文"/></span></div></div>
-          <div class="frow ro" v-if="Object.keys(view.table_names).length"><label>表名映射</label><div class="chips">
-            <span v-for="(v,k) in view.table_names" :key="k" class="chip grey" :title="k">{{ TABLE_LABEL[k] || k }} → {{ v }}</span></div></div>
-          <div class="frow ro"><label>生效地址<Tip text="这次执行实际推到哪：页面上填了用页面的，没填用 settings_local.py 的"/></label>
-            <span class="mono ell grow" :title="view.effective.push_url">{{ view.effective.push_url || '未配置' }}</span></div>
-          </template>
           <div class="actions"><span class="hint">保存后下一次执行生效</span>
             <button class="btn primary" :disabled="saving" @click="save()">{{ saving ? '保存中…' : '保存推送设置' }}</button></div>
         </div>
@@ -185,8 +201,8 @@ export default {
       <div class="sect-head"><h3>写入数据源<Tip wide text="推送方式选「写入数据源」时写进这里的库。每张表：先删除本次景区 × 本次日期的旧行，再写入（同一事务）；只写目标表里有的列，目标表名可以和本地不同。只有管理员能添加 / 修改；密码保存在系统表里，页面上不显示"/></h3>
         <button class="btn xs light" @click="openDs()"><Icon name="plus" :size="12" :sw="2.4"/>添加数据源</button></div>
       <STable v-if="view.datasources.length" :columns="dsCols" :data="view.datasources" row-key="id">
-        <template #name="{ row }"><span class="s-name"><Avatar square icon="db" :color="row.id === view.settings.target ? 'green' : 'light-blue'"/>
-          <span class="s-ell"><b>{{ row.name }}</b><small>{{ row.id === view.settings.target ? '当前推送方式' : (row.remark || '') }}</small></span></span></template>
+        <template #name="{ row }"><span class="s-name"><Avatar square icon="db" :color="dsState(row) === '正在写入' ? 'green' : 'light-blue'"/>
+          <span class="s-ell"><b>{{ row.name }}</b><small>{{ dsState(row) || row.remark || '' }}</small></span></span></template>
         <template #addr="{ row }"><span class="mono s-ell">{{ row.host }}:{{ row.port }}/{{ row.database }}</span></template>
         <template #user="{ row }">{{ row.user }}<small v-if="!row.has_password" class="t-orange"> 无密码</small></template>
         <template #map="{ row }">{{ mapText(row) }}</template>
