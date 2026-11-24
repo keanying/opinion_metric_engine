@@ -92,6 +92,9 @@ def token_hash(token: str) -> str:
 _READ = ("GET", "HEAD", "OPTIONS")
 _SELF_SERVICE = ("/api/logout",)                  # 只读用户也能做的写操作：管自己的登录态
 _ADMIN_ONLY = (("PUT", "/api/push/settings", "推送设置只有管理员能改"),
+               ("POST", "/api/datasources", "写入数据源只有管理员能管理"),
+               ("PUT", "/api/datasources", "写入数据源只有管理员能管理"),
+               ("DELETE", "/api/datasources", "写入数据源只有管理员能管理"),
                ("PUT", "/api/scheduler", "定时总开关只有管理员能改"),
                ("PUT", "/api/notify/settings", "通知设置只有管理员能改"))
 

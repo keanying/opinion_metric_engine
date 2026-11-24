@@ -55,6 +55,7 @@ TABLE_KEYS = ("drill", "macro", "core", "platform", "dimension", "content")
 # 推送设置（推送页面上改，存在服务的 kv 表里）。None / "" = 用 settings_local.py 里的
 PUSH_DEFAULTS: Dict[str, Any] = {
     "enabled": True,              # 总开关：关掉后任务一律只算不推（补推照常可用）
+    "target": "api",              # 推送方式："api" = HTTP 接口；数据源 id = 写进那个 MySQL 库（数据源在页面上管理）
     "push_url": "",
     "push_batch_size": None,
     "push_timeout": None,
@@ -69,6 +70,7 @@ def normalize_push_settings(data: Optional[dict]) -> Dict[str, Any]:
     for k, v in (data or {}).items():
         if k in out:
             out[k] = v
+    out["target"] = str(out["target"] or "api").strip() or "api"
     out["push_url"] = str(out["push_url"] or "").strip()
     if out["push_url"] and not out["push_url"].lower().startswith(("http://", "https://")):
         raise ValueError("推送地址要以 http:// 或 https:// 开头")
@@ -80,13 +82,65 @@ def normalize_push_settings(data: Optional[dict]) -> Dict[str, Any]:
     return out
 
 
-def push_overrides(ps: Dict[str, Any]) -> Dict[str, Any]:
-    """推送设置 → 传给子进程的 OPINION_SETTINGS_JSON（只放页面上改过的）。"""
+def push_overrides(ps: Dict[str, Any], datasource: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """推送设置 → 传给子进程的 OPINION_SETTINGS_JSON（只放页面上改过的）。
+
+    datasource：推送方式选了数据源时，那个数据源（含密码，只进子进程的环境变量，不写日志）。
+    """
     out = {k: v for k, v in ps.items() if k.startswith("push_") and v not in (None, "")}
     for k in ("push_dry_run", "push_strict"):
         if not ps.get(k):
             out.pop(k, None)               # 关着 = 用 settings_local 的
+    if datasource:
+        out["push_target"] = "db"
+        out["push_db"] = {k: datasource.get(k) for k in DATASOURCE_FIELDS}
     return out
+
+
+# ── 写入数据源（页面「推送 → 写入数据源」管理，存系统表 service_setting 的 datasources）────────
+DATASOURCE_KEY = "datasources"
+DATASOURCE_FIELDS = ("name", "host", "port", "user", "password", "database", "table_names")
+
+
+def normalize_datasource(data: Optional[dict], old: Optional[dict] = None) -> Dict[str, Any]:
+    """校验一个数据源。密码留空 = 沿用 old 的（页面上不回显密码）。配错抛 ValueError。"""
+    import re
+    d = dict(data or {})
+    old = old or {}
+    out: Dict[str, Any] = {"id": str(d.get("id") or old.get("id") or "").strip()}
+    for k in ("name", "host", "user", "database", "remark"):
+        out[k] = str(d.get(k) or "").strip()
+    out["password"] = str(d.get("password") or "") or str(old.get("password") or "")
+    try:
+        out["port"] = int(d.get("port") or 3306)
+    except (TypeError, ValueError):
+        raise ValueError("端口要填数字")
+    if not 1 <= out["port"] <= 65535:
+        raise ValueError("端口范围 1 ~ 65535")
+    for k, label in (("name", "名称"), ("host", "地址"), ("user", "用户名"), ("database", "库名")):
+        if not out[k]:
+            raise ValueError(f"数据源要填{label}")
+    ident = re.compile(r"^[A-Za-z0-9_$]{1,64}$")
+    if not ident.match(out["database"]):
+        raise ValueError("库名只能有字母、数字、下划线")
+    names = {}
+    for t, v in (d.get("table_names") or {}).items():
+        v = str(v or "").strip()
+        if not v or v == t:
+            continue                       # 留空 / 同名 = 不改名
+        if not ident.match(v):
+            raise ValueError(f"目标表名「{v}」只能有字母、数字、下划线")
+        names[str(t)] = v
+    out["table_names"] = names
+    return out
+
+
+def datasource_view(d: Dict[str, Any]) -> Dict[str, Any]:
+    """给页面看的数据源：不带密码，只说有没有设。"""
+    v = {k: d.get(k) for k in ("id", "name", "host", "port", "user", "database", "table_names", "remark",
+                                "updated_at")}
+    v["has_password"] = bool(d.get("password"))
+    return v
 
 
 def normalize_notify_settings(data: Optional[dict]) -> Dict[str, str]:
@@ -363,6 +417,19 @@ class Runner:
         except ValueError:
             return dict(PUSH_DEFAULTS)
 
+    def datasources(self) -> List[Dict[str, Any]]:
+        return list(self.store.get_kv(DATASOURCE_KEY, []) or [])
+
+    def push_datasource(self, ps: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        """推送方式选的数据源（含密码）；选的是 API 返回 None；选的数据源已被删掉抛 ValueError。"""
+        ps = ps or self.push_settings()
+        if ps.get("target", "api") == "api":
+            return None
+        for d in self.datasources():
+            if d.get("id") == ps["target"]:
+                return d
+        raise ValueError("推送方式选的数据源已经不存在了，请在「推送」页重新选择")
+
     def queued(self) -> int:
         return self._q.qsize()
 
@@ -485,7 +552,12 @@ class Runner:
             argv += ["--summary-json", summary_path]
         cmd = [self.python, "-m", "engin_cli.cli"] + argv
         env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
-        over = push_overrides(ps)
+        ds_error = ""
+        try:
+            ds = self.push_datasource(ps) if ps["enabled"] else None
+        except ValueError as e:
+            ds, ds_error = None, str(e)
+        over = push_overrides(ps, ds)
         nover = notify_overrides(self.notify_settings())
         if over or nover:
             env["OPINION_SETTINGS_JSON"] = json.dumps({**over, **nover}, ensure_ascii=False)
@@ -497,9 +569,14 @@ class Runner:
             logf.write(f"$ {' '.join(cmd)}\n（工作目录 {self.app_root}）\n")
             if push_cut:
                 logf.write("（推送总开关已关闭：本次只算不推）\n")
-            if over:
-                logf.write("（推送设置来自服务页面：" + "，".join(
-                    f"{k}={v}" for k, v in over.items()) + "）\n")
+            if ds_error:
+                logf.write(f"（⚠ {ds_error}：本次按 API 推送设置执行）\n")
+            if ds:
+                from ..sink_db import describe
+                logf.write(f"（推送方式：写入数据源 {describe(ds)}，先删本次景区 × 日期的旧行再写入）\n")
+            shown = [f"{k}={v}" for k, v in over.items() if k not in ("push_db", "push_target")]  # 数据源有密码，不写日志
+            if shown:
+                logf.write("（推送设置来自服务页面：" + "，".join(shown) + "）\n")
             if nover:
                 logf.write("（通知地址来自服务页面）\n")       # 地址里带令牌，不写进日志
             logf.write("\n")

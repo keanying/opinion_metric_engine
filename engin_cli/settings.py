@@ -103,6 +103,12 @@ class EtlSettings:
     # 默认关闭，不配就不推。推送失败**不影响**跑批成败（数据已经落库了），
     # 想让它影响就把 push_strict 打开。
     push_enabled: bool = False
+    # 推送方式：api = HTTP 接口（push_url）；db = 写进另一个 MySQL 库（push_db，实现见 sink_db.py：
+    # 按「本次景区 × 本次日期」先删再写，同一事务）。服务页面「推送」上选，一般不在这里配。
+    push_target: str = "api"
+    # 写入数据源：{"name", "host", "port", "user", "password", "database",
+    #             "table_names": {本地表名: 目标表名}（不配 = 同名）}
+    push_db: Optional[Dict[str, Any]] = None
     push_url: str = ""                       # 例：https://www.demo.com/data/sync
     # 请求头。Content-Type 会自动带上，这里主要写鉴权。
     # 例：{"Authorization": "Bearer sk_deduehdueh"}
@@ -330,8 +336,30 @@ def load_settings() -> EtlSettings:
 
 
 # 页面上能改的字段，不允许借 OPINION_SETTINGS_JSON 改数据库连接等
-OVERRIDABLE = ("push_url", "push_batch_size", "push_timeout", "push_retries", "push_retry_backoff",
+OVERRIDABLE = ("push_target", "push_db", "push_url", "push_batch_size", "push_timeout", "push_retries", "push_retry_backoff",
                "push_dry_run", "push_strict", "notify_feishu_webhook", "notify_feishu_secret")
+
+
+def push_dest(s: "EtlSettings") -> str:
+    """推到哪（日志 / 报告里显示）：API 地址，或数据源「名称（host:port/库）」。不含密码。"""
+    if getattr(s, "push_target", "api") == "db":
+        d = s.push_db or {}
+        where = f"{d.get('host', '')}:{d.get('port', 3306)}/{d.get('database', '')}"
+        return f"数据源 {d.get('name') or where}（{where}）" if d.get("name") else f"数据源 {where}"
+    return s.push_url or "（未配置推送地址）"
+
+
+def push_not_ready(s: "EtlSettings") -> str:
+    """要推送却推不了的原因（地址 / 数据源没配），能推返回 ""。"""
+    if getattr(s, "push_target", "api") == "db":
+        d = s.push_db or {}
+        miss = [k for k in ("host", "user", "database") if not str(d.get(k) or "").strip()]
+        return ("推送方式是写入数据源，但数据源没配全（缺 " + "、".join(miss) + "）：在服务页面「推送 → 写入数据源」里设置"
+                if miss else "")
+    if not s.push_url and not s.push_dry_run:
+        return ("未配置推送地址：在 settings_local.py 里填 push_url，"
+                "或设环境变量 OPINION_PUSH_URL，或用 --push-url 传入")
+    return ""
 
 
 def apply_overrides(s: "EtlSettings", text) -> None:

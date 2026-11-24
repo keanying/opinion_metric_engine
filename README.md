@@ -508,6 +508,31 @@ python -m engin_cli.cli push --tables core --date 20260911         # 从库里�
 - `np.int64` / `NaN` / `Timestamp` 在发出去之前统一转成原生类型，
   `NaN` 转 `null`：裸 `NaN` 是非法 JSON，下游解析必挂。
 
+### 11a. 推送方式：写入数据源（`sink_db.py`）
+
+除了 HTTP API，推送还可以**直接写进另一个 MySQL 库**。全在服务页面「推送」上操作，不用改配置文件：
+
+1. 「写入数据源」→「添加数据源」：名称、地址、端口、用户名、密码、库名；目标库表名和本地不一样就在「表名对应」里填，
+   留空 = 同名。「测试连接」会连上去核对 6 张表：有没有、缺哪些列。
+2. 「推送设置 → 推送方式」选「写入数据源」和刚加的数据源，保存。
+
+之后跑批、补推（`push`）、复制给其他景区（`mock`）原本要 POST 的表，都改成写进这个库，每张表：
+
+```
+连接数据源 → DELETE 本次景区 × 本次日期的旧行 → INSERT 新行（同一事务，失败回滚）→ 断开
+```
+
+- 删除范围和本地写库同一个规则（`loader.delete_scope`）：景区 + `publish_time`，下钻表按 `travel_date`；
+  删的是「本次跑的景区 × 本次跑的日期」，重算后没有了的行也会清掉。补推按「这个景区 × 补推的日期」，复制按「新景区 × 复制的日期」。
+- 只写目标表里有的列：引擎有、目标表没有的列不写（执行日志里提示）；目标表多出来的列（自增 id、created_time…）用它自己的默认值。
+  删除要用到的景区 / 日期列目标表必须有，没有就这张表报错不写，其他表照常。
+- 数据源连不上（地址、端口、账号密码、库名不对）：剩下的表不再试，记为失败，修好后补推。
+- 试推（`push_dry_run`）对数据源同样生效：不写，只在推送记录里写「将删除…再写入 N 行」。
+- 每张表在推送记录里一行（`url` = `mysql://名称（host:port/库）`，`result` = `ok` / `db_error` / `dry_run`），不记账号密码。
+- 数据源存在系统表 `service_setting` 的 `datasources`，只有管理员能添加 / 修改 / 删除 / 测试；页面上不回显密码（留空 = 不改）。
+  执行时服务把选中的数据源经环境变量 `OPINION_SETTINGS_JSON`（`push_target=db`、`push_db`）交给子进程，执行日志里只写名称和地址。
+- 命令行带 `--push-url` 时这一次按 API 推（覆盖页面上的推送方式）。
+
 ### 11b. 演示数据（`mock.py`，命令 `mock`）
 
 `mock` 从本地 ADS 库取出一个景区某段日期的结果，把景区编号和名称换成新的，
@@ -902,7 +927,8 @@ opinion_metric_engine/          项目根
 | `engin_cli/builders/macro.py` | 需求 2.0 大盘 KPI 表（周期粒度 × 渠道） |
 | `engin_cli/repair.py` | 历史数据修正：按新口径重刷得分字段（只 UPDATE 得分列） |
 | `engin_cli/validate.py` | 口径自检 |
-| `engin_cli/pusher.py` | 数据推送：算完后以 HTTP API 推给下游（可配置，默认关闭） |
+| `engin_cli/pusher.py` | 数据推送：算完后以 HTTP API 推给下游（可配置，默认关闭）；推送方式是数据源时转给 `sink_db.py` |
+| `engin_cli/sink_db.py` | 推送方式之二：写进另一个 MySQL 库（先删本次景区 × 日期，再写入；页面上管理数据源） |
 | `engin_cli/analytics.py` | 看板取数参考实现（BI 照抄这里） |
 | `engin_cli/loader.py` | 幂等写入 |
 | `engin_cli/pipeline.py` | 编排 |

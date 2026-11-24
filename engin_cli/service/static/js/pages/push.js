@@ -1,5 +1,5 @@
 import { ref, reactive, onMounted, computed } from 'vue'
-import { api, TABLES, TABLE_LABEL, PUSH_RESULT, fmtNum, notify, refreshSched, todayYmd } from '../api.js'
+import { api, TABLES, TABLE_LABEL, PUSH_RESULT, fmtNum, notify, refreshSched, todayYmd, confirmBox } from '../api.js'
 import { Ring } from '../charts.js'
 
 const RING_C = { ok: ['#a3a6f3', '#5458d8'], dry_run: ['#8be3ef', '#22b8cf'], business_fail: ['#f6a4b8', '#ee5a7c'],
@@ -54,6 +54,46 @@ export default {
         location.hash = '/runs/' + r.run_id } catch (e) { notify(e.message, 'err') }
     }
     const reset = () => { q.result = ''; q.kw = ''; loadLogs() }
+
+    // ── 写入数据源：推送方式之二，写进另一个 MySQL 库（先删本次景区 × 日期，再写入）
+    const dsEdit = ref(null), dsSaving = ref(false), dsTest = ref(null), dsTesting = ref('')
+    const curDs = computed(() => (view.value?.datasources || []).find(d => d.id === form.target))
+    const blankDs = () => ({ id: '', name: '', host: '', port: 3306, user: '', password: '', database: '', remark: '',
+                             table_names: Object.fromEntries(TABLES.map(t => [t.table, ''])), has_password: false })
+    const openDs = d => {
+      dsTest.value = null
+      dsEdit.value = d ? { ...blankDs(), ...d, password: '',
+                           table_names: Object.fromEntries(TABLES.map(t => [t.table, (d.table_names || {})[t.table] || ''])) }
+                       : blankDs()
+    }
+    const closeDs = () => { dsEdit.value = null; dsTest.value = null }      // 编辑框里测的结果跟着关掉，别再弹出来
+    const dsBody = () => { const e = dsEdit.value
+      return { id: e.id || undefined, name: e.name, host: e.host, port: e.port, user: e.user, password: e.password,
+               database: e.database, remark: e.remark, table_names: e.table_names } }
+    const saveDs = async () => {
+      dsSaving.value = true
+      try {
+        const e = dsEdit.value
+        await api(e.id ? '/api/datasources/' + e.id : '/api/datasources', { method: e.id ? 'PUT' : 'POST', body: dsBody() })
+        notify('数据源已保存'); closeDs(); await loadView()
+      } catch (err) { notify(err.message, 'err') } finally { dsSaving.value = false }
+    }
+    const testDs = async (d) => {
+      dsTesting.value = d ? d.id : 'form'; dsTest.value = null
+      try { dsTest.value = { name: d ? d.name : (dsEdit.value.name || '未保存的数据源'),
+                             ...(await api('/api/datasources/test', { method: 'POST', body: d ? { id: d.id } : dsBody() })) } }
+      catch (err) { notify(err.message, 'err') } finally { dsTesting.value = '' }
+    }
+    const delDs = async d => {
+      if (!await confirmBox({ type: 'danger', title: '删除数据源', okText: '删除',
+        message: '删除后不能恢复；目标库里已经写进去的数据不受影响。', items: [['数据源', d.name], ['地址', `${d.host}:${d.port}/${d.database}`]] })) return
+      try { await api('/api/datasources/' + d.id, { method: 'DELETE' }); notify('已删除'); await loadView() }
+      catch (err) { notify(err.message, 'err') }
+    }
+    const setTarget = v => { form.target = v === 'db' ? ((view.value.datasources[0] || {}).id || 'db') : 'api' }
+    const mapText = d => { const n = Object.keys(d.table_names || {}).length; return n ? `${n} 张表改了名` : '表名和本地相同' }
+    const dsCols = [{ key: 'name', title: '数据源', width: 200 }, { key: 'addr', title: '地址 / 库', width: 260 },
+      { key: 'user', title: '用户', width: 120 }, { key: 'map', title: '表名', width: 150 }, { key: 'op', title: '', width: 170, align: 'r' }]
     const parts = computed(() => Object.entries(logs.value?.counts || {}).map(([k, v]) => ({
       value: v, label: (PUSH_RESULT[k] || {}).text || k, colors: RING_C[k] || ['#8682a0', '#6b7075'] })))
     const total = computed(() => Object.values(logs.value?.counts || {}).reduce((a, v) => a + v, 0))
@@ -65,7 +105,8 @@ export default {
       { key: 'resp', title: '响应', width: 260 }, { key: 'op', title: '', width: 56, align: 'r' }]
     const ymd = s => s ? `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6)}` : ''
     return { view, form, saving, save, setMaster, logs, q, loadLogs, loadMoreLogs, moreLogs, loadingLogs, reset, re, toggleRe, doRepush,
-             parts, total, okRate, cols, detail, ymd, TABLES, TABLE_LABEL, PUSH_RESULT, fmtNum, todayYmd }
+             parts, total, okRate, cols, detail, ymd, TABLES, TABLE_LABEL, PUSH_RESULT, fmtNum, todayYmd,
+             dsEdit, dsSaving, dsTest, dsTesting, curDs, openDs, closeDs, saveDs, testDs, delDs, setTarget, mapText, dsCols }
   },
   template: `
   <div v-if="view">
@@ -79,15 +120,27 @@ export default {
       <div class="card sect push-set">
         <div class="sect-head"><h3>推送设置<Tip text="留空 = 用 settings_local.py 里的配置；保存后下一次执行生效"/></h3></div>
         <div class="sect-body">
-          <div class="frow"><label>推送地址</label>
+          <div class="frow"><label>推送方式<Tip wide text="API：按推送地址 POST 给下游。写入数据源：直接写进另一个 MySQL 库的表——每张表先删除「本次景区 × 本次日期」的旧行，再写入新行（同一事务，失败回滚）。跑批、补推、复制给其他景区都按这里的方式推"/></label>
+            <div class="seg"><button :class="{on: form.target === 'api'}" @click="setTarget('api')">API 接口</button>
+              <button :class="{on: form.target !== 'api'}" @click="setTarget('db')">写入数据源</button></div></div>
+          <div v-if="form.target !== 'api'" class="frow"><label>数据源</label>
+            <select v-model="form.target" class="grow">
+              <option v-if="!curDs" :value="form.target" disabled>请选择数据源</option>
+              <option v-for="d in view.datasources" :key="d.id" :value="d.id">{{ d.name }}（{{ d.host }}:{{ d.port }}/{{ d.database }}）</option></select>
+            <button class="btn light" @click="openDs()"><Icon name="plus" :size="13" :sw="2.4"/>添加</button></div>
+          <div v-if="form.target !== 'api' && !view.datasources.length" class="alert orange small">还没有数据源：点「添加」填数据库地址、账号、库名</div>
+          <div v-if="view.target_missing && form.target === view.settings.target" class="alert orange small">之前选的数据源已经被删掉了，请重新选择</div>
+          <div v-if="form.target === 'api'" class="frow"><label>推送地址</label>
             <input v-model="form.push_url" class="grow" :placeholder="view.base.push_url || '未配置'" /></div>
           <div class="frow"><label>每批行数</label><input v-model="form.push_batch_size" class="w100" :placeholder="String(view.base.push_batch_size)"/>
+            <template v-if="form.target === 'api'">
             <label class="l2">超时</label><input v-model="form.push_timeout" class="w100" :placeholder="view.base.push_timeout + ' 秒'"/>
-            <label class="l2">重试</label><input v-model="form.push_retries" class="w100" :placeholder="view.base.push_retries + ' 次'"/></div>
+            <label class="l2">重试</label><input v-model="form.push_retries" class="w100" :placeholder="view.base.push_retries + ' 次'"/></template></div>
           <div class="opts compact">
             <div class="opt"><div><b>试推</b><Tip text="只组报文不真发，验证配置用（推送记录里结果是「试推」）"/></div><Switch v-model="form.push_dry_run"/></div>
             <div class="opt"><div><b>推送失败算执行失败</b><Tip text="默认推失败不影响跑批成败（数据已落库，可以补推）"/></div><Switch v-model="form.push_strict"/></div>
           </div>
+          <template v-if="form.target === 'api'">
           <div class="frow ro"><label>请求头</label><div class="chips">
             <span v-for="(v,k) in view.headers" :key="k" class="chip grey">{{ k }}: {{ v }}</span>
             <span v-if="!Object.keys(view.headers).length" class="hint">未配置<Tip text="在 settings_local.py 的 push_headers 或环境变量 OPINION_PUSH_TOKEN 里配，页面不显示明文"/></span></div></div>
@@ -95,6 +148,7 @@ export default {
             <span v-for="(v,k) in view.table_names" :key="k" class="chip grey" :title="k">{{ TABLE_LABEL[k] || k }} → {{ v }}</span></div></div>
           <div class="frow ro"><label>生效地址<Tip text="这次执行实际推到哪：页面上填了用页面的，没填用 settings_local.py 的"/></label>
             <span class="mono ell grow" :title="view.effective.push_url">{{ view.effective.push_url || '未配置' }}</span></div>
+          </template>
           <div class="actions"><span class="hint">保存后下一次执行生效</span>
             <button class="btn primary" :disabled="saving" @click="save()">{{ saving ? '保存中…' : '保存推送设置' }}</button></div>
         </div>
@@ -126,6 +180,73 @@ export default {
         </div>
       </div>
     </div>
+
+    <div class="card sect">
+      <div class="sect-head"><h3>写入数据源<Tip wide text="推送方式选「写入数据源」时写进这里的库。每张表：先删除本次景区 × 本次日期的旧行，再写入（同一事务）；只写目标表里有的列，目标表名可以和本地不同。只有管理员能添加 / 修改；密码保存在系统表里，页面上不显示"/></h3>
+        <button class="btn xs light" @click="openDs()"><Icon name="plus" :size="12" :sw="2.4"/>添加数据源</button></div>
+      <STable v-if="view.datasources.length" :columns="dsCols" :data="view.datasources" row-key="id">
+        <template #name="{ row }"><span class="s-name"><Avatar square icon="db" :color="row.id === view.settings.target ? 'green' : 'light-blue'"/>
+          <span class="s-ell"><b>{{ row.name }}</b><small>{{ row.id === view.settings.target ? '当前推送方式' : (row.remark || '') }}</small></span></span></template>
+        <template #addr="{ row }"><span class="mono s-ell">{{ row.host }}:{{ row.port }}/{{ row.database }}</span></template>
+        <template #user="{ row }">{{ row.user }}<small v-if="!row.has_password" class="t-orange"> 无密码</small></template>
+        <template #map="{ row }">{{ mapText(row) }}</template>
+        <template #op="{ row }"><span class="op-btns">
+          <button class="btn xs" :disabled="dsTesting === row.id" @click="testDs(row)">{{ dsTesting === row.id ? '测试中…' : '测试' }}</button>
+          <button class="s-btn-icon" title="修改" @click="openDs(row)"><Icon name="edit" :size="16"/></button>
+          <button class="s-btn-icon danger" title="删除" @click="delDs(row)"><Icon name="del" :size="16"/></button></span></template>
+      </STable>
+      <p v-else class="hint ds-empty">还没有数据源：点右上角「添加数据源」，填数据库地址、账号、库名；保存后在上面「推送方式」里选它</p>
+    </div>
+
+    <Transition name="dlg">
+      <div v-if="dsEdit" class="modal-mask" @click.self="closeDs">
+        <div class="modal">
+          <div class="card-head"><h3>{{ dsEdit.id ? '修改数据源' : '添加数据源' }}</h3><button class="s-btn-icon" @click="closeDs"><Icon name="clear" :size="18"/></button></div>
+          <div class="form fs-form ds-form">
+            <div class="frow"><label>名称</label><input v-model="dsEdit.name" placeholder="如 客户数仓" /></div>
+            <div class="frow"><label>地址</label><input v-model="dsEdit.host" placeholder="如 192.168.1.20" />
+              <label class="l2">端口</label><input v-model.number="dsEdit.port" class="w100" /></div>
+            <div class="frow"><label>用户名</label><input v-model="dsEdit.user" autocomplete="off" />
+              <label class="l2">密码</label><input v-model="dsEdit.password" type="password" autocomplete="new-password"
+                :placeholder="dsEdit.has_password ? '已设置（留空不改）' : ''" /></div>
+            <div class="frow"><label>库名</label><input v-model="dsEdit.database" placeholder="要写入的数据库" /></div>
+            <div class="frow"><label>备注</label><input v-model="dsEdit.remark" placeholder="选填" /></div>
+            <div class="frow ds-map-head"><label>表名对应</label><span class="hint">目标库里的表名，留空 = 和本地同名</span></div>
+            <div v-for="t in TABLES" :key="t.key" class="frow ds-map"><label :title="t.table">{{ t.label }}</label>
+              <input v-model="dsEdit.table_names[t.table]" :placeholder="t.table" /></div>
+          </div>
+          <div class="dlg-btns">
+            <button class="btn light" :disabled="dsTesting === 'form'" @click="testDs()">{{ dsTesting === 'form' ? '测试中…' : '测试连接' }}</button>
+            <span class="grow"></span>
+            <button class="btn light" @click="closeDs">取消</button>
+            <button class="btn primary" :disabled="dsSaving" @click="saveDs">保存</button>
+          </div>
+          <div v-if="dsTest" class="ds-test">
+            <div v-if="dsTest.error" class="alert red small">{{ dsTest.error }}</div>
+            <div v-for="t in dsTest.tables" :key="t.table" class="ds-test-row">
+              <Tag :color="!t.exists ? 'pink' : !t.writable ? 'pink' : t.missing.length ? 'orange' : 'green'"
+                :icon="t.exists && t.writable ? 'tickCircle' : 'clear'">{{ TABLE_LABEL[t.table] }}</Tag>
+              <span class="mono">{{ t.target }}</span><span class="muted">{{ t.message }}</span>
+              <small v-if="t.missing.length" class="muted" :title="t.missing.join(', ')">缺：{{ t.missing.slice(0, 4).join(', ') }}{{ t.missing.length > 4 ? ' …' : '' }}</small></div>
+          </div>
+        </div>
+      </div></Transition>
+
+    <Transition name="dlg">
+      <div v-if="dsTest && !dsEdit" class="modal-mask" @click.self="dsTest=null">
+        <div class="modal">
+          <div class="card-head"><h3>测试连接 · {{ dsTest.name }}</h3><button class="s-btn-icon" @click="dsTest=null"><Icon name="clear" :size="18"/></button></div>
+          <div class="ds-test">
+            <div v-if="dsTest.error" class="alert red small">{{ dsTest.error }}</div>
+            <div v-else class="alert green small">连接成功</div>
+            <div v-for="t in dsTest.tables" :key="t.table" class="ds-test-row">
+              <Tag :color="!t.exists ? 'pink' : !t.writable ? 'pink' : t.missing.length ? 'orange' : 'green'"
+                :icon="t.exists && t.writable ? 'tickCircle' : 'clear'">{{ TABLE_LABEL[t.table] }}</Tag>
+              <span class="mono">{{ t.target }}</span><span class="muted">{{ t.message }}</span>
+              <small v-if="t.missing.length" class="muted" :title="t.missing.join(', ')">缺：{{ t.missing.slice(0, 4).join(', ') }}{{ t.missing.length > 4 ? ' …' : '' }}</small></div>
+          </div>
+        </div>
+      </div></Transition>
 
     <div class="card fill push-logs">
       <div class="card-head"><h3>推送记录<Tip text="每个请求一行：推了哪个表、哪个景区、对方怎么回的；点右边的眼睛看完整响应"/></h3>

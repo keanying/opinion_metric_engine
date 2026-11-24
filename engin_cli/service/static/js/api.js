@@ -70,6 +70,7 @@ export const PUSH_RESULT = {
   timeout: { color: 'orange', icon: 'clock', text: '超时' },
   ssl_error: { color: 'red', icon: 'shield', text: '证书错误' },
   dry_run: { color: 'cyan', icon: 'comment', text: '试推' },
+  db_error: { color: 'red', icon: 'db', text: '写库失败' },
 }
 
 export const GRANULARITIES = [

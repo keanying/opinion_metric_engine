@@ -820,17 +820,23 @@ def _table_config(table: str, settings) -> Dict[str, Any]:
 
 
 def push_all(tables: Dict[str, pd.DataFrame], *, settings,
-             progress_factory=None) -> PushReport:
+             progress_factory=None, scope=None) -> PushReport:
     """跑批产物 → 逐表推送。开关关着、地址没配就整体跳过。
 
     入参：tables {表名: DataFrame}（就是 PipelineResult.tables）
           progress_factory(表名, 总批数, 总行数) → 进度条；None 不显示
+          scope (景区列表, 日期列表)：本次跑的范围，推送方式是「写入数据源」时决定先删哪些行
+          （不给就按数据里出现的景区 / 日期删）
     出参：PushReport（.ok / .errors / .notes()）
     推送地址连不上时，剩下的表不再推，记为失败（error 里写明原因），可之后用 push 补推。
+    推送方式 settings.push_target = "db" 时不发 HTTP，改成写进数据源（sink_db.write_all）。
     """
     rep = PushReport()
     if not getattr(settings, "push_enabled", False):
         return rep
+    if getattr(settings, "push_target", "api") == "db":
+        from .sink_db import write_all
+        return write_all(tables, settings=settings, scope=scope, progress_factory=progress_factory)
     if not getattr(settings, "push_url", ""):
         rep.results.append(PushResult(table="-", skipped=True,
                                       error="push_enabled=True 但 push_url 没配"))

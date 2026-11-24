@@ -48,7 +48,7 @@ from .progress import push_progress_factory
 from .repair import (CORE_SCORE_FIELDS, DIM_SCORE_FIELDS, repair_core,
                      repair_dimension)
 from .notify import send_feishu
-from .settings import load_settings
+from .settings import load_settings, push_dest, push_not_ready
 from .source import fetch_comments_csv, fetch_scenic_keywords_csv, fetch_works_csv
 
 
@@ -185,9 +185,8 @@ def cmd_run(args) -> int:
     _setup_log(args.log_level or st.log_level)
 
     # 要推送却没配地址：一个景区都不跑，直接退出 —— 跑完才发现推不出去白算一场
-    if st.push_enabled and not st.push_url and not st.push_dry_run:
-        print("未配置推送地址：在 settings_local.py 里填 push_url，"
-              "或设环境变量 OPINION_PUSH_URL，或用 --push-url 传入")
+    if st.push_enabled and push_not_ready(st):
+        print(push_not_ready(st))
         return 2
 
     dates = _dates(args)
@@ -234,7 +233,7 @@ def cmd_run(args) -> int:
         print("=" * 72)
         print(f"engin_cli v{__version__}   目标日期 {dates[0]} ~ {dates[-1]}   "
               f"景区 {len(scenics)} 个"
-              + (f"   推送 → {st.push_url}" if st.push_enabled else ""))
+              + (f"   推送 → {push_dest(st)}" if st.push_enabled else ""))
         if len(dates) > len(asked):
             print(f"（含往前重跑 {len(dates) - len(asked)} 天：评论会晚到，前几天的数据一起刷新；"
                   f"--rerun-days 0 可关闭）")
@@ -361,7 +360,7 @@ def _run_one_scenic(st, scenic: str, dates: List[str], db, comments_df, works_df
                       "    证书过期 / 证书链不完整要找对方运维；也检查本机时间和根证书是否太旧")
             else:
                 push_note = "推送 ✗（地址连不上或没有响应，后面的景区不再推送，修好后用 push 补推）"
-                print(f"  ✗ 推送地址连不上或没有响应：{st.push_url}，后面的景区只计算、落库，不再推送")
+                print(f"  ✗ 推送地址连不上或没有响应：{push_dest(st)}，后面的景区只计算、落库，不再推送")
     if res.errors:
         for e in res.errors:
             print(f"  ✗ {e}")
@@ -579,6 +578,7 @@ def _apply_push_args(st, args) -> None:
         st.push_enabled = False
     if getattr(args, "push_url", None):
         st.push_url = args.push_url
+        st.push_target = "api"              # 命令行给了地址：这次就按 API 推
         st.push_enabled = True
     if getattr(args, "push_dry_run", False):
         st.push_dry_run = True
@@ -612,9 +612,8 @@ def cmd_push(args) -> int:
     st.push_enabled = True
     _setup_log(args.log_level or st.log_level)
     preview = bool(args.preview) or bool(args.preview_rows)
-    if not st.push_url and not preview and not st.push_dry_run:
-        print("未配置推送地址：在 settings_local.py 里填 push_url，"
-              "或设环境变量 OPINION_PUSH_URL，或用 --push-url 传入")
+    if not preview and push_not_ready(st):
+        print(push_not_ready(st))
         return 2
 
     names = _resolve_tables(args.tables) or list(DEFAULT_PUSH_PK)
@@ -646,6 +645,10 @@ def cmd_push(args) -> int:
         print(f"库里没有可推送的数据（{'，'.join(what)}）。先用 run 跑出结果写库，再补推。")
         return 2
 
+    if args.diagnose and st.push_target == "db":
+        print(f"推送方式是写入数据源（{push_dest(st)}）：诊断只用于 API 推送。"
+              "数据源连不连得上，在服务页面「推送 → 写入数据源」点「测试」")
+        return 2
     if args.diagnose:
         # 用一行真实数据（优先 core 表）一步步排查：域名解析 / 代理 / 逐个地址 / 报文差异
         sc, tables = batches[0]
@@ -664,8 +667,9 @@ def cmd_push(args) -> int:
     if preview:
         n = int(args.preview_rows or 2)
         print("=" * 72)
-        print(f"报文预览（不发送）→ {st.push_url or '（未配置 push_url）'}")
-        print(f"请求头：{json.dumps(_mask_headers(st.push_headers), ensure_ascii=False)}")
+        print(f"报文预览（不发送）→ {push_dest(st)}")
+        if st.push_target != "db":
+            print(f"请求头：{json.dumps(_mask_headers(st.push_headers), ensure_ascii=False)}")
         print("=" * 72)
         for sc, tables in batches:
             for name, df in tables.items():
@@ -680,15 +684,18 @@ def cmd_push(args) -> int:
         return 0
 
     print("=" * 72)
-    print(f"补推 {len(batches)} 个景区 → {st.push_url}"
+    print(f"补推 {len(batches)} 个景区 → {push_dest(st)}"
           + ("   [dry-run 只组报文不发送]" if st.push_dry_run else ""))
-    print(f"每批 {st.push_batch_size} 行，超时 {st.push_timeout:g}s，失败重试 {st.push_retries} 次")
+    if st.push_target == "db":
+        print(f"每张表先删除这几个景区 {dates[0]}~{dates[-1]} 的旧行，再写入（同一事务），每批 {st.push_batch_size} 行")
+    else:
+        print(f"每批 {st.push_batch_size} 行，超时 {st.push_timeout:g}s，失败重试 {st.push_retries} 次")
     print("=" * 72, flush=True)
     factory = None if args.no_progress else push_progress_factory()
     failed = []
     for sc, tables in batches:
         print(f"\n景区 {sc}", flush=True)
-        rep = push_all(tables, settings=st, progress_factory=factory)
+        rep = push_all(tables, settings=st, progress_factory=factory, scope=([sc], dates))
         for n in rep.notes():
             if n.startswith("推送响应记录："):
                 print(f"  {n}")
@@ -704,6 +711,11 @@ def cmd_push(args) -> int:
                   "  · 浏览器访问正常、只有这台机器报错：检查本机时间（date），"
                   "以及根证书是否太旧（更新 ca-certificates）\n"
                   "  后面的景区不再推送，修好后重新执行这条 push 补推。")
+            return 1
+        if any(r.unreachable for r in rep.results) and st.push_target == "db":
+            print(f"\n✗ 数据源连不上：{push_dest(st)}\n"
+                  "  · 在服务页面「推送 → 写入数据源」点「测试」，确认地址、端口、账号密码、库名\n"
+                  "  后面的景区不再写入，修好后重新执行这条 push 补推。")
             return 1
         if any(r.unreachable for r in rep.results):
             print(f"\n✗ 推送地址连不上或没有响应：{st.push_url}\n"
@@ -735,9 +747,8 @@ def cmd_mock(args) -> int:
         print("要指定日期：--date yyyyMMdd，或 --start-date / --end-date")
         return 2
     preview = bool(args.preview)
-    if not st.push_url and not preview and not st.push_dry_run:
-        print("未配置推送地址：在 settings_local.py 里填 push_url，"
-              "或设环境变量 OPINION_PUSH_URL，或用 --push-url 传入")
+    if not preview and push_not_ready(st):
+        print(push_not_ready(st))
         return 2
     names = _resolve_tables(args.tables) or list(DEFAULT_PUSH_PK)
 
@@ -766,7 +777,7 @@ def cmd_mock(args) -> int:
         print(f"  {t:<52} {len(df):>9,} 行  {df['travel_date'].min()}~{df['travel_date'].max()}")
 
     if preview:
-        print(f"\n报文预览（不发送）→ {st.push_url or '（未配置 push_url）'}")
+        print(f"\n报文预览（不发送）→ {push_dest(st)}")
         for name, df in tables.items():
             cfg = _table_config(name, st)
             body = build_payload(name, df.head(2), cfg["pk"],
@@ -777,10 +788,10 @@ def cmd_mock(args) -> int:
         return 0
 
     st.push_enabled, st.push_tables = True, None
-    print(f"\n推送 → {st.push_url}" + ("   [dry-run 只组报文不发送]" if st.push_dry_run else ""),
+    print(f"\n推送 → {push_dest(st)}" + ("   [dry-run 只组报文不发送]" if st.push_dry_run else ""),
           flush=True)
     factory = None if args.no_progress else push_progress_factory()
-    rep = push_all(tables, settings=st, progress_factory=factory)
+    rep = push_all(tables, settings=st, progress_factory=factory, scope=([args.to_scenic], dates))
     for r in rep.results:
         if factory is None or r.skipped:
             print(f"  {r.table:<52} {r.rows:>8,} 行  [{r.batches} 批 {r.elapsed:.1f}s]"

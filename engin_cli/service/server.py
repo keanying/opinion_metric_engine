@@ -34,7 +34,8 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .runner import (APP_ROOT, PUSH_DEFAULTS, TABLE_KEYS, Runner, TASK_DEFAULTS, apply_push_switch,
+from .runner import (APP_ROOT, DATASOURCE_KEY, PUSH_DEFAULTS, TABLE_KEYS, Runner, TASK_DEFAULTS,
+                     apply_push_switch, datasource_view, normalize_datasource,
                      build_push_argv, build_run_argv, build_task_argv, normalize_config, normalize_push_settings,
                      push_overrides, task_dates, normalize_notify_settings)
 from .auth import COOKIE, SESSION_HOURS, Auth, AuthError, UserRepository, denied_reason
@@ -248,6 +249,7 @@ class App:
         self.runner = runner or Runner(self.store, self.data_dir)
         self.scheduler = Scheduler(self.store, self.runner) if scheduler_enabled else None
         self._db_factory = db_factory
+        self._ds_connect = None                   # 测试数据源连接用的连接工厂（None = MySQL；测试里换成假的）
         self._pool = None                         # 指标库 / 用户表连接池（第一次用时建）
         self._push_cache: Dict[str, tuple] = {}    # 推送记录文件 → ((大小, 修改时间), 解析好的记录)
         # 登录：用 SMC 系统的用户 / 会话表，在源表库（src_database，没配就是 database），见 auth.py
@@ -452,9 +454,13 @@ class App:
                 "push_timeout": st.push_timeout, "push_retries": st.push_retries,
                 "push_dry_run": st.push_dry_run, "push_strict": st.push_strict}
         over = push_overrides(ps)
+        dss = [datasource_view(d) for d in self.runner.datasources()]
+        cur = next((d for d in dss if d["id"] == ps["target"]), None)
         return {"settings": ps, "base": base, "effective": {**base, **over},
                 "headers": {k: _mask(v) for k, v in (st.push_headers or {}).items()},
-                "table_names": st.push_table_names or {}, "log_dir": self._push_log_dir()}
+                "table_names": st.push_table_names or {}, "log_dir": self._push_log_dir(),
+                "datasources": dss, "target_datasource": cur,
+                "target_missing": ps["target"] != "api" and cur is None}
 
     def save_push_settings(self, body: dict) -> dict:
         """只改传进来的字段（例如只关总开关），其余保持原样。"""
@@ -463,11 +469,67 @@ class App:
         except (ValueError, TypeError) as e:
             raise ApiError(400, str(e))
         old = self.runner.push_settings()
+        if ps["target"] != "api" and not any(d.get("id") == ps["target"] for d in self.runner.datasources()):
+            raise ApiError(400, "选的数据源不存在，请先在「写入数据源」里添加")
         self.store.set_kv("push", ps)
+        if old["target"] != ps["target"]:
+            name = next((d["name"] for d in self.runner.datasources() if d.get("id") == ps["target"]), "")
+            self.store.add_event("推送方式改为" + (f"写入数据源「{name}」" if name else "API 接口"))
         if old["enabled"] != ps["enabled"]:
             self.store.add_event("推送总开关已" + ("打开" if ps["enabled"] else "关闭（任务只算不推）"),
                                  level="info" if ps["enabled"] else "warn")
         return self.push_settings_view()
+
+    # ------------------------------------------------------------ 写入数据源（推送方式之二）
+    def _ds_tables(self) -> Dict[str, List[str]]:
+        """测试连接时核对的表和列：6 张 ADS 表 × 引擎会写的列。"""
+        from ..mock import TABLE_COLUMNS
+        return {t: list(c) for t, c in TABLE_COLUMNS.items()}
+
+    def _ds_find(self, ds_id: str) -> dict:
+        d = next((x for x in self.runner.datasources() if x.get("id") == ds_id), None)
+        if d is None:
+            raise ApiError(404, "数据源不存在")
+        return d
+
+    def save_datasource(self, body: dict, ds_id: str = "") -> dict:
+        """新增（ds_id 空）或修改数据源。密码留空 = 不改。"""
+        items = self.runner.datasources()
+        old = self._ds_find(ds_id) if ds_id else None
+        try:
+            d = normalize_datasource({**(body or {}), "id": ds_id}, old)
+        except ValueError as e:
+            raise ApiError(400, str(e))
+        if any(x.get("name") == d["name"] and x.get("id") != ds_id for x in items):
+            raise ApiError(400, f"已经有叫「{d['name']}」的数据源了")
+        if not ds_id:
+            import secrets
+            d["id"] = "ds_" + secrets.token_hex(4)
+        d["updated_at"] = now_str()
+        items = [d if x.get("id") == ds_id else x for x in items] if ds_id else items + [d]
+        self.store.set_kv(DATASOURCE_KEY, items)
+        self.store.add_event(f"写入数据源「{d['name']}」已" + ("修改" if ds_id else "添加")
+                             + f"（{d['host']}:{d['port']}/{d['database']}）")
+        return datasource_view(d)
+
+    def delete_datasource(self, ds_id: str) -> dict:
+        d = self._ds_find(ds_id)
+        if self.runner.push_settings()["target"] == ds_id:
+            raise ApiError(400, f"「{d['name']}」正被选作推送方式，先把推送方式改成别的再删")
+        self.store.set_kv(DATASOURCE_KEY, [x for x in self.runner.datasources() if x.get("id") != ds_id])
+        self.store.add_event(f"写入数据源「{d['name']}」已删除")
+        return {"ok": True}
+
+    def test_datasource(self, body: dict) -> dict:
+        """测试连接：传 id 测已保存的；传表单（可带 id，密码留空用已保存的）测还没保存的。"""
+        from ..sink_db import check
+        body = body or {}
+        old = self._ds_find(str(body["id"])) if body.get("id") else None
+        try:
+            d = normalize_datasource({**(old or {}), **{k: v for k, v in body.items() if v not in (None, "")}}, old)
+        except ValueError as e:
+            raise ApiError(400, str(e))
+        return check(d, self._ds_tables(), connect=self._ds_connect)
 
     def _push_records(self, path: str) -> List[dict]:
         """解析好的推送记录（新的在前）。按文件大小 + 修改时间缓存：翻页、筛选不用每次把整天的文件重读重解析一遍。"""
@@ -802,9 +864,13 @@ class App:
         return c
 
     def push_ready(self) -> bool:
-        """推送能用：总开关开着、且配了推送地址（页面设置或 settings_local）。"""
+        """推送能用：总开关开着，且配了推送地址（页面设置或 settings_local），或选了存在的数据源。"""
         ps = self.runner.push_settings()
-        return bool(ps["enabled"] and (ps.get("push_url") or getattr(self.settings, "push_url", "")))
+        if not ps["enabled"]:
+            return False
+        if ps["target"] != "api":
+            return any(d.get("id") == ps["target"] for d in self.runner.datasources())
+        return bool(ps.get("push_url") or getattr(self.settings, "push_url", ""))
 
     def quality_repair(self, body: dict) -> dict:
         """数据修复：把检测的**整段日期**按当前源数据一次重算（写库，可选推送）。
@@ -991,6 +1057,16 @@ class App:
                     pass
         return {"deleted_runs": len(paths), "deleted_files": removed, "before": before}
 
+    def _push_target_text(self) -> str:
+        try:
+            d = self.runner.push_datasource()
+        except ValueError as e:
+            return str(e)
+        if not d:
+            return "API 接口"
+        from ..sink_db import describe
+        return "写入数据源 " + describe(d)
+
     def config_view(self) -> dict:
         st = self.settings
         db = st.db
@@ -999,7 +1075,8 @@ class App:
             "数据库": {"host": db.host, "port": db.port, "user": db.user,
                     "database": db.database, "ads_database": db.ads_db(), "src_database": db.src_db(),
                     "password": "已配置" if db.password else "未配置"},
-            "推送": {"push_url": st.push_url, "push_headers": {k: _mask(v) for k, v in
+            "推送": {"push_target": self._push_target_text(), "push_url": st.push_url,
+                   "push_headers": {k: _mask(v) for k, v in
                                                             (st.push_headers or {}).items()},
                    "push_batch_size": st.push_batch_size, "push_timeout": st.push_timeout,
                    "push_retries": st.push_retries, "push_log_dir": st.push_log_dir},
@@ -1039,6 +1116,11 @@ def _route_table(app: App):
         ("PUT", r"/api/scheduler", lambda m, q, b: app.set_scheduler(b)),
         ("GET", r"/api/push/settings", lambda m, q, b: app.push_settings_view()),
         ("PUT", r"/api/push/settings", lambda m, q, b: app.save_push_settings(b)),
+        ("GET", r"/api/datasources", lambda m, q, b: [datasource_view(d) for d in app.runner.datasources()]),
+        ("POST", r"/api/datasources", lambda m, q, b: app.save_datasource(b)),
+        ("POST", r"/api/datasources/test", lambda m, q, b: app.test_datasource(b)),
+        ("PUT", r"/api/datasources/(ds_[0-9a-f]+)", lambda m, q, b: app.save_datasource(b, m[1])),
+        ("DELETE", r"/api/datasources/(ds_[0-9a-f]+)", lambda m, q, b: app.delete_datasource(m[1])),
         ("GET", r"/api/push/logs", lambda m, q, b: app.push_logs(
             q1(q, "date"), q1(q, "result"), q1(q, "q"), min(I(q1(q, "limit", "50")), 1000),
             max(I(q1(q, "offset", "0")), 0))),

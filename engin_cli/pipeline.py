@@ -388,7 +388,8 @@ def run(settings: EtlSettings,
     # 放在落库**之后**：先保证数据落定，再推。推失败了数据还在库里，
     # 补推一次就行；反过来推成功但落库失败，下游拿到的就是查无对证的数据。
     if getattr(settings, "push_enabled", False):
-        res.push = push_all(res.tables, settings=settings, progress_factory=push_progress)
+        res.push = push_all(res.tables, settings=settings, progress_factory=push_progress,
+                            scope=(scenics, sorted(dates)))
         res.notes.extend(res.push.notes())
         if not res.push.ok:
             if getattr(settings, "push_strict", False):

@@ -1014,3 +1014,13 @@ details summary { cursor: pointer; color: var(--primary); font-size: 13px; margi
 .qd-issues td, .qd-issues th { font-size: 12px; white-space: nowrap; }
 @media (max-width: 860px) { .qd-sec { grid-template-columns: 1fr; gap: 4px; } .qd-body { padding-left: 16px; } .qd-stats { display: none; } }
 .nowrap { white-space: nowrap; }
+
+/* 推送页：写入数据源 */
+.ds-empty { padding: 16px 24px 18px; }
+.op-btns { display: inline-flex; align-items: center; gap: 6px; }
+.ds-form .frow > label.l2 { width: auto; }
+.ds-form .frow > input.w100 { flex: none; min-width: 0; width: 100px; }
+.ds-map-head { margin-top: 6px; }
+.ds-map > input { height: 34px !important; }
+.ds-test { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.ds-test-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; }
