@@ -110,24 +110,60 @@ def push_overrides(ps: Dict[str, Any], datasource: Optional[Dict[str, Any]] = No
 
 # ── 写入数据源（页面「推送 → 写入数据源」管理，存系统表 service_setting 的 datasources）────────
 DATASOURCE_KEY = "datasources"
-DATASOURCE_FIELDS = ("name", "host", "port", "user", "password", "database", "table_names")
+DATASOURCE_FIELDS = ("name", "host", "port", "user", "password", "database", "table_names",
+                     # SSH 隧道（可选）：数据库只能从跳板机访问时
+                     "ssh_enabled", "ssh_host", "ssh_port", "ssh_user", "ssh_password", "ssh_key",
+                     "ssh_key_passphrase")
+# 只存在服务端、页面上不回显的字段：页面提交时留空 = 沿用原来的
+_DS_SECRETS = ("password", "ssh_password", "ssh_key", "ssh_key_passphrase")
+SSH_KEY_MAX = 32 * 1024
 
 
 def normalize_datasource(data: Optional[dict], old: Optional[dict] = None) -> Dict[str, Any]:
-    """校验一个数据源。密码留空 = 沿用 old 的（页面上不回显密码）。配错抛 ValueError。"""
+    """校验一个数据源。配错抛 ValueError。
+
+    密码 / SSH 密码 / 私钥 / 私钥密码页面上不回显：提交时留空 = 沿用 old 的；
+    要清掉就传 clear_<字段>（如 clear_ssh_key=true）。
+    SSH 隧道（ssh_enabled）可选：开了要填跳板机地址、用户名，私钥和密码至少一个；
+    host / port 填「从跳板机上看到的数据库地址」（如 RDS 内网地址）。
+    """
     import re
     d = dict(data or {})
     old = old or {}
     out: Dict[str, Any] = {"id": str(d.get("id") or old.get("id") or "").strip()}
-    for k in ("name", "host", "user", "database", "remark"):
+    for k in ("name", "host", "user", "database", "remark", "ssh_host", "ssh_user", "ssh_key_name"):
         out[k] = str(d.get(k) or "").strip()
-    out["password"] = str(d.get("password") or "") or str(old.get("password") or "")
-    try:
-        out["port"] = int(d.get("port") or 3306)
-    except (TypeError, ValueError):
-        raise ValueError("端口要填数字")
-    if not 1 <= out["port"] <= 65535:
-        raise ValueError("端口范围 1 ~ 65535")
+    for k in _DS_SECRETS:
+        v = d.get(k)
+        out[k] = "" if d.get(f"clear_{k}") else (str(v) if v not in (None, "") else str(old.get(k) or ""))
+    if not d.get("ssh_key") and not d.get("clear_ssh_key"):
+        out["ssh_key_name"] = out["ssh_key_name"] or str(old.get("ssh_key_name") or "")
+    if not out["ssh_key"]:
+        out["ssh_key_name"] = ""
+    out["ssh_key"] = out["ssh_key"].replace("\r\n", "\n").strip()
+    out["ssh_enabled"] = bool(d.get("ssh_enabled"))
+    for k, default, label in (("port", 3306, "端口"), ("ssh_port", 22, "SSH 端口")):
+        try:
+            out[k] = int(d.get(k) or default)
+        except (TypeError, ValueError):
+            raise ValueError(f"{label}要填数字")
+        if not 1 <= out[k] <= 65535:
+            raise ValueError(f"{label}范围 1 ~ 65535")
+    if out["ssh_enabled"]:
+        if not out["ssh_host"] or not out["ssh_user"]:
+            raise ValueError("开了 SSH 隧道：要填 SSH 地址和 SSH 用户名")
+        if not out["ssh_key"] and not out["ssh_password"]:
+            raise ValueError("开了 SSH 隧道：私钥和 SSH 密码至少填一个")
+    if len(out["ssh_key"]) > SSH_KEY_MAX:
+        raise ValueError("私钥文件太大，不像私钥")
+    out["ssh_key_fingerprint"] = ""
+    if out["ssh_key"]:
+        from ..dbutils import TunnelError, key_fingerprint
+        try:
+            out["ssh_key_fingerprint"] = key_fingerprint(out["ssh_key"], out["ssh_key_passphrase"])
+        except TunnelError as e:
+            if "没装" not in str(e):                 # 服务器上没装 paramiko：先存着，测试连接时会提示
+                raise ValueError(f"私钥：{e}")
     for k, label in (("name", "名称"), ("host", "地址"), ("user", "用户名"), ("database", "库名")):
         if not out[k]:
             raise ValueError(f"数据源要填{label}")
@@ -147,10 +183,13 @@ def normalize_datasource(data: Optional[dict], old: Optional[dict] = None) -> Di
 
 
 def datasource_view(d: Dict[str, Any]) -> Dict[str, Any]:
-    """给页面看的数据源：不带密码，只说有没有设。"""
+    """给页面看的数据源：不带密码 / 私钥，只说有没有设（私钥给文件名和指纹，认得出是哪把）。"""
     v = {k: d.get(k) for k in ("id", "name", "host", "port", "user", "database", "table_names", "remark",
-                                "updated_at")}
-    v["has_password"] = bool(d.get("password"))
+                                "updated_at", "ssh_host", "ssh_port", "ssh_user", "ssh_key_name",
+                                "ssh_key_fingerprint")}
+    v["ssh_enabled"] = bool(d.get("ssh_enabled"))
+    for k in _DS_SECRETS:
+        v[f"has_{k}"] = bool(d.get(k))
     return v
 
 

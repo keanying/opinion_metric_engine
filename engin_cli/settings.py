@@ -350,6 +350,8 @@ def push_dest(s: "EtlSettings") -> str:
     if getattr(s, "push_db", None):
         d = s.push_db
         where = f"{d.get('host', '')}:{d.get('port', 3306)}/{d.get('database', '')}"
+        if d.get("ssh_enabled"):
+            where += f"，经 SSH {d.get('ssh_user', '')}@{d.get('ssh_host', '')}:{d.get('ssh_port') or 22}"
         out.append(f"数据源 {d['name']}（{where}）" if d.get("name") else f"数据源 {where}")
     return " + ".join(out) or "（API 和数据源都关着）"
 

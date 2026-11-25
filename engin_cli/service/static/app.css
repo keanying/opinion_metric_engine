@@ -1031,3 +1031,15 @@ details summary { cursor: pointer; color: var(--primary); font-size: 13px; margi
 .way-head b { font-size: 14px; }
 .way-head small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
 .way-body { display: flex; flex-direction: column; gap: 12px; padding: 4px 14px 14px; border-top: 1px dashed var(--line); padding-top: 12px; }
+/* 数据源：SSH 隧道 */
+.ds-ssh { display: grid; gap: 12px; padding: 12px 14px; border: 1px dashed var(--line); border-radius: 14px; }
+.ds-ssh.on { border-style: solid; border-color: #c9ccf6; background: #fbfbff; }
+.ds-ssh .frow > .switch { flex: none; }
+.key-chip { display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 10px; border-radius: 10px; background: #eef0fb;
+  min-width: 0; flex: 1; overflow: hidden; }
+.key-chip b { font-size: 13px; white-space: nowrap; flex: none; max-width: 60%; overflow: hidden; text-overflow: ellipsis; }
+.key-chip small { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.key-chip a { margin-left: auto; color: var(--muted); cursor: pointer; padding: 0 4px; }
+.file-btn { position: relative; overflow: hidden; cursor: pointer; flex: none; }
+.file-btn input[type=file] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.fs-form .frow > label.file-btn { width: auto; }

@@ -12,6 +12,7 @@ import pytest
 
 import engin_cli.cli as cli
 from engin_cli import sink_db as S
+from engin_cli.dbutils import ConnectError, DataSourceConfig
 from engin_cli.loader import (TABLE_CONTENT, TABLE_CORE, TABLE_DRILL_ANALYSIS, TABLE_MACRO,
                               TABLE_PLATFORM)
 from engin_cli.mock import TABLE_COLUMNS
@@ -25,11 +26,11 @@ DS = {"name": "客户数仓", "host": "10.0.0.8", "port": 3307, "user": "w", "pa
 
 
 class TargetDB:
-    """假的目标库：tables = {目标表名: 列}；记下 replace_rows 的调用。"""
+    """假的目标库（接口同 dbutils.Database）：tables = {目标表名: 列}；记下 replace_rows 的调用。"""
     instances = []
 
-    def __init__(self, cfg, tables=None, fail_connect=None):
-        self.cfg = cfg
+    def __init__(self, ds, tables=None, fail_connect=None):
+        self.cfg = DataSourceConfig.from_dict(ds)
         self.tables = tables if tables is not None else {
             **{t: list(c) + ["id", "created_time"] for t, c in TABLE_COLUMNS.items() if t != TABLE_MACRO},
             "kpi_macro": list(TABLE_COLUMNS[TABLE_MACRO])}
@@ -42,25 +43,22 @@ class TargetDB:
         if self.fail_connect:
             raise self.fail_connect
 
-    def query_df(self, sql, params=()):
+    def columns(self, table):
         self.connect()
-        assert "information_schema.columns" in sql and params[0] == "dw"
-        return pd.DataFrame({"column_name": self.tables.get(params[1], [])})
+        return list(self.tables.get(table, []))
 
-    def replace_rows(self, table, df, where, params, batch_size=2000, database=None):
-        self.writes.append({"table": table, "cols": list(df.columns), "rows": len(df), "where": where,
-                            "params": list(params), "database": database, "batch": batch_size})
-        return 7, len(df)
+    def replace_rows(self, table, rows, where, params=None, *, batch_size=1000, **kw):
+        sql, ps = where                                # sink_db 传 (WHERE SQL, 参数)
+        self.writes.append({"table": table, "cols": list(rows.columns), "rows": len(rows), "where": sql,
+                            "params": list(ps), "batch": batch_size})
+        return 7, len(rows)
 
     def close(self):
         self.closed = True
 
 
-class OpErr(Exception):
-    """模拟 pymysql.err.OperationalError（类名要叫这个）。"""
-
-
-OpErr.__name__ = "OperationalError"
+def down(msg="连不上数据库 10.0.0.8:3307：Can't connect to MySQL server（2003）"):
+    return ConnectError(msg)
 
 
 def _comment(cid, ds, word="景色好", platform="douyin"):
@@ -96,7 +94,7 @@ def _st(**kw):
 @pytest.fixture(autouse=True)
 def _fake_mysql(monkeypatch):
     TargetDB.instances = []
-    monkeypatch.setattr(S, "MySQL", TargetDB)
+    monkeypatch.setattr(S, "open_db", TargetDB)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -109,7 +107,6 @@ def test_push_all_writes_to_datasource(produced):
     assert db.cfg.host == "10.0.0.8" and db.cfg.port == 3307 and db.cfg.database == "dw" and db.closed
     w = {x["table"]: x for x in db.writes}
     assert set(w) == {t for t in produced if t != TABLE_MACRO} | {"kpi_macro"}         # 表名映射
-    assert all(x["database"] == "dw" for x in db.writes)
     # 删除范围 = 本次景区 × 本次日期，和本地写库同一个规则（下钻表按 travel_date）
     assert w[TABLE_CORE]["where"] == "`scenic_spot_code` IN (%s) AND `publish_time` IN (%s,%s)"
     assert w[TABLE_CORE]["params"] == ["S1", "20261101", "20261102"]
@@ -124,7 +121,7 @@ def test_push_all_writes_to_datasource(produced):
 def test_missing_columns_are_skipped_and_reported(produced):
     tables = {TABLE_CORE: [c for c in TABLE_COLUMNS[TABLE_CORE] if c != "etl_time"],
               TABLE_PLATFORM: ["platform_code"]}                             # 平台表缺删除用的列
-    S.MySQL = lambda cfg: TargetDB(cfg, tables)
+    S.open_db = lambda ds: TargetDB(ds, tables)
     rep = push_all({t: produced[t] for t in (TABLE_CORE, TABLE_PLATFORM, TABLE_CONTENT)},
                    settings=_st(), scope=(["S1"], ["20261101"]))
     by = {r.table: r for r in rep.results}
@@ -136,11 +133,11 @@ def test_missing_columns_are_skipped_and_reported(produced):
 
 def test_unreachable_stops_and_dry_run(produced, tmp_path, monkeypatch):
     monkeypatch.setenv("OPINION_PUSH_LOG_DIR", str(tmp_path))
-    S.MySQL = lambda cfg: TargetDB(cfg, fail_connect=OpErr(2003, "Can't connect to MySQL server"))
+    S.open_db = lambda ds: TargetDB(ds, fail_connect=down())
     rep = push_all(produced, settings=_st(), scope=(["S1"], ["20261101"]))
     assert not rep.ok and rep.results[0].unreachable and "Can't connect" in rep.results[0].error
     assert all("已停止" in r.error for r in rep.results[1:])
-    S.MySQL = TargetDB
+    S.open_db = TargetDB
     rep = push_all(produced, settings=_st(push_dry_run=True), scope=(["S1"], ["20261101"]))
     assert rep.ok and not TargetDB.instances[-1].writes                        # 试推：不写
     recs = [json.loads(l) for f in tmp_path.iterdir() for l in f.read_text(encoding="utf-8").splitlines()]
@@ -166,12 +163,12 @@ def test_check_connection():
               "kpi_macro": [c for c in TABLE_COLUMNS[TABLE_MACRO] if c != "wordcloud_map"]}
     r = S.check(DS, {TABLE_CORE: TABLE_COLUMNS[TABLE_CORE], TABLE_MACRO: TABLE_COLUMNS[TABLE_MACRO],
                      TABLE_CONTENT: TABLE_COLUMNS[TABLE_CONTENT]},
-                connect=lambda cfg: TargetDB(cfg, tables))
+                opener=lambda ds: TargetDB(ds, tables))
     by = {t["table"]: t for t in r["tables"]}
     assert r["ok"] and by[TABLE_CORE]["writable"] and not by[TABLE_CORE]["missing"]
     assert by[TABLE_MACRO]["target"] == "kpi_macro" and by[TABLE_MACRO]["missing"] == ["wordcloud_map"]
     assert not by[TABLE_CONTENT]["exists"]
-    r = S.check(DS, {TABLE_CORE: []}, connect=lambda cfg: TargetDB(cfg, fail_connect=OpErr(1045, "Access denied")))
+    r = S.check(DS, {TABLE_CORE: []}, opener=lambda ds: TargetDB(ds, fail_connect=down("连不上数据库：用户名或密码不对，Access denied（1045）")))
     assert not r["ok"] and "Access denied" in r["error"]
 
 
@@ -264,7 +261,7 @@ def _app(tmp_path):
     st = EtlSettings()
     st.service_store = "sqlite"
     app = App(st, data_dir=str(tmp_path), scheduler_enabled=False, db_factory=lambda: None, auth=object())
-    app._ds_connect = lambda cfg: TargetDB(cfg)
+    app._ds_opener = TargetDB
     return app
 
 

@@ -534,7 +534,48 @@ python -m engin_cli.cli push --tables core --date 20260911         # 从库里�
 - 数据源存在系统表 `service_setting` 的 `datasources`，只有管理员能添加 / 修改 / 删除 / 测试；页面上不回显密码（留空 = 不改）。
   执行时服务把开关和选中的数据源经环境变量 `OPINION_SETTINGS_JSON`（`push_api`、`push_db`）交给子进程，执行日志里只写名称和地址。
 - 一种方式连不上，只停那一种：API 地址连不上，后面的景区不再 API 推送，照样写数据源；反过来也一样。
+- **SSH 隧道（可选）**：数据库不对外、只能从跳板机访问时，在数据源里打开「SSH 隧道」，填跳板机地址 / 端口 / 用户，
+  上传私钥文件（OpenSSH / PEM 格式的 RSA、ECDSA、Ed25519，有密码保护就填密钥密码）或填 SSH 密码；
+  数据源的「地址 / 端口」填从跳板机上看到的数据库地址（如云数据库内网地址）。私钥保存时就校验（读不出、缺密钥密码、
+  密码不对当场提示），存在系统表里，页面只显示文件名和指纹（如 `RSA 2048 · SHA256:…`），日志和推送记录里不出现。
+  不开隧道就和原来一样直连。连接、隧道、先删后写都用下面的 dbutils 组件。
 - 命令行带 `--push-url` 时这一次只按 API 推（覆盖页面上的开关）。
+
+### 11c. 数据库组件 dbutils（`engin_cli/dbutils/`）
+
+连外部 MySQL（可选 SSH 隧道）+ 常用增删改查，独立成一个组件，不依赖本项目其它模块，以后要连别的库直接用它。
+「写入数据源」就是建在它上面的。只要 pymysql；开 SSH 隧道时要 paramiko；传 DataFrame 时要 pandas。
+
+```python
+from engin_cli.dbutils import Database, DataSourceConfig, SSHConfig
+
+cfg = DataSourceConfig(host="rm-xxx.mysql.rds.aliyuncs.com", port=3306, user="u", password="p", database="dw",
+                       ssh=SSHConfig(host="10.1.1.8", port=22, user="mysql_connector",
+                                     private_key_path="/data/key.pem"))      # 不走隧道就不给 ssh
+with Database(cfg) as db:                     # 用完自动断库、关隧道
+    db.ping()                                 # {"version", "database", "via": "SSH …" / "直连"}
+    db.select("t", ["id", "name"], where={"city": ["杭州", "上海"], "deleted_at": None},
+              order_by="id desc", limit=10)   # dict 条件：列表 → IN，None → IS NULL
+    db.count("t", where={"status": 1}); db.exists("t", where={"id": 3})
+    db.query("select …", [参数]); db.query_one(…); db.scalar(…); db.query_df(…)
+    db.insert("t", rows)                      # rows：[dict] / DataFrame / [tuple]+columns；NaN → NULL
+    db.insert("t", rows, on_duplicate="ignore"); db.upsert("t", rows)
+    db.update("t", {"status": 0}, where={"id": 3})
+    db.delete("t", where={"id": [4, 5]})      # update / delete 不带 where 直接报错
+    db.replace_rows("t", rows, where={"scenic_id": ["S1"], "travel_date": [20261101]})
+                                              # 先清理再写入，同一事务，失败整体回滚；返回 (删除行数, 写入行数)
+    with db.transaction(): …                  # 多步一起提交 / 回滚（可嵌套，最外层提交）
+    db.tables(); db.columns("t"); db.table_exists("t"); db.execute(sql, 参数); db.executemany(sql, 多组参数)
+```
+
+- 连不上统一抛 `ConnectError`，说清是哪一环：SSH 服务器连不上（地址 / 端口 / 网络）、SSH 登录失败（用户名 / 私钥 / 密码）、
+  私钥问题（有密码没给、密码不对、给的是公钥 / PuTTY .ppk）、隧道通了但跳板机连不到数据库、数据库账号密码不对 / 库不存在。
+  SSH 相关的是它的子类 `TunnelError`。其余 SQL 错误原样抛 pymysql 的异常。
+- 隧道直接用 paramiko 做本地端口转发（不用 sshtunnel：它认证失败时会卡住、留线程，报错也分不清原因）；
+  转发线程都是 daemon，关得干净。不校验跳板机主机指纹（同 sshtunnel 默认），安全要求高请在跳板机侧限制来源 IP。
+- 表名 / 列名经 `quote_ident` 校验转义，值一律走 `%s` 参数。
+- 测试：`tests/test_dbutils.py`（假连接，任何机器都能跑）；设环境变量 `DBUTILS_TEST_MYSQL`（JSON 连接配置，可带 `ssh`）
+  时另跑一遍真实库往返。
 
 ### 11b. 演示数据（`mock.py`，命令 `mock`）
 
@@ -932,6 +973,7 @@ opinion_metric_engine/          项目根
 | `engin_cli/validate.py` | 口径自检 |
 | `engin_cli/pusher.py` | 数据推送：算完后以 HTTP API 推给下游（可配置，默认关闭）；推送方式是数据源时转给 `sink_db.py` |
 | `engin_cli/sink_db.py` | 推送方式之二：写进另一个 MySQL 库（先删本次景区 × 日期，再写入；页面上管理数据源） |
+| `engin_cli/dbutils/` | 数据库组件：外部 MySQL 连接（可选 SSH 隧道）+ 增删改查 / 先删后写 / 事务，独立可复用 |
 | `engin_cli/analytics.py` | 看板取数参考实现（BI 照抄这里） |
 | `engin_cli/loader.py` | 幂等写入 |
 | `engin_cli/pipeline.py` | 编排 |

@@ -16,6 +16,8 @@
 · **结果用 PushResult / PushReport 返回**，和 HTTP 推送同一套：跑批报告、执行记录、推送记录页都照常显示；
   每张表在推送记录文件里记一行（result = ok / db_error / dry_run），不记密码。
 · **连不上就停**：第一张表连接失败，后面的表不再试（同 HTTP 推送「地址连不上」），可之后补推。
+· **连接、SSH 隧道、先删后写都用 dbutils 组件**（engin_cli/dbutils/）：这里只管「写哪些表、删什么范围、
+  写哪些列、结果怎么报」。数据源开了 SSH 隧道（ssh_enabled）就经跳板机连，私钥是页面上传的内容（不落文件）。
 """
 
 from __future__ import annotations
@@ -26,39 +28,27 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
-from .db import MySQL
+from .dbutils import ConnectError, Database, DataSourceConfig
 from .loader import delete_scope, scenic_key
 from .pusher import PushReport, PushResult, write_push_log
-from .settings import DBConfig
 
 log = logging.getLogger(__name__)
 
 CONNECT_TIMEOUT = 10
 
 
-def db_config(ds: Dict[str, Any], connect_timeout: int = CONNECT_TIMEOUT) -> DBConfig:
-    """数据源（页面上填的）→ 连接配置。"""
-    return DBConfig(host=str(ds.get("host") or "").strip(), port=int(ds.get("port") or 3306),
-                    user=str(ds.get("user") or "").strip(), password=str(ds.get("password") or ""),
-                    database=str(ds.get("database") or "").strip(),
-                    connect_timeout=connect_timeout)
+def open_db(ds: Dict[str, Any]) -> Database:
+    """数据源（页面上存的 dict）→ dbutils.Database（还没真正连；开了 SSH 隧道就经跳板机连）。"""
+    return Database(DataSourceConfig.from_dict(ds, connect_timeout=CONNECT_TIMEOUT))
 
 
 def describe(ds: Dict[str, Any]) -> str:
-    """「名称（host:port/库）」，日志 / 推送记录里用，不含账号密码。"""
-    where = f"{ds.get('host', '')}:{ds.get('port') or 3306}/{ds.get('database', '')}"
-    return f"{ds['name']}（{where}）" if ds.get("name") else where
+    """「名称（host:port/库，经 SSH user@跳板机:端口）」，日志 / 推送记录里用，不含密码和密钥。"""
+    return DataSourceConfig.from_dict(ds).describe()
 
 
 def target_table(ds: Dict[str, Any], table: str) -> str:
     return str((ds.get("table_names") or {}).get(table) or "").strip() or table
-
-
-def table_columns(db, database: str, table: str) -> List[str]:
-    """目标库里这张表有哪些列；表不存在返回 []。"""
-    df = db.query_df("select column_name from information_schema.columns "
-                     "where table_schema=%s and table_name=%s order by ordinal_position", (database, table))
-    return [str(c) for c in df.iloc[:, 0].tolist()] if not df.empty else []
 
 
 def _delete_cols(table: str) -> List[str]:
@@ -66,24 +56,27 @@ def _delete_cols(table: str) -> List[str]:
             else "publish_time"]
 
 
-def check(ds: Dict[str, Any], tables: Dict[str, List[str]], connect=None) -> Dict[str, Any]:
+def check(ds: Dict[str, Any], tables: Dict[str, List[str]], opener=None) -> Dict[str, Any]:
     """测试连接（页面「测试」按钮）：连得上吗，每张表在目标库里有没有、缺哪些列。
 
-    tables：{本地表名: 引擎会写的列}；connect(DBConfig) → 连接对象，测试里传假的。
-    出参：{"ok", "error", "tables": [{"table", "target", "exists", "missing", "writable", "message"}]}
+    tables：{本地表名: 引擎会写的列}；opener(数据源) → 连接对象（不传 = open_db，测试里传假的）。
+    出参：{"ok", "error", "via", "tables": [{"table", "target", "exists", "missing", "writable", "message"}]}
     """
-    connect = connect or MySQL
-    db = connect(db_config(ds))
-    out: Dict[str, Any] = {"ok": False, "error": "", "tables": []}
+    db = (opener or open_db)(ds)
+    out: Dict[str, Any] = {"ok": False, "error": "", "via": "", "tables": []}
     try:
         try:
             db.connect()
+        except ConnectError as e:
+            out["error"] = str(e)
+            return out
         except Exception as e:                       # noqa: BLE001 —— 连接失败原样告诉页面
             out["error"] = f"连不上：{_short(e)}"
             return out
+        out["via"] = "经 SSH 隧道" if ds.get("ssh_enabled") else "直连"
         for table, cols in tables.items():
             tgt = target_table(ds, table)
-            have = table_columns(db, ds.get("database", ""), tgt)
+            have = db.columns(tgt)
             item = {"table": table, "target": tgt, "exists": bool(have), "missing": [], "writable": False,
                     "message": ""}
             if not have:
@@ -138,7 +131,7 @@ def write_table(db, ds: Dict[str, Any], table: str, df: pd.DataFrame, *, setting
         r.elapsed = time.time() - t0
         return r
     try:
-        have = table_columns(db, ds.get("database", ""), tgt)
+        have = db.columns(tgt)
         if not have:
             raise LookupError(f"目标库 {ds.get('database', '')} 里没有表 {tgt}")
         need = [c for c in _delete_cols(table) if c not in have]
@@ -156,17 +149,14 @@ def write_table(db, ds: Dict[str, Any], table: str, df: pd.DataFrame, *, setting
                                                          f"{len(dates)} 天的旧行，再写入 {len(df):,} 行"})
             r.rows, r.batches = len(df), (len(df) + size - 1) // size
         else:
-            deleted, rows = db.replace_rows(tgt, df[cols], where, params, batch_size=size,
-                                            database=ds.get("database") or None)
+            deleted, rows = db.replace_rows(tgt, df[cols], (where, params), batch_size=size)
             r.rows, r.batches = rows, (rows + size - 1) // size if rows else 0
             rec.update({"result": "ok", "rows": rows, "deleted": deleted,
                         "response": f"删除 {deleted:,} 行，写入 {rows:,} 行"})
     except Exception as e:                           # noqa: BLE001 —— 一张表写失败不影响其他表
-        r.error = _short(e)
+        r.error = str(e) if isinstance(e, ConnectError) else _short(e)
         r.failed_batches = 1
-        connect_err = type(e).__name__ == "OperationalError" and str(getattr(e, "args", [0])[0]) in (
-            "2003", "2005", "2006", "2013", "1045", "1049")
-        r.unreachable = connect_err
+        r.unreachable = isinstance(e, ConnectError)  # 连不上（含 SSH 隧道）：后面的表不再试
         rec.update({"result": "db_error", "error": r.error, "rows": 0})
     r.elapsed = time.time() - t0
     rec["elapsed"] = round(r.elapsed, 3)
@@ -175,14 +165,14 @@ def write_table(db, ds: Dict[str, Any], table: str, df: pd.DataFrame, *, setting
 
 
 def write_all(tables: Dict[str, pd.DataFrame], *, settings, scope=None,
-              progress_factory=None, connect=None) -> PushReport:
+              progress_factory=None, opener=None) -> PushReport:
     """推送方式 = 写入数据源时 push_all 走这里。出参同 push_all（PushReport）。"""
     rep = PushReport()
     ds = dict(getattr(settings, "push_db", None) or {})
     only = getattr(settings, "push_tables", None)
     only = set(only) if only else None
     todo = [(t, df) for t, df in tables.items() if only is None or t in only]
-    db = (connect or MySQL)(db_config(ds))
+    db = (opener or open_db)(ds)
     try:
         for k, (table, df) in enumerate(todo):
             if df is None:

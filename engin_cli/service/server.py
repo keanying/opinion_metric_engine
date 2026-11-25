@@ -249,7 +249,7 @@ class App:
         self.runner = runner or Runner(self.store, self.data_dir)
         self.scheduler = Scheduler(self.store, self.runner) if scheduler_enabled else None
         self._db_factory = db_factory
-        self._ds_connect = None                   # 测试数据源连接用的连接工厂（None = MySQL；测试里换成假的）
+        self._ds_opener = None                    # 测试数据源连接：数据源 → 连接对象（None = sink_db.open_db；测试里换成假的）
         self._pool = None                         # 指标库 / 用户表连接池（第一次用时建）
         self._push_cache: Dict[str, tuple] = {}    # 推送记录文件 → ((大小, 修改时间), 解析好的记录)
         # 登录：用 SMC 系统的用户 / 会话表，在源表库（src_database，没配就是 database），见 auth.py
@@ -547,7 +547,7 @@ class App:
             d = normalize_datasource({**(old or {}), **{k: v for k, v in body.items() if v not in (None, "")}}, old)
         except ValueError as e:
             raise ApiError(400, str(e))
-        return check(d, self._ds_tables(), connect=self._ds_connect)
+        return check(d, self._ds_tables(), opener=self._ds_opener)
 
     def _push_records(self, path: str) -> List[dict]:
         """解析好的推送记录（新的在前）。按文件大小 + 修改时间缓存：翻页、筛选不用每次把整天的文件重读重解析一遍。"""

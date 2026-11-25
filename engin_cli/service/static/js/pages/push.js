@@ -60,18 +60,40 @@ export default {
     const curDs = computed(() => (view.value?.datasources || []).find(d => d.id === form.datasource))
     // 打开「写入数据源」时还没选：默认选第一个
     watch(() => form.db_enabled, on => { if (on && !curDs.value && view.value?.datasources.length) form.datasource = view.value.datasources[0].id })
+    // 密码 / 私钥类字段页面上不回显：留空 = 不改；ssh_key 只有新选了文件才带上，clear_* = 清掉
+    const SECRETS = ['password', 'ssh_password', 'ssh_key', 'ssh_key_passphrase']
     const blankDs = () => ({ id: '', name: '', host: '', port: 3306, user: '', password: '', database: '', remark: '',
-                             table_names: Object.fromEntries(TABLES.map(t => [t.table, ''])), has_password: false })
+                             table_names: Object.fromEntries(TABLES.map(t => [t.table, ''])), has_password: false,
+                             ssh_enabled: false, ssh_host: '', ssh_port: 22, ssh_user: '', ssh_password: '', ssh_key: '',
+                             ssh_key_name: '', ssh_key_passphrase: '', ssh_key_fingerprint: '', clear: {} })
     const openDs = d => {
       dsTest.value = null
-      dsEdit.value = d ? { ...blankDs(), ...d, password: '',
+      dsEdit.value = d ? { ...blankDs(), ...d, ...Object.fromEntries(SECRETS.map(k => [k, ''])), clear: {},
                            table_names: Object.fromEntries(TABLES.map(t => [t.table, (d.table_names || {})[t.table] || ''])) }
                        : blankDs()
     }
+    // 选私钥文件：浏览器里读成文本，跟表单一起提交（服务端校验、存系统表，之后页面只显示文件名和指纹）
+    const pickKey = ev => {
+      const f = ev.target.files && ev.target.files[0]; ev.target.value = ''
+      if (!f) return
+      if (f.size > 32 * 1024) return notify('文件太大，不像私钥', 'err')
+      const r = new FileReader()
+      r.onload = () => { Object.assign(dsEdit.value, { ssh_key: String(r.result || ''), ssh_key_name: f.name, ssh_key_fingerprint: '' })
+                         delete dsEdit.value.clear.ssh_key }
+      r.readAsText(f)
+    }
+    const clearKey = () => { Object.assign(dsEdit.value, { ssh_key: '', ssh_key_name: '', ssh_key_fingerprint: '',
+                                                          has_ssh_key: false, ssh_key_passphrase: '' })
+                             dsEdit.value.clear.ssh_key = dsEdit.value.clear.ssh_key_passphrase = true }
     const closeDs = () => { dsEdit.value = null; dsTest.value = null }      // 编辑框里测的结果跟着关掉，别再弹出来
     const dsBody = () => { const e = dsEdit.value
-      return { id: e.id || undefined, name: e.name, host: e.host, port: e.port, user: e.user, password: e.password,
-               database: e.database, remark: e.remark, table_names: e.table_names } }
+      const out = { id: e.id || undefined, name: e.name, host: e.host, port: e.port, user: e.user, password: e.password,
+                    database: e.database, remark: e.remark, table_names: e.table_names,
+                    ssh_enabled: e.ssh_enabled, ssh_host: e.ssh_host, ssh_port: e.ssh_port, ssh_user: e.ssh_user,
+                    ssh_password: e.ssh_password, ssh_key: e.ssh_key, ssh_key_name: e.ssh_key_name,
+                    ssh_key_passphrase: e.ssh_key_passphrase }
+      for (const k of Object.keys(e.clear || {})) out['clear_' + k] = true
+      return out }
     const saveDs = async () => {
       dsSaving.value = true
       try {
@@ -109,7 +131,8 @@ export default {
     const ymd = s => s ? `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6)}` : ''
     return { view, form, saving, save, setMaster, logs, q, loadLogs, loadMoreLogs, moreLogs, loadingLogs, reset, re, toggleRe, doRepush,
              parts, total, okRate, cols, detail, ymd, TABLES, TABLE_LABEL, PUSH_RESULT, fmtNum, todayYmd,
-             dsEdit, dsSaving, dsTest, dsTesting, curDs, openDs, closeDs, saveDs, testDs, delDs, dsState, mapText, dsCols }
+             dsEdit, dsSaving, dsTest, dsTesting, curDs, openDs, closeDs, saveDs, testDs, delDs, dsState, mapText, dsCols,
+             pickKey, clearKey }
   },
   template: `
   <div v-if="view">
@@ -203,7 +226,9 @@ export default {
       <STable v-if="view.datasources.length" :columns="dsCols" :data="view.datasources" row-key="id">
         <template #name="{ row }"><span class="s-name"><Avatar square icon="db" :color="dsState(row) === '正在写入' ? 'green' : 'light-blue'"/>
           <span class="s-ell"><b>{{ row.name }}</b><small>{{ dsState(row) || row.remark || '' }}</small></span></span></template>
-        <template #addr="{ row }"><span class="mono s-ell">{{ row.host }}:{{ row.port }}/{{ row.database }}</span></template>
+        <template #addr="{ row }"><span class="s-ell"><span class="mono">{{ row.host }}:{{ row.port }}/{{ row.database }}</span>
+          <small v-if="row.ssh_enabled" :title="'经 SSH 跳板机 ' + row.ssh_user + '@' + row.ssh_host + ':' + row.ssh_port + (row.ssh_key_name ? '，私钥 ' + row.ssh_key_name : '')">
+            <Icon name="shield" :size="11" :sw="2.4"/> 经 SSH {{ row.ssh_user }}@{{ row.ssh_host }}:{{ row.ssh_port }}</small></span></template>
         <template #user="{ row }">{{ row.user }}<small v-if="!row.has_password" class="t-orange"> 无密码</small></template>
         <template #map="{ row }">{{ mapText(row) }}</template>
         <template #op="{ row }"><span class="op-btns">
@@ -227,6 +252,27 @@ export default {
                 :placeholder="dsEdit.has_password ? '已设置（留空不改）' : ''" /></div>
             <div class="frow"><label>库名</label><input v-model="dsEdit.database" placeholder="要写入的数据库" /></div>
             <div class="frow"><label>备注</label><input v-model="dsEdit.remark" placeholder="选填" /></div>
+            <div class="ds-ssh" :class="{on: dsEdit.ssh_enabled}">
+              <div class="frow"><label>SSH 隧道</label><Switch v-model="dsEdit.ssh_enabled"/>
+                <span class="hint">{{ dsEdit.ssh_enabled ? '先连 SSH 跳板机，再从跳板机连数据库' : '数据库能直接连就不用开' }}</span>
+                <Tip wide text="数据库不对外开放、只能从某台服务器（跳板机）访问时打开：先用 SSH 连上跳板机，再经它连数据库。上面的「地址 / 端口」要填从跳板机上看到的数据库地址（比如云数据库的内网地址）。私钥和 SSH 密码至少填一个；私钥上传后保存在系统表里，页面上只显示文件名和指纹"/></div>
+              <template v-if="dsEdit.ssh_enabled">
+                <div class="frow"><label>SSH 地址</label><input v-model="dsEdit.ssh_host" placeholder="跳板机地址，如 10.1.1.8" />
+                  <label class="l2">端口</label><input v-model.number="dsEdit.ssh_port" class="w100" /></div>
+                <div class="frow"><label>SSH 用户</label><input v-model="dsEdit.ssh_user" autocomplete="off" placeholder="如 mysql_connector" /></div>
+                <div class="frow"><label>私钥文件</label>
+                  <span v-if="dsEdit.ssh_key || dsEdit.has_ssh_key" class="key-chip"><Icon name="shield" :size="13" :sw="2.2"/>
+                    <b>{{ dsEdit.ssh_key_name || '已上传的私钥' }}</b>
+                    <small>{{ dsEdit.ssh_key ? '新选的，保存后生效' : (dsEdit.ssh_key_fingerprint || '已上传') }}</small>
+                    <a title="去掉私钥" @click="clearKey">×</a></span>
+                  <label class="btn light file-btn"><Icon name="file" :size="13"/>{{ dsEdit.ssh_key || dsEdit.has_ssh_key ? '换一个' : '选择文件' }}
+                    <input type="file" accept=".pem,.key,.txt,*" @change="pickKey" /></label></div>
+                <div class="frow"><label>密钥密码</label><input v-model="dsEdit.ssh_key_passphrase" type="password" autocomplete="new-password"
+                    :placeholder="dsEdit.has_ssh_key_passphrase ? '已设置（留空不改）' : '私钥有密码保护才填'" /></div>
+                <div class="frow"><label>SSH 密码</label><input v-model="dsEdit.ssh_password" type="password" autocomplete="new-password"
+                    :placeholder="dsEdit.has_ssh_password ? '已设置（留空不改）' : '用私钥登录就不用填'" /></div>
+              </template>
+            </div>
             <div class="frow ds-map-head"><label>表名对应</label><span class="hint">目标库里的表名，留空 = 和本地同名</span></div>
             <div v-for="t in TABLES" :key="t.key" class="frow ds-map"><label :title="t.table">{{ t.label }}</label>
               <input v-model="dsEdit.table_names[t.table]" :placeholder="t.table" /></div>
